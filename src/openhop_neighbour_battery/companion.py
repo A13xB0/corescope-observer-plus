@@ -38,6 +38,7 @@ ADV_TYPE_REPEATER = 2
 PATH_SIZE = 64
 NAME_SIZE = 32
 OUT_PATH_UNKNOWN = 0xFF
+MIN_REPLY_WAIT = 15.0
 
 
 class CompanionError(Exception):
@@ -187,7 +188,9 @@ class CompanionClient:
         if frame[1] != 0:
             raise FloodSent("the companion sent the request as a flood")
         (timeout_ms,) = struct.unpack_from("<I", frame, 6)
-        return max(5.0, min(30.0, timeout_ms / 1000.0 + 2.0))
+        # The hint covers airtime both ways; a weak or busy neighbour can take
+        # longer, so allow at least MIN_REPLY_WAIT.
+        return max(MIN_REPLY_WAIT, min(45.0, timeout_ms / 1000.0 + 5.0))
 
     # -- commands -----------------------------------------------------------
 

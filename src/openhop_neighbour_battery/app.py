@@ -244,6 +244,19 @@ class App:
                     if kind == "poll_now" and readings:
                         self.queue(readings)
                         self.flush()
+                elif kind == "check_now":
+                    self.refresh()
+                    readings = self.poll(self.settings.targets, force=True)
+                    if readings:
+                        self.queue(readings)
+                        self.flush()
+                    codes = [self.state.node(n).get("code") or "?" for n in self.settings.targets]
+                    result["readings"] = len(readings)
+                    result["message"] = (
+                        f"{len(readings)} of {len(self.settings.targets)} read"
+                        + (f" ({', '.join(sorted(set(c for c in codes if c not in ('ok', 'no_battery'))))} for the rest)"
+                           if len(readings) < len(self.settings.targets) else "")
+                    )
                 elif kind == "refresh":
                     self.refresh()
                 else:

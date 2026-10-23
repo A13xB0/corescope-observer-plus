@@ -189,6 +189,23 @@
     }
   }
 
+  // Poll every selected neighbour now (saved selection), then publish.
+  async function checkNow() {
+    if (dirty) { notice("Save first, so the check uses your selection.", "warn"); return; }
+    if (!(config.targets || []).length) { notice("Select at least one neighbour first.", "warn"); return; }
+    notice(`Checking ${config.targets.length} neighbour(s). Each can take up to a minute…`);
+    $("check-now").disabled = true;
+    try {
+      const id = await request("check_now");
+      const a = await waitForAction("check_now", id, 120000 * config.targets.length);
+      notice(a.ok ? `Checked: ${a.message}` : a.message, a.ok && a.readings ? "good" : "bad");
+    } catch (e) {
+      notice(e.message, "bad");
+    } finally {
+      $("check-now").disabled = false;
+    }
+  }
+
   function openLogin(nodeId) {
     loginTarget = nodeId;
     const n = (runtime.nodes || []).find((x) => x.node_id === nodeId);
@@ -215,6 +232,7 @@
     if (ev.target.matches("input, select")) dirty = true;
   });
   $("connect").addEventListener("click", connect);
+  $("check-now").addEventListener("click", checkNow);
   $("copy-key").addEventListener("click", async () => {
     const key = ($("companion-key").dataset.key || "").toUpperCase();
     if (!key) return;

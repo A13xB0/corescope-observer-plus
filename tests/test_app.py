@@ -118,3 +118,32 @@ def test_settings_validation():
     assert s.interval_minutes == 30
     assert s.brokers == ["A"]
     assert s.enabled is False
+
+
+def test_check_now_polls_every_target_and_publishes(tmp_path, monkeypatch):
+    fake = FakeCompanion()
+    published = []
+
+    class P:
+        def __init__(self, cfg):
+            pass
+
+        def publish(self, broker, readings):
+            published.append(list(readings))
+
+    monkeypatch.setattr(app_mod, "Publisher", P)
+    try:
+        a, _ = make_app(tmp_path, fake, targets=[NODE], brokers=["ScotMesh"],
+                        requests=[{"id": "c1", "type": "check_now"}])
+        monkeypatch.setattr(a, "refresh", lambda: None)
+        a.ohcfg = load_openhop_config(tmp_path / "config.yaml")
+        a.check = {"companion": {"ok": True}, "publish": {"ok": True}}
+        a.candidates = [Neighbour(NODE, "West Lomond", -5.0, -119, 0, True)]
+        # Polled now although polling is off and the node was just read.
+        a.state.node(NODE)["last_attempt"] = 10 ** 12
+        a.run_requests()
+        assert published and published[0][0]["node_id"] == NODE
+        assert a.actions["check_now"]["readings"] == 1
+        assert a.actions["check_now"]["message"] == "1 of 1 read"
+    finally:
+        fake.close()

@@ -60,7 +60,10 @@
     </section>
 
     <section class="card" aria-labelledby="nodes-h">
-      <h2 id="nodes-h">Neighbours <span id="selected-count" class="muted small"></span></h2>
+      <div class="card-head">
+        <h2 id="nodes-h">Neighbours <span id="selected-count" class="muted small"></span></h2>
+        <button id="check-now" class="button ghost" type="button">Check now</button>
+      </div>
       <table class="table">
         <thead><tr><th scope="col"></th><th scope="col">Repeater</th><th scope="col">SNR</th><th scope="col">Heard</th><th scope="col">Login</th><th scope="col">Battery</th><th scope="col"></th></tr></thead>
         <tbody id="nodes"></tbody>
