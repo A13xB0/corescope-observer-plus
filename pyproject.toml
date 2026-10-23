@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openhop-neighbour-battery-plugin"
+version = "0.1.0"
+description = "openHop plugin: battery readings from directly heard repeaters, published as this repeater's observer"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+  "openhop_core>=1.1.3,<2",
+  "paho-mqtt>=2.1,<3",
+  "requests>=2.31,<3",
+  "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+openhop-neighbour-battery = "openhop_neighbour_battery.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/openhop/plugins/openhop.neighbour_battery" = [
+  "openhop-plugin.json",
+  "config.default.json",
+]
+"share/openhop/plugins/openhop.neighbour_battery/ui" = [
+  "ui/index.html",
+  "ui/app.js",
+  "ui/styles.css",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

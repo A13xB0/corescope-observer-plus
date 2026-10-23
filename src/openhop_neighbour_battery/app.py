@@ -1,0 +1,319 @@
+"""The plugin's work loop: settings, self-check, polling, publishing, status."""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from pathlib import Path
+
+from . import __version__
+from .companion import CompanionClient
+from .openhop import (
+    Neighbour,
+    OpenHopAPI,
+    OpenHopConfig,
+    OpenHopError,
+    companion_port,
+    load_openhop_config,
+)
+from .poller import NO_BATTERY, OK, is_due, poll_one, reading, record, utc_iso
+from .publisher import Publisher
+from .settings import TRANSIENT_KEYS, Settings, parse, read_raw, write_raw
+from .storage import Secrets, State
+
+LOG = logging.getLogger("openhop.neighbour_battery")
+
+MAX_POLLS_PER_CYCLE = 8
+QUEUE_MAX = 200
+QUEUE_MAX_AGE = 2 * 3600  # CoreScope drops readings older than this
+
+
+class App:
+    def __init__(self, data_dir: Path, *, companion_host: str = "127.0.0.1"):
+        self.data_dir = data_dir
+        self.companion_host = companion_host
+        self.secrets = Secrets(data_dir)
+        self.state = State(data_dir)
+        self.settings = Settings()
+        self.ohcfg: OpenHopConfig | None = None
+        self.check: dict[str, dict] = {}
+        self.candidates: list[Neighbour] = []
+        self.openhop_brokers: dict[str, dict] = {}
+        self.companion_key = ""
+        self.actions: dict[str, dict] = self.state.value.setdefault("actions", {})
+        self._last_refresh = 0.0
+
+    # -- settings ---------------------------------------------------------
+
+    def load_settings(self) -> None:
+        raw = read_raw(self.data_dir)
+        changed = False
+        token = raw.get("api_token_input")
+        if isinstance(token, str) and token.strip():
+            self.secrets.set_api_token(token)
+            LOG.info("API token saved")
+        updates = raw.get("password_updates")
+        if isinstance(updates, dict):
+            for node_id, pw in updates.items():
+                node_id = str(node_id).lower()
+                if len(node_id) == 64:
+                    self.secrets.set_password(node_id, str(pw or ""))
+                    self.state.node(node_id)["password_changed"] = True
+                    LOG.info("login password %s for %s", "set" if pw else "removed", node_id[:8])
+        requests = raw.get("requests")
+        if isinstance(requests, list):
+            self.state.value.setdefault("pending", []).extend(
+                r for r in requests if isinstance(r, dict) and r.get("id")
+            )
+        for k in TRANSIENT_KEYS:
+            if k in raw:
+                raw.pop(k)
+                changed = True
+        if changed:
+            write_raw(self.data_dir, raw)
+            self.state.save()
+        self.settings = parse(raw)
+
+    def api(self) -> OpenHopAPI:
+        return OpenHopAPI(self.settings.openhop_api_url, self.secrets.api_token)
+
+    # -- self-check and openHop data --------------------------------------
+
+    def refresh(self) -> None:
+        """Re-read openHop's config and API; record what works."""
+        check: dict[str, dict] = {}
+        try:
+            self.ohcfg = load_openhop_config(Path(self.settings.openhop_config_path))
+            check["config"] = {"ok": True, "message": "openHop config readable"}
+        except OpenHopError as exc:
+            self.ohcfg = None
+            check["config"] = {"ok": False, "message": str(exc)}
+
+        if not self.secrets.api_token:
+            check["api"] = {"ok": False, "message": "no API token yet: use Connect on the plugin page"}
+        else:
+            try:
+                self.candidates = self.api().zero_hop_repeaters(self.settings.max_age_hours)
+                self.openhop_brokers = self.api().mqtt_status()
+                check["api"] = {"ok": True, "message": f"{sum(n.zero_hop for n in self.candidates)} zero-hop repeaters"}
+            except OpenHopError as exc:
+                check["api"] = {"ok": False, "message": str(exc)}
+
+        port = companion_port(self.ohcfg, self.settings.companion_name) if self.ohcfg else None
+        if port is None:
+            check["companion"] = {"ok": False, "message": f"no companion named {self.settings.companion_name!r} yet: use Connect"}
+        else:
+            try:
+                with CompanionClient(self.companion_host, port) as c:
+                    self.companion_key = c.public_key.hex()
+                check["companion"] = {"ok": True, "message": f"companion reachable on port {port}"}
+            except OSError as exc:
+                check["companion"] = {"ok": False, "message": f"companion port {port}: {exc}"}
+            except Exception as exc:  # noqa: BLE001 - any failure is a failed check
+                check["companion"] = {"ok": False, "message": str(exc)}
+
+        if self.ohcfg:
+            try:
+                Publisher(self.ohcfg)
+                check["publish"] = {"ok": True, "message": "repeater key loaded"}
+            except Exception as exc:  # noqa: BLE001
+                check["publish"] = {"ok": False, "message": f"repeater key unusable: {exc}"}
+        else:
+            check["publish"] = {"ok": False, "message": "needs openHop config"}
+        self.check = check
+        self._last_refresh = time.time()
+
+    def connect(self) -> dict:
+        """Create the plugin's companion identity if openHop has none yet."""
+        if not self.secrets.api_token:
+            raise RuntimeError("no API token")
+        cfg = load_openhop_config(Path(self.settings.openhop_config_path))
+        if companion_port(cfg, self.settings.companion_name) is None:
+            self.api().create_companion(self.settings.companion_name, self.settings.companion_port)
+            message = f"created companion {self.settings.companion_name} on port {self.settings.companion_port}"
+        else:
+            message = f"companion {self.settings.companion_name} already exists"
+        self.refresh()
+        return {"message": message}
+
+    # -- polling ------------------------------------------------------------
+
+    def _neighbour(self, node_id: str) -> Neighbour | None:
+        for n in self.candidates:
+            if n.node_id == node_id:
+                return n
+        return None
+
+    def poll(self, node_ids: list[str], *, force: bool = False) -> list[dict]:
+        """Poll the given targets that are zero-hop now; return payload readings."""
+        if not self.check.get("companion", {}).get("ok") or not self.ohcfg:
+            return []
+        port = companion_port(self.ohcfg, self.settings.companion_name)
+        interval = self.settings.interval_minutes * 60
+        now = time.time()
+        due = []
+        for node_id in node_ids:
+            n = self._neighbour(node_id)
+            st = self.state.node(node_id)
+            if n is None or not n.zero_hop:
+                st["code"] = "not_direct" if n else "not_heard"
+                continue
+            if force or is_due(st, interval, self.secrets.has_password(node_id), now):
+                due.append(n)
+        due.sort(key=lambda n: float(self.state.node(n.node_id).get("last_attempt") or 0))
+        out = []
+        if not due:
+            return out
+        with CompanionClient(self.companion_host, port) as client:
+            for i, n in enumerate(due[:MAX_POLLS_PER_CYCLE]):
+                if i:
+                    time.sleep(self.settings.spacing_seconds)
+                st = self.state.node(n.node_id)
+                pw = self.secrets.password(n.node_id)
+                result = poll_one(client, n, pw, st)
+                record(st, result, bool(pw), time.time())
+                st.pop("password_changed", None)
+                st["name"] = n.name
+                LOG.info("poll %s (%s): %s %s", n.name, n.node_id[:8], result.code,
+                         f"{result.battery_mv} mV" if result.battery_mv is not None else result.detail)
+                if result.code in (OK, NO_BATTERY):
+                    out.append(reading(n, result, time.time()))
+                self.state.save()
+        return out
+
+    # -- publishing ---------------------------------------------------------
+
+    def queue(self, readings: list[dict]) -> None:
+        for name in self.settings.brokers:
+            q = self.state.broker(name).setdefault("queue", [])
+            q.extend(readings)
+
+    def flush(self) -> None:
+        if not self.ohcfg or not self.check.get("publish", {}).get("ok"):
+            return
+        publisher = Publisher(self.ohcfg)
+        brokers = {b.name: b for b in self.ohcfg.brokers}
+        now = time.time()
+        for name in self.settings.brokers:
+            bs = self.state.broker(name)
+            q = [r for r in bs.get("queue", []) if now - _ts(r["sampled_at"]) < QUEUE_MAX_AGE][-QUEUE_MAX:]
+            # One reading per node per message: keep the newest.
+            latest: dict[str, dict] = {}
+            for r in q:
+                latest[r["node_id"]] = r
+            bs["queue"] = list(latest.values())
+            if not bs["queue"]:
+                continue
+            broker = brokers.get(name)
+            if broker is None:
+                bs["last_error"] = "not in openHop's broker list"
+                continue
+            try:
+                publisher.publish(broker, bs["queue"])
+                bs["last_ok"] = now
+                bs["last_count"] = len(bs["queue"])
+                bs["last_error"] = ""
+                bs["queue"] = []
+                LOG.info("published %d reading(s) to %s", bs["last_count"], name)
+            except Exception as exc:  # noqa: BLE001 - kept and retried next tick
+                bs["last_error"] = str(exc)
+                LOG.warning("publish to %s failed: %s", name, exc)
+        self.state.save()
+
+    # -- one tick -------------------------------------------------------------
+
+    def run_requests(self) -> None:
+        pending = self.state.value.get("pending") or []
+        self.state.value["pending"] = []
+        for req in pending:
+            rid, kind = str(req.get("id")), req.get("type")
+            result = {"id": rid, "type": kind, "at": utc_iso(), "ok": True, "message": ""}
+            try:
+                if kind == "connect":
+                    result["message"] = self.connect()["message"]
+                elif kind in ("test_login", "poll_now"):
+                    node_id = str(req.get("node_id") or "").lower()
+                    self.refresh()
+                    readings = self.poll([node_id], force=True)
+                    st = self.state.node(node_id)
+                    result["code"] = st.get("code")
+                    result["role"] = st.get("role", "")
+                    result["battery_mv"] = st.get("battery_mv")
+                    result["message"] = st.get("detail") or st.get("code") or ""
+                    if kind == "poll_now" and readings:
+                        self.queue(readings)
+                        self.flush()
+                elif kind == "refresh":
+                    self.refresh()
+                else:
+                    raise RuntimeError(f"unknown request {kind!r}")
+            except Exception as exc:  # noqa: BLE001
+                result["ok"] = False
+                result["message"] = str(exc)
+            self.actions[kind or "unknown"] = result
+        if pending:
+            self.state.save()
+
+    def tick(self) -> None:
+        self.load_settings()
+        if time.time() - self._last_refresh > 300 or not self.check:
+            self.refresh()
+        self.run_requests()
+        if self.settings.enabled and self.settings.targets:
+            readings = self.poll(self.settings.targets)
+            if readings:
+                self.queue(readings)
+        self.flush()
+        self.write_runtime()
+
+    def write_runtime(self) -> None:
+        selected = set(self.settings.targets)
+        nodes = []
+        for n in self.candidates:
+            st = self.state.value["nodes"].get(n.node_id, {})
+            nodes.append({
+                "node_id": n.node_id, "name": n.name, "snr": n.snr, "rssi": n.rssi,
+                "last_seen": n.last_seen, "zero_hop": n.zero_hop, "selected": n.node_id in selected,
+                "password_set": self.secrets.has_password(n.node_id),
+                "code": st.get("code"), "detail": st.get("detail"), "role": st.get("role"),
+                "battery_mv": st.get("battery_mv"), "last_success": st.get("last_success"),
+                "last_attempt": st.get("last_attempt"),
+            })
+        brokers = []
+        for b in (self.ohcfg.brokers if self.ohcfg else []):
+            bs = self.state.value["brokers"].get(b.name, {})
+            live = self.openhop_brokers.get(b.name, {})
+            brokers.append({
+                "name": b.name, "host": b.host, "format": b.format, "enabled": b.enabled,
+                "openhop_connected": bool((live.get("status") or {}).get("connected")),
+                "selected": b.name in self.settings.brokers,
+                "queued": len(bs.get("queue", [])), "last_ok": bs.get("last_ok"),
+                "last_count": bs.get("last_count"), "last_error": bs.get("last_error", ""),
+            })
+        runtime = {
+            "schema": 1,
+            "plugin_version": __version__,
+            "generated_at": utc_iso(),
+            "self_check": self.check,
+            "token_configured": bool(self.secrets.api_token),
+            "companion": {"name": self.settings.companion_name, "public_key": self.companion_key},
+            "repeater": {"name": self.ohcfg.node_name if self.ohcfg else "",
+                         "iata": self.ohcfg.iata_code if self.ohcfg else ""},
+            "nodes": nodes,
+            "brokers": brokers,
+            "actions": self.actions,
+        }
+        path = self.data_dir / "runtime.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(runtime, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(path)
+
+
+def _ts(iso: str) -> float:
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0

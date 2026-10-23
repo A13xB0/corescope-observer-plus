@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "openhop.neighbour_battery",
+  "name": "Neighbour Battery",
+  "version": "0.1.0",
+  "description": "Reads the battery of the repeaters this node hears directly and publishes it to MQTT as this repeater's observer.",
+  "runtime": {
+    "type": "python",
+    "entrypoint": "openhop-neighbour-battery"
+  },
+  "ui": {
+    "type": "application",
+    "entry": "ui/index.html"
+  },
+  "config": {
+    "defaults": {
+      "openhop_api_url": "http://127.0.0.1:8000",
+      "openhop_config_path": "/etc/openhop_repeater/config.yaml",
+      "companion_name": "NeighbourBattery",
+      "companion_port": 5003,
+      "enabled": false,
+      "interval_minutes": 60,
+      "targets": [],
+      "brokers": [],
+      "max_age_hours": 24,
+      "spacing_seconds": 20
+    }
+  }
+}

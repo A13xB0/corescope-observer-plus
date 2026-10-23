@@ -1,0 +1,86 @@
+"""The plugin's own settings: data/config.json, edited from the plugin page."""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+KEY_RE = re.compile(r"^[0-9a-f]{64}$")
+INTERVALS = (30, 60, 180, 360)
+
+DEFAULTS = {
+    "openhop_api_url": "http://127.0.0.1:8000",
+    "openhop_config_path": "/etc/openhop_repeater/config.yaml",
+    "companion_name": "NeighbourBattery",
+    "companion_port": 5003,
+    "enabled": False,
+    "interval_minutes": 60,
+    "targets": [],
+    "brokers": [],
+    "max_age_hours": 24,
+    "spacing_seconds": 20,
+}
+
+# Written by the plugin page, consumed and cleared by the plugin. Secrets go
+# straight to secrets.json so they never stay in config.json.
+TRANSIENT_KEYS = ("api_token_input", "password_updates", "requests")
+
+
+@dataclass
+class Settings:
+    openhop_api_url: str = DEFAULTS["openhop_api_url"]
+    openhop_config_path: str = DEFAULTS["openhop_config_path"]
+    companion_name: str = DEFAULTS["companion_name"]
+    companion_port: int = DEFAULTS["companion_port"]
+    enabled: bool = False
+    interval_minutes: int = 60
+    targets: list[str] = field(default_factory=list)
+    brokers: list[str] = field(default_factory=list)
+    max_age_hours: int = 24
+    spacing_seconds: int = 20
+
+
+def parse(raw: dict) -> Settings:
+    s = Settings()
+    s.openhop_api_url = str(raw.get("openhop_api_url") or s.openhop_api_url)
+    s.openhop_config_path = str(raw.get("openhop_config_path") or s.openhop_config_path)
+    s.companion_name = str(raw.get("companion_name") or s.companion_name)[:32]
+    try:
+        s.companion_port = int(raw.get("companion_port") or s.companion_port)
+    except (TypeError, ValueError):
+        pass
+    s.enabled = bool(raw.get("enabled"))
+    try:
+        interval = int(raw.get("interval_minutes") or 60)
+    except (TypeError, ValueError):
+        interval = 60
+    s.interval_minutes = interval if interval in INTERVALS else max(30, interval)
+    s.targets = sorted({str(k).lower() for k in raw.get("targets") or [] if KEY_RE.match(str(k).lower())})
+    s.brokers = [str(b) for b in raw.get("brokers") or [] if isinstance(b, str)]
+    try:
+        s.max_age_hours = max(1, min(168, int(raw.get("max_age_hours") or 24)))
+    except (TypeError, ValueError):
+        pass
+    try:
+        s.spacing_seconds = max(5, min(300, int(raw.get("spacing_seconds") or 20)))
+    except (TypeError, ValueError):
+        pass
+    return s
+
+
+def read_raw(data_dir: Path) -> dict:
+    path = data_dir / "config.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return dict(DEFAULTS)
+    return value if isinstance(value, dict) else dict(DEFAULTS)
+
+
+def write_raw(data_dir: Path, raw: dict) -> None:
+    path = data_dir / "config.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.replace(path)
