@@ -11,6 +11,11 @@
   let dirty = false;
   let passwordUpdates = {};
   let loginTarget = null;
+  let showKey = false; // the companion key is masked until asked for
+
+  // maskKey keeps the first and last four characters, which is enough to
+  // recognise the key without showing it.
+  const maskKey = (k) => (k.length > 8 ? `${k.slice(0, 4)}${"•".repeat(12)}${k.slice(-4)}` : "•".repeat(k.length));
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -112,7 +117,10 @@
     const r = runtime.repeater || {};
     $("repeater-name").textContent = r.name ? `${r.name}${r.iata ? " · " + r.iata : ""}` : "—";
     const key = (runtime.companion || {}).public_key || "";
-    $("companion-key").textContent = key ? key.toUpperCase() : "—";
+    $("companion-key").textContent = key ? (showKey ? key.toUpperCase() : maskKey(key.toUpperCase())) : "—";
+    $("show-key").textContent = showKey ? "Hide" : "Show";
+    $("show-key").setAttribute("aria-pressed", String(showKey));
+    $("show-key").disabled = !key;
     $("companion-key").dataset.key = key;
 
     if (!dirty) {
@@ -206,6 +214,19 @@
     }
   }
 
+  function copyViaTextarea(text) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    if (!ok) throw new Error("copy refused");
+  }
+
   function openLogin(nodeId) {
     loginTarget = nodeId;
     const n = (runtime.nodes || []).find((x) => x.node_id === nodeId);
@@ -233,11 +254,18 @@
   });
   $("connect").addEventListener("click", connect);
   $("check-now").addEventListener("click", checkNow);
+  $("show-key").addEventListener("click", () => { showKey = !showKey; render(); });
   $("copy-key").addEventListener("click", async () => {
     const key = ($("companion-key").dataset.key || "").toUpperCase();
     if (!key) return;
-    try { await navigator.clipboard.writeText(key); notice("Key copied."); }
-    catch (_) { notice(key); }
+    // navigator.clipboard only exists on https; openHop is usually plain http.
+    try {
+      if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(key);
+      else copyViaTextarea(key);
+      notice("Key copied.");
+    } catch (_) {
+      notice("Couldn't copy. Press Show to see the key.", "warn");
+    }
   });
   $("save").addEventListener("click", async () => {
     try {
