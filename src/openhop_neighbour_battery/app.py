@@ -177,7 +177,10 @@ class App:
         now = now or time.time()
         url = self.settings.corescope_url
         c = self._shared_cache
-        if not (c.get("url") == url and now - float(c.get("at") or 0) < 24 * 3600):
+        # A key is cached for 24 h; a miss (CoreScope down or serving none) is
+        # cached only briefly, so a transient failure isn't stuck for a day.
+        ttl = 24 * 3600 if c.get("key") else 300
+        if not (c.get("url") == url and now - float(c.get("at") or 0) < ttl):
             self._shared_cache = {"url": url, "at": now, "key": sk.SharedKey.from_api(fetch_shared_guest_key(url))}
         return self._shared_cache.get("key")
 
