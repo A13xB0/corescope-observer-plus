@@ -314,12 +314,18 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             login_tag = -1
             if not logged_in:
                 # Log in blank so the repeater adds the key as a guest, then
-                # teach it the route back so its replies come direct: a key
-                # freshly added by login has no return path and would flood
-                # every reply (firmware ClientACL.putClient). Both go direct.
+                # teach it the route back so its replies come direct, not
+                # flooded (a key freshly added by login has no return path —
+                # firmware ClientACL.putClient). For a one-hop repeater the
+                # return path is back through the same relay; for a direct
+                # neighbour it is empty (direct).
                 login_body, login_tag = sk.build_login(shared, key, out_path, plen, "")
                 client.send_raw_packet(login_body)
-                client.send_raw_packet(sk.build_route_update(shared, key, out_path, plen))
+                if one_hop:
+                    client.send_raw_packet(sk.build_route_update(
+                        shared, key, out_path, plen, return_path=out_path, return_path_len=plen))
+                else:
+                    client.send_raw_packet(sk.build_route_update(shared, key, out_path, plen))
                 sleep(LOGIN_SETTLE_SECONDS)
                 logged_in = True  # proven by any reply below; reset on no answer
             body, tag = (sk.build_status_request if kind == "status"

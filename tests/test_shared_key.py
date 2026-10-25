@@ -170,6 +170,21 @@ def test_route_update_builds_a_direct_path_packet():
     assert pkt.get_route_type() == 2
 
 
+def test_route_update_one_hop_carries_the_relay_return_path():
+    from openhop_core.protocol.packet import Packet
+    from openhop_neighbour_battery.companion import path_len_byte
+    shared, _ = _shared()
+    rpub = _identity().get_public_key()
+    relay = bytes([0x41, 0x28, 0xa6])  # one 3-byte relay hash
+    plen = path_len_byte(relay, 3)
+    body = sk.build_route_update(shared, rpub, relay, plen, return_path=relay, return_path_len=plen)
+    pkt = Packet()
+    assert pkt.read_from(body[1:])
+    assert pkt.get_route_type() == 2  # direct, through the relay, not flood
+    # The outer path carries the relay the teach is routed through.
+    assert bytes(pkt.path[: pkt.get_path_byte_len()]) == relay
+
+
 def test_route_update_refuses_to_flood():
     shared, _ = _shared()
     rpub = _identity().get_public_key()
