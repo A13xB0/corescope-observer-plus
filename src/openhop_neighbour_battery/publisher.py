@@ -81,10 +81,12 @@ class Publisher:
         self.public_key_hex = self.identity.get_public_key().hex().upper()
         self.timeout = timeout
 
-    def client_id(self, broker: Broker) -> str:
+    def client_id(self, broker: Broker, role: str = "battery") -> str:
         # openHop's own is meshcore_{KEY}_{host}_{format}; a different ID keeps
-        # either connection from kicking the other off.
-        return f"meshcore_{self.public_key_hex}_{broker.host}_battery"
+        # either connection from kicking the other off. Battery and claim use
+        # different roles so a claim and a battery publish in the same tick don't
+        # evict each other (same id => the broker drops the first session).
+        return f"meshcore_{self.public_key_hex}_{broker.host}_{role}"
 
     def publish(self, broker: Broker, readings: list[dict]) -> None:
         """Connect, publish one battery batch at QoS 1, wait for the ack, disconnect."""
@@ -105,16 +107,17 @@ class Publisher:
             "plugin": PLUGIN_TAG,
             "nodes": claims,
         })
-        self._send(broker, _topic(broker, self.cfg, self.public_key_hex, "sharedclaim"), payload)
+        self._send(broker, _topic(broker, self.cfg, self.public_key_hex, "sharedclaim"), payload,
+                   role="claim")
 
-    def _send(self, broker: Broker, topic: str, payload: str) -> None:
+    def _send(self, broker: Broker, topic: str, payload: str, role: str = "battery") -> None:
         """Connect, publish one message at QoS 1, wait for the ack, disconnect."""
         if broker.format not in MC2MQTT_FORMATS and broker.format != "mqtt":
             raise RuntimeError(f"unsupported broker format {broker.format!r}")
 
         client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-            client_id=self.client_id(broker),
+            client_id=self.client_id(broker, role),
             transport=broker.transport,
         )
         if broker.transport == "websockets":

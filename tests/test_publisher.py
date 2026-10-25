@@ -140,7 +140,7 @@ def test_publish_claim_sends_nodes(monkeypatch):
     b = Broker(name="ScotMesh", host="h", port=443, format="meshcoretomqtt")
     captured = {}
     monkeypatch.setattr(p, "_send",
-                        lambda broker, topic, payload: captured.update(topic=topic, payload=json.loads(payload)))
+                        lambda broker, topic, payload, role="battery": captured.update(topic=topic, role=role, payload=json.loads(payload)))
     p.publish_claim(b, [{"node_id": "ab" * 32, "reply_hops": 0},
                         {"node_id": "cd" * 32, "reply_hops": 1, "via": "ef" * 32}])
     assert captured["topic"] == f"meshcore/EDI/{p.public_key_hex}/sharedclaim"
@@ -148,3 +148,4 @@ def test_publish_claim_sends_nodes(monkeypatch):
     assert nodes[0] == {"node_id": "ab" * 32, "reply_hops": 0}
     assert nodes[1]["via"] == "ef" * 32 and nodes[1]["reply_hops"] == 1
     assert captured["payload"]["origin_id"] == p.public_key_hex and captured["payload"]["v"] == 1
+    assert captured["role"] == "claim"
