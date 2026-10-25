@@ -35,6 +35,34 @@
       <p class="muted small">Repeater owners can add this key to their ACL instead of sharing a guest password.</p>
     </section>
 
+    <section class="card" aria-labelledby="shared-h">
+      <div class="card-head">
+        <h2 id="shared-h">Shared guest key</h2>
+        <span id="shared-state" class="pill neutral">Off</span>
+      </div>
+      <p class="muted small">A public guest identity used to poll a repeater, so any observer that hears the reply can feed CoreScope. Opt a repeater in from its Details. It is only ever used with a blank password, and never with admin: the private half is public, so anyone holding the key could log in as it.</p>
+      <div id="shared-set" class="kv">
+        <div><span class="muted">Key</span> <strong id="shared-name">—</strong> <span id="shared-ver" class="muted small"></span> <code id="shared-pub" class="muted">—</code></div>
+      </div>
+      <details id="shared-edit">
+        <summary>Set or replace the key</summary>
+        <p class="muted small">Paste the shared key, or fetch it from CoreScope. The private half is stored on this observer only and never shown again or published.</p>
+        <label for="shared-name-in">Name</label>
+        <input id="shared-name-in" type="text" autocomplete="off" placeholder="CoreScope shared guest">
+        <div class="row">
+          <span><label for="shared-ver-in">Version</label><input id="shared-ver-in" type="number" min="0" step="1" value="1"></span>
+        </div>
+        <label for="shared-pub-in">Public key</label>
+        <input id="shared-pub-in" type="text" autocomplete="off" placeholder="64-character public key" class="mono">
+        <label for="shared-priv-in">Private key</label>
+        <input id="shared-priv-in" type="password" autocomplete="off" placeholder="64- or 128-character private key" class="mono">
+        <div class="actions">
+          <button id="shared-clear" class="button ghost" type="button">Clear key</button>
+          <button id="shared-apply" class="button" type="button">Apply key</button>
+        </div>
+      </details>
+    </section>
+
     <section class="card" aria-labelledby="poll-h">
       <h2 id="poll-h">Polling</h2>
       <div class="options">
@@ -103,6 +131,17 @@
       <label class="check"><input id="remove-password" type="checkbox"> Remove the saved password</label>
       <label class="check"><input id="temp-this" type="checkbox"> <span>Read temperature <span id="temp-last" class="muted small"></span>
         <span class="muted small" style="display:block">Adds a telemetry request after each status request. Chip temperature, on ESP32 and nRF52 boards.</span></span></label>
+      <div id="shared-block" hidden>
+        <label class="check"><input id="shared-this" type="checkbox"> <span><strong>Use the shared guest key here</strong>
+          <span class="muted small" style="display:block">Polls this repeater as the shared guest identity, so other observers can feed CoreScope its readings.</span></span></label>
+        <ul class="consent muted small">
+          <li>Anyone can read its replies. That's the point: other observers feed CoreScope.</li>
+          <li>It is only ever used with a <strong>blank password</strong>.</li>
+          <li><strong>Never give this key admin on any repeater.</strong> If it ever answers as admin, the plugin stops, removes the key's access and tells you.</li>
+        </ul>
+        <p id="shared-admin-warn" class="notice bad small" hidden></p>
+        <p id="shared-pw-warn" class="muted small" hidden>This repeater has a saved password, so the shared key can't be used. Remove the password first.</p>
+      </div>
       <h4>Routes, best first</h4>
       <div class="table-wrap">
       <table class="table">

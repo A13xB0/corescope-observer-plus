@@ -97,3 +97,13 @@ dialog .check { display: flex; gap: 8px; align-items: baseline; }
 @media (max-width: 640px) {
   .card .table th:nth-child(4), .card .table td:nth-child(4) { display: none; }
 }
+
+/* Shared guest key */
+.consent { margin: 8px 0 8px 0; padding-left: 20px; }
+.consent li { margin: 2px 0; }
+.notice.small { padding: 8px 12px; font-size: 13px; }
+details#shared-edit { margin-top: 10px; }
+details#shared-edit summary { cursor: pointer; }
+details#shared-edit input { width: 100%; max-width: 480px; padding: 8px; margin: 4px 0 8px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg); box-sizing: border-box; }
+details#shared-edit input[type=number] { width: 100px; }

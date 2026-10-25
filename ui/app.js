@@ -13,6 +13,7 @@
   let tempTargets = null; // pending per-repeater temperature choices (a Set), null = unchanged
   let detailsTarget = null;
   let showKey = false; // the companion key is masked until asked for
+  let sharedPrivate = null; // pending shared-key private half to save (write-only), null = unchanged
 
   // maskKey keeps the first and last four characters, which is enough to
   // recognise the key without showing it.
@@ -113,6 +114,7 @@
   const routeName = (r) => (r.hops ? `1 hop ${esc(r.label)}` : "Direct");
   const KEY_RE = /^[0-9a-f]{64}$/;
   const manualList = () => config.manual_repeaters || [];
+  const sharedTargets = () => new Set(config.shared_key_targets || []);
   const snrText = (snr) => (snr == null ? "" : `SNR ${snr > 0 ? "+" : ""}${Number(snr).toFixed(1)} dB`);
 
   function routeCell(n) {
@@ -160,6 +162,15 @@
     return '<span class="muted">—</span>';
   }
 
+  // A small badge showing how a repeater is polled: under the shared key, or
+  // stopped because it answered the key as admin.
+  function keyBadge(n) {
+    if (n.shared_admin_seen) return ' · <span class="pill bad" title="Answered the shared key as admin; shared key stopped here">admin!</span>';
+    if (n.key_mode === "shared") return ' · <span class="pill good" title="Polled under the shared guest key">shared</span>';
+    if (n.shared_opt_in) return ' · <span class="muted small" title="Opted in, but the shared key is not usable here yet">shared (off)</span>';
+    return "";
+  }
+
   function render() {
     $("version").textContent = runtime.plugin_version ? `v${runtime.plugin_version}` : "";
     const checks = runtime.self_check || {};
@@ -190,6 +201,19 @@
     const showTemp = tempSet().size > 0;
     document.querySelectorAll(".temp-col").forEach((el) => { el.hidden = !showTemp; });
 
+    const sk = runtime.shared_key || {};
+    const skPill = $("shared-state");
+    skPill.textContent = sk.configured ? (`${(sk.targets || []).length} repeater${(sk.targets || []).length === 1 ? "" : "s"}`) : "Off";
+    skPill.className = "pill " + (sk.configured ? "good" : "neutral");
+    $("shared-name").textContent = sk.name || (sk.configured ? "shared guest" : "not set");
+    $("shared-ver").textContent = sk.configured ? `· v${sk.version || 0}` : "";
+    $("shared-pub").textContent = sk.public ? maskKey(sk.public.toUpperCase()) : "—";
+    if (!dirty) {
+      $("shared-name-in").value = config.shared_key_name || "";
+      $("shared-ver-in").value = String(config.shared_key_version || 1);
+      $("shared-pub-in").value = config.shared_key_public || "";
+    }
+
     // While editing, keep what's ticked on screen rather than the saved lists.
     const ticked = (attr, saved) => {
       const els = [...document.querySelectorAll(`[data-${attr}]`)];
@@ -213,7 +237,7 @@
       const ok = reachable(n);
       return `<tr class="${ok ? "" : "dim"}">
         <td><input type="checkbox" data-node="${esc(n.node_id)}" ${chosen.has(n.node_id) ? "checked" : ""} ${ok ? "" : "disabled"} aria-label="Poll ${esc(n.name)}"></td>
-        <td><strong>${esc(n.name)}</strong><div class="muted small mono">${esc(n.node_id.slice(0, 8))}…${n.uptime_secs ? ` · up ${Math.floor(n.uptime_secs / 86400)} d` : ""}</div></td>
+        <td><strong>${esc(n.name)}</strong><div class="muted small mono">${esc(n.node_id.slice(0, 8))}…${n.uptime_secs ? ` · up ${Math.floor(n.uptime_secs / 86400)} d` : ""}${keyBadge(n)}</div></td>
         <td>${routeCell(n)}</td>
         <td>${ago(n.last_seen)}</td>
         <td>${ok || n.role ? loginCell(n) : ""}</td>
@@ -318,6 +342,22 @@
     $("temp-this").checked = tempSet().has(nodeId);
     $("temp-last").textContent = n.temperature_c != null ? `Last: ${Number(n.temperature_c).toFixed(1)} °C, ${ago(n.temp_at)}`
       : n.temp_misses >= 3 ? "None reported so far" : "";
+
+    // Shared-key opt-in: only when a key is configured. A saved password blocks
+    // it; an earlier admin answer stops it until the operator clears the flag.
+    const sk = runtime.shared_key || {};
+    const pwSet = pending !== undefined ? !!pending : n.password_set;
+    $("shared-block").hidden = !sk.configured;
+    $("shared-this").checked = sharedTargets().has(nodeId);
+    $("shared-this").disabled = pwSet || n.shared_admin_seen;
+    $("shared-pw-warn").hidden = !pwSet;
+    const adminWarn = $("shared-admin-warn");
+    if (n.shared_admin_seen) {
+      adminWarn.hidden = false;
+      adminWarn.textContent = `This repeater answered the shared key as ADMIN. The shared key is stopped here and the key's access was ${n.shared_admin_removed ? "removed automatically" : "NOT removed — ask the owner to run setperm 0"}.`;
+    } else {
+      adminWarn.hidden = true;
+    }
     const routes = orderedRoutes(n);
     $("routes").innerHTML = routes.map((r, i) => {
       const last = r.key === n.last_route ? (n.code === "ok" ? '<span class="pill good">answered</span>' : '<span class="pill bad">no answer</span>')
@@ -347,6 +387,13 @@
     const temps = new Set(tempSet());
     if ($("temp-this").checked) temps.add(detailsTarget); else temps.delete(detailsTarget);
     tempTargets = temps;
+    // Shared-key opt-in. Removing a saved password and opting in at once is
+    // fine: the save sends the password removal too, so the gate clears.
+    if (!$("shared-this").disabled) {
+      const targets = sharedTargets();
+      if ($("shared-this").checked) targets.add(detailsTarget); else targets.delete(detailsTarget);
+      config.shared_key_targets = [...targets];
+    }
     dirty = true;
     render();
     notice("Save to apply the changes.");
@@ -400,6 +447,41 @@
 
   $("connect").addEventListener("click", connect);
   $("check-now").addEventListener("click", checkNow);
+
+  $("shared-apply").addEventListener("click", async () => {
+    const name = $("shared-name-in").value.trim();
+    const version = Math.max(0, Number($("shared-ver-in").value) || 0);
+    const pub = $("shared-pub-in").value.trim().toLowerCase();
+    const priv = $("shared-priv-in").value.trim().toLowerCase();
+    if (!KEY_RE.test(pub)) { notice("The public key must be 64 hex characters.", "warn"); return; }
+    if (!/^([0-9a-f]{64}|[0-9a-f]{128})$/.test(priv)) { notice("The private key must be 64 or 128 hex characters.", "warn"); return; }
+    try {
+      config.shared_key_name = name;
+      config.shared_key_version = version;
+      config.shared_key_public = pub;
+      sharedPrivate = priv;
+      collect();
+      await saveConfig({ shared_key_private_input: priv,
+        ...(Object.keys(passwordUpdates).length ? { password_updates: passwordUpdates } : {}) });
+      passwordUpdates = {}; tempTargets = null; sharedPrivate = null; dirty = false;
+      $("shared-priv-in").value = "";
+      notice("Shared key saved.", "good");
+    } catch (e) { notice(e.message, "bad"); }
+  });
+
+  $("shared-clear").addEventListener("click", async () => {
+    try {
+      config.shared_key_name = "";
+      config.shared_key_version = 0;
+      config.shared_key_public = "";
+      sharedPrivate = "";
+      collect();
+      await saveConfig({ shared_key_private_input: "" });
+      sharedPrivate = null; dirty = false;
+      $("shared-priv-in").value = "";
+      notice("Shared key cleared.", "good");
+    } catch (e) { notice(e.message, "bad"); }
+  });
   $("show-key").addEventListener("click", () => { showKey = !showKey; render(); });
   $("copy-key").addEventListener("click", async () => {
     const key = ($("companion-key").dataset.key || "").toUpperCase();
@@ -417,9 +499,11 @@
     try {
       collect();
       const extra = Object.keys(passwordUpdates).length ? { password_updates: passwordUpdates } : {};
+      if (sharedPrivate !== null) extra.shared_key_private_input = sharedPrivate;
       await saveConfig(extra);
       passwordUpdates = {};
       tempTargets = null;
+      sharedPrivate = null;
       dirty = false;
       notice("Saved.", "good");
     } catch (e) {
