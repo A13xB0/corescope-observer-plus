@@ -107,7 +107,7 @@ class Publisher:
             "plugin": PLUGIN_TAG,
             "nodes": claims,
         })
-        self._send(broker, _topic(broker, self.cfg, self.public_key_hex, "sharedclaim"), payload,
+        self._send(broker, _topic(broker, self.cfg, self.public_key_hex, "polling"), payload,
                    role="claim")
 
     def _send(self, broker: Broker, topic: str, payload: str, role: str = "battery") -> None:
