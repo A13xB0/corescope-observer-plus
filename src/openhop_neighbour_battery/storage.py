@@ -63,6 +63,23 @@ class Secrets:
     def nodes_with_passwords(self) -> list[str]:
         return sorted(k for k, v in (self._value.get("passwords") or {}).items() if v)
 
+    def shared_private_key(self) -> str:
+        """The shared guest key's private half (hex), or "" if none is set.
+
+        The private half is public by design (anyone polling with the key has
+        it), but it is still a credential and is kept out of config.json, which
+        openHop's settings API returns, like every other secret here.
+        """
+        return str(self._value.get("shared_private_key") or "")
+
+    def set_shared_private_key(self, private_hex: str) -> None:
+        private_hex = (private_hex or "").strip().lower()
+        if private_hex:
+            self._value["shared_private_key"] = private_hex
+        else:
+            self._value.pop("shared_private_key", None)
+        self._save()
+
     def _save(self) -> None:
         _write(self.path, self._value, mode=0o600)
 

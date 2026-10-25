@@ -19,7 +19,8 @@ from .openhop import (
     load_openhop_config,
     search_corescope,
 )
-from .poller import NO_BATTERY, OK, is_due, poll_one, reading, record, utc_iso
+from . import shared_key as sk
+from .poller import ADMIN_STOP, NO_BATTERY, OK, is_due, poll_one, poll_one_shared, reading, record, utc_iso
 from .publisher import Publisher
 from .settings import TRANSIENT_KEYS, Settings, parse, read_raw, write_raw
 from .storage import Secrets, State
@@ -63,6 +64,10 @@ class App:
                     self.secrets.set_password(node_id, str(pw or ""))
                     self.state.node(node_id)["password_changed"] = True
                     LOG.info("login password %s for %s", "set" if pw else "removed", node_id[:8])
+        shared_priv = raw.get("shared_key_private_input")
+        if isinstance(shared_priv, str):
+            self.secrets.set_shared_private_key(shared_priv)
+            LOG.info("shared guest key %s", "saved" if shared_priv.strip() else "cleared")
         requests = raw.get("requests")
         if isinstance(requests, list):
             self.state.value.setdefault("pending", []).extend(
@@ -153,6 +158,39 @@ class App:
         """The routes polling may use for n under the current reach setting."""
         return [r for r in n.routes if r.hops <= self.settings.max_hops]
 
+    def shared_key(self) -> sk.SharedKey | None:
+        """The configured shared guest key, or None if it is not set up.
+
+        Name, version and public half come from settings; the private half from
+        secrets. All four are needed, and both key bytes must decode.
+        """
+        s = self.settings
+        private_hex = self.secrets.shared_private_key()
+        if not (s.shared_key_public and private_hex):
+            return None
+        try:
+            return sk.SharedKey(s.shared_key_name or "shared guest", s.shared_key_version,
+                                bytes.fromhex(s.shared_key_public), bytes.fromhex(private_hex))
+        except (ValueError, sk.SharedKeyError):
+            return None
+
+    def uses_shared_key(self, node_id: str) -> bool:
+        """Whether this repeater is polled under the shared key.
+
+        Only if the operator opted it in, the key is set up, and — the safety
+        gate — it has no saved password and has never answered the key as
+        admin. A repeater with a password can't be polled with a key that only
+        ever logs in blank, and one that handed the key admin is never polled
+        under it again until the operator clears the flag.
+        """
+        if node_id not in self.settings.shared_key_targets:
+            return False
+        if self.secrets.has_password(node_id):
+            return False
+        if self.state.node(node_id).get("shared_admin_seen"):
+            return False
+        return self.shared_key() is not None
+
     def poll(self, node_ids: list[str], *, force: bool = False) -> list[dict]:
         """Poll the given targets that are zero-hop now; return payload readings."""
         if not self.check.get("companion", {}).get("ok") or not self.ohcfg:
@@ -182,15 +220,25 @@ class App:
                     time.sleep(s.spacing_seconds * (2 if routes[0].hops else 1))
                 st = self.state.node(n.node_id)
                 pw = self.secrets.password(n.node_id)
-                result = poll_one(
-                    client, n, pw, st, routes=routes, alternative_routes=s.alternative_routes,
-                    read_temperature=n.node_id in s.temperature_targets,
-                )
+                shared = self.shared_key() if self.uses_shared_key(n.node_id) else None
+                if shared is not None:
+                    result = poll_one_shared(
+                        client, n, shared, st, routes=routes,
+                        read_temperature=n.node_id in s.temperature_targets,
+                    )
+                else:
+                    result = poll_one(
+                        client, n, pw, st, routes=routes, alternative_routes=s.alternative_routes,
+                        read_temperature=n.node_id in s.temperature_targets,
+                    )
                 record(st, result, bool(pw), time.time())
                 st.pop("password_changed", None)
                 st["name"] = n.name
-                LOG.info("poll %s (%s) %s: %s %s%s", n.name, n.node_id[:8],
-                         result.route.label if result.route else "-", result.code,
+                if result.code == ADMIN_STOP:
+                    self._disable_shared_key(n, result)
+                LOG.info("poll %s (%s) %s%s: %s %s%s", n.name, n.node_id[:8],
+                         result.route.label if result.route else "-",
+                         " [shared]" if result.key_mode == "shared" else "", result.code,
                          f"{result.battery_mv} mV" if result.battery_mv is not None else result.detail,
                          f", {result.temperature_c} °C" if result.temperature_c is not None
                          else (f", temperature {result.temperature_code}" if result.temperature_code else ""))
@@ -198,6 +246,23 @@ class App:
                     out.append(reading(n, result, time.time()))
                 self.state.save()
         return out
+
+    def _disable_shared_key(self, n: Neighbour, result) -> None:
+        """Turn the shared key off for a repeater that answered it as admin.
+
+        The opt-in is removed from config.json so it stays off until the
+        operator turns it back on deliberately, and a loud warning is logged.
+        The removal drill has already run inside the poll; its outcome is in
+        the node state for the UI and CoreScope alert.
+        """
+        raw = read_raw(self.data_dir)
+        targets = [t for t in (raw.get("shared_key_targets") or []) if str(t).lower() != n.node_id]
+        raw["shared_key_targets"] = targets
+        write_raw(self.data_dir, raw)
+        self.settings.shared_key_targets = [t for t in self.settings.shared_key_targets if t != n.node_id]
+        LOG.warning("%s (%s) answered the shared guest key as ADMIN: shared key disabled for it, "
+                    "removal %s", n.name, n.node_id[:8],
+                    "succeeded" if result.admin_removed else "FAILED — ask the owner to run setperm 0")
 
     # -- publishing ---------------------------------------------------------
 
@@ -327,6 +392,11 @@ class App:
                 "read_temperature": n.node_id in self.settings.temperature_targets,
                 "uptime_secs": st.get("uptime_secs"), "method": st.get("method"),
                 "status_ignored": bool(st.get("status_ignored")),
+                "key_mode": "shared" if self.uses_shared_key(n.node_id) else "own",
+                "shared_opt_in": n.node_id in self.settings.shared_key_targets,
+                "shared_admin_seen": bool(st.get("shared_admin_seen")),
+                "shared_admin_removed": st.get("shared_admin_removed"),
+                "shared_admin_at": st.get("shared_admin_at"),
             })
         brokers = []
         for b in (self.ohcfg.brokers if self.ohcfg else []):
@@ -351,6 +421,13 @@ class App:
             "nodes": nodes,
             "brokers": brokers,
             "actions": self.actions,
+            "shared_key": {
+                "configured": self.shared_key() is not None,
+                "name": self.settings.shared_key_name,
+                "version": self.settings.shared_key_version,
+                "public": self.settings.shared_key_public,
+                "targets": self.settings.shared_key_targets,
+            },
         }
         path = self.data_dir / "runtime.json"
         tmp = path.with_suffix(".tmp")

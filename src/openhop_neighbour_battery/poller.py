@@ -13,7 +13,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
-from .companion import CompanionClient, CompanionError, FloodSent, lpp_temperature, lpp_voltage_mv
+from . import shared_key as sk
+from .companion import (CompanionClient, CompanionError, FloodSent, parse_stats, path_len_byte,
+                        lpp_temperature, lpp_voltage_mv)
 from .openhop import Neighbour, Route
 
 OK = "ok"
@@ -23,6 +25,9 @@ PASSWORD_REJECTED = "password_rejected"
 NO_REPLY = "no_reply"
 NOT_DIRECT = "not_direct"
 ERROR = "error"
+# The shared key was answered as admin; it is disabled on that repeater and the
+# removal drill has run. Never retried under the shared key automatically.
+ADMIN_STOP = "admin_stop"
 
 LOGIN_SETTLE_SECONDS = 1.0
 # Stock repeaters don't answer a wrong password at all, so a "login failed"
@@ -47,6 +52,15 @@ NO_REPLY_FAST_TRIES = 9
 TEMP_MISSES_BEFORE_DAILY = 3
 TEMP_DAILY = 24 * 3600
 
+# Shared-key poll: how long to listen off the air for a reply after each raw
+# send, and how many data requests to try within one poll.
+SHARED_REPLY_WINDOW = 20.0
+SHARED_ATTEMPTS = 2
+# Admin removal drill: after an admin answer, how long to let the setperm take
+# before the verifying login, and how many verify logins to try.
+ADMIN_REMOVE_SETTLE = 10.0
+ADMIN_REMOVE_TRIES = 3
+
 
 @dataclass
 class PollResult:
@@ -60,6 +74,9 @@ class PollResult:
     temperature_c: float | None = None
     temperature_code: str = ""  # "" not asked, "ok", "none" (answered without one), "no_reply"
     method: str = "status"  # what the battery came from: "status" or "telemetry"
+    key_mode: str = "own"  # "own" (this observer's key) or "shared" (the guest key)
+    admin_seen: bool = False  # the shared key was answered as admin
+    admin_removed: bool | None = None  # removal drill result: True ok, False failed, None not run
 
 
 def utc_iso(ts: float | None = None) -> str:
@@ -240,6 +257,141 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
                       temperature_c=temp, temperature_code=temp_code, method="telemetry")
 
 
+def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey, node_state: dict, *,
+                    routes: list[Route], read_temperature: bool = False, now: float | None = None,
+                    sleep: Callable[[float], None] = time.sleep,
+                    reply_window: float = SHARED_REPLY_WINDOW, attempts: int = SHARED_ATTEMPTS) -> PollResult:
+    """Poll one repeater under the shared guest key, as raw packets.
+
+    Sends a blank login then a status request (direct) or telemetry request
+    (one hop), both built and encrypted with the shared key, and reads the
+    replies straight off the air. The route is carried in the packet, so
+    nothing is pinned in the companion's contacts and nothing is ever flooded.
+
+    Safety is enforced here and in the packet builder together: the login is
+    always blank (``build_login`` refuses anything else), and if the repeater
+    answers the login as admin the poll stops, runs the removal drill
+    (``_admin_removal_drill``) and returns ADMIN_STOP so the caller disables the
+    shared key on that repeater and alerts. The battery is never read in that
+    case; a repeater that hands the public key admin is not one to keep polling
+    under it.
+    """
+    now = now or time.time()
+    key = bytes.fromhex(n.node_id)
+    live = ordered_routes([r for r in routes], node_state.get("last_route"))
+    if not live:
+        return PollResult(NOT_DIRECT, key_mode="shared", detail="no direct or one-hop route heard")
+    route = live[0]
+    out_path = route.path
+    plen = path_len_byte(out_path, route.hash_size)
+    one_hop = route.hops > 0
+    candidates = [key]
+
+    def listen(pending: dict[int, str], want: set[str]) -> dict[str, sk.Reply]:
+        """Collect replies within one window, keyed by the kind each tag was."""
+        got: dict[str, sk.Reply] = {}
+        for frame in client.collect_rx(reply_window):
+            reply = sk.decode_rx(frame, shared, candidates)
+            if reply is None:
+                continue
+            kind = pending.get(reply.tag)
+            if kind:
+                got[kind] = reply
+                if want <= set(got):
+                    break
+        return got
+
+    try:
+        # Log in (blank) so the repeater knows the key, then watch for its reply.
+        login_body, login_tag = sk.build_login(shared, key, out_path, plen, "")
+        client.send_raw_packet(login_body)
+        heard = listen({login_tag: "login"}, {"login"})
+        if "login" in heard:
+            node_state["logged_in_at"] = now
+            result = sk.login_result(heard["login"])
+            if result is not None and result.is_admin:
+                removed = _admin_removal_drill(client, shared, key, out_path, plen, sleep)
+                return PollResult(ADMIN_STOP, role="admin", key_mode="shared", route=route,
+                                  admin_seen=True, admin_removed=removed,
+                                  detail="the repeater answered the shared key as admin")
+
+        # Ask for the reading. Status direct; telemetry only through a relay
+        # (same airtime reasoning as the own-key poll).
+        kind = "telemetry" if one_hop else "status"
+        reply = None
+        for attempt in range(max(1, attempts)):
+            if attempt:
+                sleep(RETRY_GAP_SECONDS)
+            if kind == "status":
+                body, tag = sk.build_status_request(shared, key, out_path, plen)
+            else:
+                body, tag = sk.build_telemetry_request(shared, key, out_path, plen)
+            client.send_raw_packet(body)
+            heard = listen({tag: kind}, {kind})
+            if kind in heard:
+                reply = heard[kind]
+                break
+    except sk.UnsafeSharedPassword as exc:
+        return PollResult(ERROR, key_mode="shared", detail=str(exc))
+    except (CompanionError, OSError, sk.SharedKeyError) as exc:
+        return PollResult(ERROR, key_mode="shared", detail=str(exc))
+
+    if reply is None:
+        return PollResult(NO_REPLY, key_mode="shared", route=route, retried=attempts > 1,
+                          detail="no answer to the shared-key request")
+    node_state.setdefault("logged_in_at", now)
+    if kind == "status":
+        try:
+            stats = parse_stats(reply.data)
+        except CompanionError:
+            return PollResult(NO_REPLY, key_mode="shared", route=route, detail="unreadable status reply")
+        mv = int(stats.get("battery_mv") or 0)
+        return PollResult(OK if mv > 0 else NO_BATTERY, battery_mv=mv, stats=stats, route=route,
+                          key_mode="shared", method="status")
+    temp = lpp_temperature(reply.data) if read_temperature else None
+    temp_code = ("ok" if temp is not None else "none") if read_temperature else ""
+    mv = lpp_voltage_mv(reply.data)
+    if mv is None:
+        return PollResult(NO_REPLY, key_mode="shared", route=route,
+                          detail="telemetry answered without a voltage",
+                          temperature_c=temp, temperature_code=temp_code)
+    return PollResult(OK if mv > 0 else NO_BATTERY, battery_mv=mv, route=route, key_mode="shared",
+                      method="telemetry", temperature_c=temp, temperature_code=temp_code)
+
+
+def _admin_removal_drill(client: CompanionClient, shared: sk.SharedKey, key: bytes,
+                         out_path: bytes, plen: int, sleep: Callable[[float], None]) -> bool:
+    """Undo an admin grant on the shared key, then confirm it is gone.
+
+    Sends ``setperm <shared key> 0`` — which deletes the key's ACL entry and is
+    admin-only, so it works precisely because the key still holds the admin
+    rights it is removing — waits for the repeater to save it, then logs in
+    again (blank) and checks the answer is no longer admin. Returns True once a
+    verifying login comes back non-admin, False if none does within the tries.
+    """
+    try:
+        client.send_raw_packet(sk.build_admin_removal(shared, key, out_path, plen))
+    except (CompanionError, OSError, sk.SharedKeyError):
+        return False
+    sleep(ADMIN_REMOVE_SETTLE)
+    for attempt in range(ADMIN_REMOVE_TRIES):
+        if attempt:
+            sleep(RETRY_GAP_SECONDS)
+        try:
+            body, tag = sk.build_login(shared, key, out_path, plen, "")
+            client.send_raw_packet(body)
+        except (CompanionError, OSError, sk.SharedKeyError, sk.UnsafeSharedPassword):
+            continue
+        for frame in client.collect_rx(SHARED_REPLY_WINDOW):
+            reply = sk.decode_rx(frame, shared, [key])
+            if reply is None or reply.tag != tag:
+                continue
+            result = sk.login_result(reply)
+            if result is not None and not result.is_admin:
+                return True
+    return False
+
+
 def record(node_state: dict, result: PollResult, password_set: bool, now: float) -> None:
     node_state["last_attempt"] = now
     node_state["code"] = result.code
@@ -266,6 +418,13 @@ def record(node_state: dict, result: PollResult, password_set: bool, now: float)
         node_state["login_fails"] = 0
         # Don't retry the same credential until the operator changes it.
         node_state["blocked_password_set"] = password_set
+    if result.code == ADMIN_STOP:
+        # The shared key was answered as admin: remember it so the key is never
+        # used here again automatically, and record the drill's outcome for the
+        # alert the owner sees.
+        node_state["shared_admin_seen"] = True
+        node_state["shared_admin_removed"] = result.admin_removed
+        node_state["shared_admin_at"] = now
     if result.temperature_code:
         node_state["temp_attempt"] = now
         node_state["temp_code"] = result.temperature_code
@@ -312,6 +471,10 @@ def reading(n: Neighbour, result: PollResult, sampled_at: float) -> dict:
         "method": result.method,
         "sampled_at": utc_iso(sampled_at),
     }
+    if result.key_mode == "shared":
+        # Marks a reading taken under the shared guest key, so CoreScope can
+        # credit it and (for an admin answer) raise the owner alert.
+        out["key"] = "shared"
     if route is not None and route.relay_id:
         out["via"] = route.relay_id
         snr = route.snr

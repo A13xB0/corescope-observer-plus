@@ -25,6 +25,7 @@ CMD_SEND_LOGIN = 26
 CMD_SEND_STATUS_REQ = 27
 CMD_GET_CONTACT_BY_KEY = 30
 CMD_SEND_BINARY_REQ = 50
+CMD_SEND_RAW_PACKET = 65
 
 RESP_CODE_OK = 0
 RESP_CODE_ERR = 1
@@ -36,6 +37,7 @@ PUSH_CODE_LOGIN_SUCCESS = 0x85
 PUSH_CODE_LOGIN_FAIL = 0x86
 PUSH_CODE_STATUS_RESPONSE = 0x87
 PUSH_CODE_BINARY_RESPONSE = 0x8C
+PUSH_CODE_LOG_RX_DATA = 0x88  # a raw packet heard off the air: [0x88][snr][rssi][packet]
 
 REQ_TYPE_GET_STATUS = 0x01
 REQ_TYPE_GET_TELEMETRY = 0x03
@@ -358,3 +360,38 @@ class CompanionClient:
     def telemetry(self, pubkey: bytes) -> bytes | None:
         """Ask for telemetry; the CayenneLPP bytes, or None if no answer came."""
         return self.binary_request(pubkey, bytes([REQ_TYPE_GET_TELEMETRY]))
+
+    # -- shared guest key (raw packets) -------------------------------------
+
+    def send_raw_packet(self, body: bytes) -> bool:
+        """Transmit a finished packet built elsewhere (CMD_SEND_RAW_PACKET).
+
+        ``body`` is [priority][wire packet], exactly as the shared-key builder
+        produces it. openHop sends it verbatim: no contact lookup, no flood, no
+        retries. The command answers OK once queued (it is not a SENT/flood
+        hint like a normal send), so there is nothing to check for a flood here
+        — the packet's own route was fixed when it was built.
+        """
+        self._send(bytes([CMD_SEND_RAW_PACKET]) + body)
+        frame = self._wait({RESP_CODE_OK, RESP_CODE_ERR}, self.timeout)
+        if frame is None or frame[0] != RESP_CODE_OK:
+            code = frame[1] if frame is not None and len(frame) > 1 else -1
+            raise CompanionError(f"raw packet refused (error {code})")
+        return True
+
+    def collect_rx(self, window: float):
+        """Yield raw RX log frames (PUSH 0x88) heard within ``window`` seconds.
+
+        Replies to a shared-key request arrive as ordinary received packets, so
+        the plugin reads them straight off the air here rather than through a
+        request/response pairing. The caller decodes and matches each by tag.
+        """
+        deadline = time.monotonic() + window
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            frame = self._wait({PUSH_CODE_LOG_RX_DATA}, remaining)
+            if frame is None:
+                return
+            yield frame

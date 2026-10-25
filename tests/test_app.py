@@ -181,3 +181,73 @@ def test_manual_repeaters_and_corescope_url_settings():
     assert s.manual_repeaters == [{"node_id": NODE, "name": "Redstone"}]
     assert s.corescope_url == "https://cs.example"
     assert parse({"corescope_url": "ftp://nope"}).corescope_url == "https://corescope.scotmesh.net"
+
+
+def _shared_keypair():
+    """A usable shared keypair via openhop_core, if it is installed."""
+    import pytest
+    pytest.importorskip("openhop_core")
+    from openhop_core.protocol.identity import LocalIdentity
+    while True:
+        lid = LocalIdentity()
+        if lid.get_public_key()[0] not in (0x00, 0xFF):
+            return lid.get_public_key().hex(), lid.get_signing_key_bytes().hex()
+
+
+def test_shared_key_config_and_secret_split(tmp_path):
+    fake = FakeCompanion()
+    try:
+        pub, priv = _shared_keypair()
+        a, data = make_app(tmp_path, fake, shared_key_name="CoreScope shared guest",
+                           shared_key_version=1, shared_key_public=pub,
+                           shared_key_targets=[NODE], shared_key_private_input=priv)
+        cfg = json.loads((data / "config.json").read_text())
+        # The private half never stays in config.json; the public half may.
+        assert "shared_key_private_input" not in cfg
+        assert priv not in json.dumps(cfg)
+        assert a.secrets.shared_private_key() == priv
+        assert a.shared_key() is not None
+        a.write_runtime()
+        runtime = (data / "runtime.json").read_text()
+        assert priv not in runtime
+        assert json.loads(runtime)["shared_key"]["configured"] is True
+    finally:
+        fake.close()
+
+
+def test_shared_key_never_used_with_a_password(tmp_path):
+    fake = FakeCompanion()
+    try:
+        pub, priv = _shared_keypair()
+        a, _ = make_app(tmp_path, fake, shared_key_public=pub, shared_key_version=1,
+                        shared_key_targets=[NODE], shared_key_private_input=priv,
+                        password_updates={NODE: "a-real-secret"})
+        # Opted in, key configured — but a saved password blocks the shared key.
+        assert a.secrets.has_password(NODE)
+        assert a.uses_shared_key(NODE) is False
+    finally:
+        fake.close()
+
+
+def test_shared_key_blocked_after_an_admin_answer(tmp_path):
+    fake = FakeCompanion()
+    try:
+        pub, priv = _shared_keypair()
+        a, _ = make_app(tmp_path, fake, shared_key_public=pub, shared_key_version=1,
+                        shared_key_targets=[NODE], shared_key_private_input=priv)
+        assert a.uses_shared_key(NODE) is True
+        a.state.node(NODE)["shared_admin_seen"] = True
+        assert a.uses_shared_key(NODE) is False
+    finally:
+        fake.close()
+
+
+def test_shared_key_off_when_not_opted_in(tmp_path):
+    fake = FakeCompanion()
+    try:
+        pub, priv = _shared_keypair()
+        a, _ = make_app(tmp_path, fake, shared_key_public=pub, shared_key_version=1,
+                        shared_key_private_input=priv)
+        assert a.uses_shared_key(NODE) is False  # configured but not opted in
+    finally:
+        fake.close()

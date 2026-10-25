@@ -13,5 +13,9 @@
   "alternative_routes": false,
   "temperature_targets": [],
   "manual_repeaters": [],
-  "corescope_url": "https://corescope.scotmesh.net"
+  "corescope_url": "https://corescope.scotmesh.net",
+  "shared_key_name": "",
+  "shared_key_version": 0,
+  "shared_key_public": "",
+  "shared_key_targets": []
 }
