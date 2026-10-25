@@ -41,7 +41,9 @@ your repeater's observer, for CoreScope to show.
 
 A repeater can be polled under a shared, public guest identity instead of this
 observer's own key, so any observer that hears the reply can feed CoreScope.
-Off by default; turned on per repeater from its Details.
+Off by default; turned on per repeater from its Details. A fixed built-in key
+(the same one CoreScope holds) is used unless you paste an override, so there
+is nothing to set up.
 
 - Requests, logins and the route update are built and encrypted by the plugin
   with the shared key and sent as finished raw packets (`CMD_SEND_RAW_PACKET`);

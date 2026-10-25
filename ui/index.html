@@ -40,13 +40,13 @@
         <h2 id="shared-h">Shared guest key</h2>
         <span id="shared-state" class="pill neutral">Off</span>
       </div>
-      <p class="muted small">A public guest identity used to poll a repeater, so any observer that hears the reply can feed CoreScope. Opt a repeater in from its Details. It is only ever used with a blank password, and never with admin: the private half is public, so anyone holding the key could log in as it.</p>
+      <p class="muted small">A public guest identity used to poll a repeater, so any observer that hears the reply can feed CoreScope. A built-in key is used by default — just opt a repeater in from its Details. It is only ever used with a blank password, and never with admin: the private half is public, so anyone holding the key could log in as it.</p>
       <div id="shared-set" class="kv">
         <div><span class="muted">Key</span> <strong id="shared-name">—</strong> <span id="shared-ver" class="muted small"></span> <code id="shared-pub" class="muted">—</code></div>
       </div>
       <details id="shared-edit">
-        <summary>Set or replace the key</summary>
-        <p class="muted small">Paste the shared key, or fetch it from CoreScope. The private half is stored on this observer only and never shown again or published.</p>
+        <summary>Override the built-in key</summary>
+        <p class="muted small">Optional. Paste a different shared key to override the built-in one. The private half is stored on this observer only and never shown again. Clear it to return to the built-in key.</p>
         <label for="shared-name-in">Name</label>
         <input id="shared-name-in" type="text" autocomplete="off" placeholder="CoreScope shared guest">
         <div class="row">

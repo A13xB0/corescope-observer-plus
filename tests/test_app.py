@@ -251,3 +251,22 @@ def test_shared_key_off_when_not_opted_in(tmp_path):
         assert a.uses_shared_key(NODE) is False  # configured but not opted in
     finally:
         fake.close()
+
+
+def test_builtin_shared_key_is_the_default(tmp_path):
+    fake = FakeCompanion()
+    try:
+        # No key pasted at all: the built-in key is used, and a repeater opted
+        # in is polled under it.
+        a, _ = make_app(tmp_path, fake, shared_key_targets=[NODE])
+        key = a.shared_key()
+        assert key is not None
+        from openhop_neighbour_battery import shared_key as sk
+        assert key.public_key.hex() == sk.BUILTIN_PUBLIC
+        assert a.uses_shared_key(NODE) is True
+        a.write_runtime()
+        rt = json.loads((tmp_path / "data" / "runtime.json").read_text())
+        assert rt["shared_key"]["builtin"] is True
+        assert rt["shared_key"]["configured"] is True
+    finally:
+        fake.close()

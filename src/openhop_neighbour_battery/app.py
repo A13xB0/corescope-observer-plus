@@ -159,20 +159,22 @@ class App:
         return [r for r in n.routes if r.hops <= self.settings.max_hops]
 
     def shared_key(self) -> sk.SharedKey | None:
-        """The configured shared guest key, or None if it is not set up.
+        """The shared guest key in use: the operator's override, else the
+        fixed built-in.
 
-        Name, version and public half come from settings; the private half from
-        secrets. All four are needed, and both key bytes must decode.
+        An override takes a public half in settings and a private half in
+        secrets; without a complete, valid override the built-in key compiled
+        into the plugin is used, so the feature needs no setup.
         """
         s = self.settings
         private_hex = self.secrets.shared_private_key()
-        if not (s.shared_key_public and private_hex):
-            return None
-        try:
-            return sk.SharedKey(s.shared_key_name or "shared guest", s.shared_key_version,
-                                bytes.fromhex(s.shared_key_public), bytes.fromhex(private_hex))
-        except (ValueError, sk.SharedKeyError):
-            return None
+        if s.shared_key_public and private_hex:
+            try:
+                return sk.SharedKey(s.shared_key_name or "shared guest", s.shared_key_version,
+                                    bytes.fromhex(s.shared_key_public), bytes.fromhex(private_hex))
+            except (ValueError, sk.SharedKeyError):
+                pass
+        return sk.builtin_shared_key()
 
     def uses_shared_key(self, node_id: str) -> bool:
         """Whether this repeater is polled under the shared key.
@@ -246,6 +248,21 @@ class App:
                     out.append(reading(n, result, time.time()))
                 self.state.save()
         return out
+
+    def _shared_key_runtime(self) -> dict:
+        """What the plugin page shows for the shared key: the key in use (the
+        built-in unless overridden), whether it is the built-in, and the opt-in
+        list."""
+        key = self.shared_key()
+        builtin = key is not None and key.public_key.hex() == sk.BUILTIN_PUBLIC
+        return {
+            "configured": key is not None,
+            "builtin": builtin,
+            "name": key.name if key else "",
+            "version": key.version if key else 0,
+            "public": key.public_key.hex() if key else "",
+            "targets": self.settings.shared_key_targets,
+        }
 
     def _disable_shared_key(self, n: Neighbour, result) -> None:
         """Turn the shared key off for a repeater that answered it as admin.
@@ -421,13 +438,7 @@ class App:
             "nodes": nodes,
             "brokers": brokers,
             "actions": self.actions,
-            "shared_key": {
-                "configured": self.shared_key() is not None,
-                "name": self.settings.shared_key_name,
-                "version": self.settings.shared_key_version,
-                "public": self.settings.shared_key_public,
-                "targets": self.settings.shared_key_targets,
-            },
+            "shared_key": self._shared_key_runtime(),
         }
         path = self.data_dir / "runtime.json"
         tmp = path.with_suffix(".tmp")

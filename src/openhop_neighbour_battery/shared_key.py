@@ -47,6 +47,23 @@ from openhop_core.protocol.packet import Packet
 from openhop_core.protocol.packet_builder import PacketBuilder
 from openhop_core.protocol.packet_utils import PathUtils
 
+# The built-in shared guest key: one fixed, public identity so every observer
+# and CoreScope decode the same replies. Its private half is public by design
+# — anyone polling with the key must have it — so it is committed here in the
+# clear, the same value CoreScope holds. Operators need set nothing; a repeater
+# is still opted in one at a time. CoreScope keeps the matching constant.
+BUILTIN_NAME = "CoreScope shared guest"
+BUILTIN_VERSION = 1
+BUILTIN_PUBLIC = "f0fbaae3284350f9ae353e617d7fb1ae143341dd1b540477c74be758066d7dd2"
+BUILTIN_PRIVATE = "8dbaa94fbcff9dddc124533648f27adb42ddd30c264ab0e4a3f4a24505f533d4"
+
+
+def builtin_shared_key() -> "SharedKey":
+    """The fixed public shared guest key compiled into the plugin."""
+    return SharedKey(BUILTIN_NAME, BUILTIN_VERSION,
+                     bytes.fromhex(BUILTIN_PUBLIC), bytes.fromhex(BUILTIN_PRIVATE))
+
+
 # The only passwords the shared key is ever allowed to carry. Blank means "am I
 # already known here?" and keeps whatever role the repeater already holds for
 # the key; "hello" is a throwaway a careless owner might set as a guest password

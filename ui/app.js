@@ -206,7 +206,7 @@
     skPill.textContent = sk.configured ? (`${(sk.targets || []).length} repeater${(sk.targets || []).length === 1 ? "" : "s"}`) : "Off";
     skPill.className = "pill " + (sk.configured ? "good" : "neutral");
     $("shared-name").textContent = sk.name || (sk.configured ? "shared guest" : "not set");
-    $("shared-ver").textContent = sk.configured ? `· v${sk.version || 0}` : "";
+    $("shared-ver").textContent = sk.configured ? `· v${sk.version || 0}${sk.builtin ? " · built-in" : ""}` : "";
     $("shared-pub").textContent = sk.public ? maskKey(sk.public.toUpperCase()) : "—";
     if (!dirty) {
       $("shared-name-in").value = config.shared_key_name || "";
