@@ -9,13 +9,18 @@ your repeater's observer, for CoreScope to show.
 - Status is a binary request (`CMD_SEND_BINARY_REQ`, type `0x01`) matched on its
   tag. openHop sends that once; it resends a slow `CMD_SEND_STATUS_REQ` itself
   as a flood, so that command is never used.
-- Logs in only until a login succeeds (then not again unless 3 polls in a row
-  get no answer at all, as after a reboot). Blank password: guest or ACL,
-  unless you set one per repeater.
+- Logs in until one login works. After that a login is sent only as a probe,
+  at most one per poll, when a request gets no answer: it costs a repeater
+  that still knows this node nothing, re-adds it after a reboot or eviction,
+  and a silent login marks the route dead so no more tries are spent on it.
+  Blank password: guest or ACL, unless you set one per repeater.
 - Each request (status, telemetry) is tried up to 3 times per poll, all direct.
-- Older repeater firmware ignores a guest's status request but answers
-  telemetry, which carries the battery voltage: the plugin falls back to it,
-  asks such a repeater by telemetry first, and checks status again daily.
+- Direct repeaters are asked for status (battery and stats). Repeaters one
+  hop away are asked by telemetry only (battery and chip temperature): the
+  status reply is about four times the airtime, paid twice through a relay.
+- When a direct repeater's status replies don't get through but telemetry
+  does, the battery comes from telemetry, that repeater is asked by telemetry
+  only, and status is tried again once a day.
 - A "login failed" push only counts as a password problem after 3 in a row:
   stock repeaters don't answer a wrong password at all.
 - A repeater that didn't answer is tried again after 20 minutes (up to 3 tries

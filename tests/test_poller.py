@@ -94,16 +94,33 @@ def test_zero_mv_is_no_battery(fake):
     assert result.code == poller.NO_BATTERY and result.battery_mv == 0
 
 
-def test_login_attempts_at_most_hourly_until_one_succeeds(fake):
+def test_each_poll_starts_with_a_login_until_one_works(fake):
     fake.status_after_login_only = True
     fake.answer_login = False
-    _, state = poll(fake, now=10_000.0)
-    fake.commands.clear()
-    result, state = poll(fake, state=state, now=10_000.0 + 1800)
-    assert result.code == poller.NO_REPLY and c.CMD_SEND_LOGIN not in fake.commands
+    result, state = poll(fake, now=10_000.0)
+    assert result.code == poller.NO_REPLY and "link looks down" in result.detail
+    assert fake.commands.count(c.CMD_SEND_LOGIN) == 1 and not fake.requests  # silent login: nothing more sent
     fake.answer_login = True
-    result, _ = poll(fake, state=state, now=10_000.0 + 3600)
-    assert result.code == poller.OK
+    fake.commands.clear()
+    result, _ = poll(fake, state=state, now=11_200.0)
+    assert result.code == poller.OK and fake.commands.count(c.CMD_SEND_LOGIN) == 1
+
+
+def test_unanswered_request_probes_with_one_login(fake):
+    # Logged in before, but the repeater rebooted and forgot this client.
+    fake.status_after_login_only = True
+    result, state = poll(fake, state=dict(LOGGED_IN), now=10_000.0)
+    assert result.code == poller.OK and result.retried
+    assert fake.commands.count(c.CMD_SEND_LOGIN) == 1 and len(statuses(fake)) == 2
+
+
+def test_silent_login_stops_the_poll(fake):
+    fake.answer_status = False
+    fake.answer_login = False
+    fake.telemetry = None
+    result, _ = poll(fake, state=dict(LOGGED_IN), now=10_000.0)
+    assert result.code == poller.NO_REPLY and "link looks down" in result.detail
+    assert len(fake.requests) == 1 and fake.commands.count(c.CMD_SEND_LOGIN) == 1
 
 
 def test_each_request_tried_three_times_all_direct(fake):
@@ -111,10 +128,11 @@ def test_each_request_tried_three_times_all_direct(fake):
     fake.telemetry = None
     result, _ = poll(fake, state=dict(LOGGED_IN), routes=[DIRECT, VIA_A])
     assert result.code == poller.NO_REPLY and result.retried
-    assert len(statuses(fake)) == 3 and len(telemetries(fake)) == 3
+    # 3 tries, plus one straight after the (answered) login probe.
+    assert len(statuses(fake)) == 4 and len(telemetries(fake)) == 3
     assert {r[2] for r in fake.requests} == {b""}  # no alternative routes: always the best one
     assert all(r[1] >= 0 for r in fake.requests)  # never unknown path, so never flooded
-    assert c.CMD_SEND_LOGIN not in fake.commands
+    assert fake.commands.count(c.CMD_SEND_LOGIN) == 1
 
 
 def test_login_forgotten_after_three_silent_polls(fake):
@@ -159,6 +177,7 @@ def test_admin_role_is_reported(fake):
 
 def test_one_hop_route_pins_relay_path(fake):
     result, _ = poll(fake, routes=[VIA_A], state=dict(LOGGED_IN))
+    assert result.method == "telemetry"
     assert result.code == poller.OK and result.route is VIA_A
     opl, path = fake.contacts[bytes.fromhex(NODE.node_id)]
     assert opl == 0x81 and path == bytes.fromhex("4128a6")
@@ -172,7 +191,7 @@ def test_alternative_routes_go_round_and_the_good_one_is_remembered(fake):
     state = dict(LOGGED_IN)
     result, state = poll(fake, routes=[DIRECT, VIA_A, VIA_B], alternative_routes=True, state=state, now=10_000.0)
     assert result.code == poller.OK and result.route is VIA_B and result.retried
-    assert [r[2] for r in statuses(fake)] == [b"", bytes.fromhex("4128a6"), bytes.fromhex("2eecdf")]
+    assert [r[2] for r in statuses(fake)] == [b"", b"", bytes.fromhex("4128a6"), bytes.fromhex("2eecdf")]
     poller.record(state, result, False, 10_000.0)
     assert state["last_route"] == RELAY_B
     fake.requests.clear()
@@ -237,7 +256,14 @@ def test_unanswered_telemetry_tried_three_times(fake):
     fake.telemetry = None
     result, _ = poll(fake, read_temperature=True, state=dict(LOGGED_IN))
     assert result.code == poller.OK and result.temperature_code == "no_reply"
-    assert len(telemetries(fake)) == 3
+    assert len(telemetries(fake)) == 4  # 3 tries, plus one after the login probe
+
+
+def test_one_hop_repeaters_get_telemetry_only(fake):
+    result, _ = poll(fake, routes=[VIA_A, VIA_B], state=dict(LOGGED_IN))
+    assert result.code == poller.OK and result.method == "telemetry" and result.battery_mv == 3940
+    assert not statuses(fake) and len(telemetries(fake)) == 1
+    assert result.temperature_c == 31.5
 
 
 def test_no_reply_retried_three_times_an_hour_then_hourly():

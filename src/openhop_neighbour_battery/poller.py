@@ -24,9 +24,6 @@ NO_REPLY = "no_reply"
 NOT_DIRECT = "not_direct"
 ERROR = "error"
 
-# A logged-in client stays in the repeater's ACL, so status is asked first and
-# a login is sent only when status gets no answer, at most this often.
-LOGIN_MIN_GAP = 3600
 LOGIN_SETTLE_SECONDS = 1.0
 # Stock repeaters don't answer a wrong password at all, so a "login failed"
 # push is usually a reply misread by openHop. Only this many in a row count.
@@ -38,7 +35,8 @@ REQUEST_ATTEMPTS = 3
 # first; status is tried again after this long.
 STATUS_RECHECK = 24 * 3600
 # After this many polls in a row with no answer at all, the last login is
-# assumed lost (a rebooted repeater forgets guests) and a login is sent again.
+# assumed lost (a rebooted repeater forgets guests): the next poll logs in
+# before asking anything.
 FORGET_LOGIN_AFTER = 3
 NO_BATTERY_RECHECK = 24 * 3600
 # A repeater that didn't answer is tried again sooner: every 20 minutes (3 an
@@ -88,14 +86,22 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
              routes: list[Route], alternative_routes: bool = False, read_temperature: bool = False,
              now: float | None = None, sleep: Callable[[float], None] = time.sleep,
              retry_gap: float = RETRY_GAP_SECONDS, attempts: int = REQUEST_ATTEMPTS) -> PollResult:
-    """Read one repeater's battery: status first, telemetry when status is ignored.
+    """Read one repeater's battery with as few transmissions as will do.
 
-    Each request is tried up to `attempts` times, every try direct; with
-    alternative routes on, the tries go round the known routes. A login is
-    sent only when no login to this repeater has succeeded yet. Older
-    repeater firmware ignores a guest's status request but answers
-    telemetry, which carries the battery voltage too; such a repeater is
-    asked by telemetry first, and status is checked again once a day.
+    Every request goes direct. A request that gets no answer is followed by
+    a login, at most one per poll: it costs the repeater nothing when this
+    node is already in its ACL, puts it back after a reboot or eviction, and
+    tells a dead link (no answer either) from a lost reply. A route whose
+    login goes unanswered gets no more tries this poll. Each request is
+    tried up to `attempts` times, going round the routes when alternative
+    routes are on.
+
+    The status reply is about four times the airtime of a guest's telemetry
+    reply, so over a marginal link it can be lost every time while
+    telemetry gets through. A repeater one hop away is asked by telemetry
+    only. Telemetry carries the battery voltage too: when
+    status goes unanswered the battery comes from telemetry, that repeater
+    is asked by telemetry only, and status is tried again once a day.
     """
     now = now or time.time()
     key = bytes.fromhex(n.node_id)
@@ -104,55 +110,78 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
         return PollResult(NOT_DIRECT, detail="no direct or one-hop route heard")
     plan = [ordered[i % len(ordered)] if alternative_routes else ordered[0] for i in range(max(1, attempts))]
 
-    role = node_state.get("role", "")
-    pinned = {"key": None, "any": False}
-    tries_used = {"n": 0}
+    ctx = {"role": node_state.get("role", ""), "pinned": None, "pinned_any": False, "login_sent": False,
+           "refused": "", "dead": set(), "tries": 0, "blocked": None}
+
+    def pin(route: Route) -> bool:
+        if ctx["pinned"] == route.key:
+            return True
+        if not client.pin_route(key, n.name, route.path, route.hash_size):
+            ctx["pinned"] = None
+            return False
+        ctx["pinned"], ctx["pinned_any"] = route.key, True
+        return True
+
+    def login(route: Route) -> str:
+        """"ok", "silent" or "refused"; at most once per poll."""
+        ctx["login_sent"] = True
+        node_state["login_attempt_at"] = now
+        result = client.login(key, password)
+        if result.ok:
+            node_state["logged_in_at"] = now
+            node_state["login_fails"] = 0
+            ctx["role"] = result.role
+            sleep(LOGIN_SETTLE_SECONDS)
+            return "ok"
+        if result.timed_out:
+            ctx["dead"].add(route.key)
+            return "silent"
+        fails = int(node_state.get("login_fails") or 0) + 1
+        node_state["login_fails"] = fails
+        if fails >= LOGIN_FAILS_BEFORE_BLOCK:
+            ctx["blocked"] = PollResult(PASSWORD_REJECTED if password else NEEDS_PASSWORD, role=ctx["role"], route=route)
+        ctx["refused"] = f"login refused ({fails} of {LOGIN_FAILS_BEFORE_BLOCK})"
+        return "refused"
 
     def ask(request: Callable[[], object]):
-        """Up to len(plan) tries; (answer, route) or (None, None)."""
+        """The answer and the route it came by, or (None, None)."""
+        gap = False
         for i, route in enumerate(plan):
-            if i:
+            if route.key in ctx["dead"] or ctx["blocked"]:
+                continue
+            if gap:
                 sleep(retry_gap)
-            if pinned["key"] != route.key:
-                if not client.pin_route(key, n.name, route.path, route.hash_size):
-                    pinned["key"] = None
-                    continue
-                pinned["key"] = route.key
-                pinned["any"] = True
-            tries_used["n"] = max(tries_used["n"], i)
+            gap = True
+            if not pin(route):
+                continue
+            ctx["tries"] = max(ctx["tries"], i)
             answer = request()
             if answer is not None:
                 return answer, route
+            if not ctx["login_sent"] and login(route) == "ok":
+                answer = request()
+                if answer is not None:
+                    return answer, route
         return None, None
 
-    telemetry_first = bool(node_state.get("status_ignored")) and \
+    # Through a relay every byte costs airtime twice, so a repeater one hop
+    # away is asked by telemetry only (battery and temperature, no stats).
+    one_hop = all(r.hops > 0 for r in plan)
+    status_ignored = bool(node_state.get("status_ignored")) and \
         now - float(node_state.get("status_checked_at") or 0) < STATUS_RECHECK
-    refused = ""
+    telemetry_only = one_hop or status_ignored
     stats = tel = None
     used = None
     try:
-        if not node_state.get("logged_in_at") and \
-                now - float(node_state.get("login_attempt_at") or 0) >= LOGIN_MIN_GAP:
-            if client.pin_route(key, n.name, plan[0].path, plan[0].hash_size):
-                pinned["key"], pinned["any"] = plan[0].key, True
-                node_state["login_attempt_at"] = now
-                login = client.login(key, password)
-                if login.ok:
-                    node_state["logged_in_at"] = now
-                    node_state["login_fails"] = 0
-                    role = login.role
-                    sleep(LOGIN_SETTLE_SECONDS)
-                elif not login.timed_out:
-                    fails = int(node_state.get("login_fails") or 0) + 1
-                    node_state["login_fails"] = fails
-                    if fails >= LOGIN_FAILS_BEFORE_BLOCK:
-                        return PollResult(PASSWORD_REJECTED if password else NEEDS_PASSWORD, role=role,
-                                          route=plan[0])
-                    refused = f"login refused ({fails} of {LOGIN_FAILS_BEFORE_BLOCK})"
-        if not telemetry_first:
+        # A repeater ignores requests from a client it doesn't know, so log in
+        # first until one login has worked.
+        if not node_state.get("logged_in_at") and pin(plan[0]):
+            login(plan[0])
+        if not telemetry_only:
             stats, used = ask(lambda: client.status(key))
             node_state["status_checked_at"] = now
-        if stats is None or (read_temperature and temperature_due(node_state, now)):
+        want_temp = read_temperature and temperature_due(node_state, now)
+        if stats is None or want_temp:
             tel, tel_route = ask(lambda: client.telemetry(key))
             if stats is None:
                 used = tel_route
@@ -161,12 +190,15 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
     except (CompanionError, OSError) as exc:
         return PollResult(ERROR, detail=str(exc))
 
-    if not pinned["any"]:
+    if ctx["blocked"]:
+        return ctx["blocked"]
+    if not ctx["pinned_any"]:
         return PollResult(NOT_DIRECT, detail="the companion would not keep the route")
-    retried = tries_used["n"] > 0
+    role = ctx["role"]
+    retried = ctx["tries"] > 0 or ctx["login_sent"] and used is not None
     temp = lpp_temperature(tel) if tel is not None else None
     temp_code = ("ok" if temp is not None else "none") if tel is not None else \
-        ("no_reply" if read_temperature and (stats is None or temperature_due(node_state, now)) else "")
+        ("no_reply" if want_temp else "")
 
     if stats is not None:
         node_state["status_ignored"] = False
@@ -175,12 +207,16 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
                           retried=retried, temperature_c=temp, temperature_code=temp_code)
     mv = lpp_voltage_mv(tel) if tel is not None else None
     if mv is None:
-        detail = refused or ("telemetry answered without a voltage" if tel is not None
-                             else "no answer to status or telemetry")
+        if tel is not None:
+            detail = "telemetry answered without a voltage"
+        elif ctx["dead"] and len(ctx["dead"]) >= len({r.key for r in plan}):
+            detail = "no answer to requests or login: the link looks down"
+        else:
+            detail = ctx["refused"] or "no answer to status or telemetry"
         return PollResult(NO_REPLY, role=role, retried=True, detail=detail,
                           temperature_c=temp, temperature_code=temp_code)
-    if not telemetry_first:
-        # Status went unanswered while telemetry came back: older firmware.
+    if not telemetry_only:
+        # Status went unanswered while telemetry came back.
         node_state["status_ignored"] = True
     return PollResult(OK if mv > 0 else NO_BATTERY, battery_mv=mv, role=role, route=used, retried=retried,
                       temperature_c=temp, temperature_code=temp_code, method="telemetry")
