@@ -14,6 +14,7 @@ from .openhop import (
     OpenHopAPI,
     OpenHopConfig,
     OpenHopError,
+    Route,
     companion_port,
     load_openhop_config,
 )
@@ -94,9 +95,11 @@ class App:
             check["api"] = {"ok": False, "message": "no API token yet: use Connect on the plugin page"}
         else:
             try:
-                self.candidates = self.api().zero_hop_repeaters(self.settings.max_age_hours)
+                self.candidates = self.api().repeaters(self.settings.max_age_hours)
                 self.openhop_brokers = self.api().mqtt_status()
-                check["api"] = {"ok": True, "message": f"{sum(n.zero_hop for n in self.candidates)} zero-hop repeaters"}
+                direct = sum(n.hops == 0 for n in self.candidates)
+                one_hop = sum(n.hops == 1 for n in self.candidates)
+                check["api"] = {"ok": True, "message": f"{direct} repeaters heard direct, {one_hop} one hop away"}
             except OpenHopError as exc:
                 check["api"] = {"ok": False, "message": str(exc)}
 
@@ -145,6 +148,10 @@ class App:
                 return n
         return None
 
+    def routes_for(self, n: Neighbour) -> list[Route]:
+        """The routes polling may use for n under the current reach setting."""
+        return [r for r in n.routes if r.hops <= self.settings.max_hops]
+
     def poll(self, node_ids: list[str], *, force: bool = False) -> list[dict]:
         """Poll the given targets that are zero-hop now; return payload readings."""
         if not self.check.get("companion", {}).get("ok") or not self.ohcfg:
@@ -156,7 +163,7 @@ class App:
         for node_id in node_ids:
             n = self._neighbour(node_id)
             st = self.state.node(node_id)
-            if n is None or not n.zero_hop:
+            if n is None or not self.routes_for(n):
                 st["code"] = "not_direct" if n else "not_heard"
                 continue
             if force or is_due(st, interval, self.secrets.has_password(node_id), now):
@@ -165,18 +172,27 @@ class App:
         out = []
         if not due:
             return out
+        s = self.settings
         with CompanionClient(self.companion_host, port) as client:
             for i, n in enumerate(due[:MAX_POLLS_PER_CYCLE]):
+                routes = self.routes_for(n)
                 if i:
-                    time.sleep(self.settings.spacing_seconds)
+                    # A poll through a relay costs the relay two transmissions.
+                    time.sleep(s.spacing_seconds * (2 if routes[0].hops else 1))
                 st = self.state.node(n.node_id)
                 pw = self.secrets.password(n.node_id)
-                result = poll_one(client, n, pw, st)
+                result = poll_one(
+                    client, n, pw, st, routes=routes, alternative_routes=s.alternative_routes,
+                    read_temperature=s.read_temperature and n.node_id not in s.temperature_skip,
+                )
                 record(st, result, bool(pw), time.time())
                 st.pop("password_changed", None)
                 st["name"] = n.name
-                LOG.info("poll %s (%s): %s %s", n.name, n.node_id[:8], result.code,
-                         f"{result.battery_mv} mV" if result.battery_mv is not None else result.detail)
+                LOG.info("poll %s (%s) %s: %s %s%s", n.name, n.node_id[:8],
+                         result.route.label if result.route else "-", result.code,
+                         f"{result.battery_mv} mV" if result.battery_mv is not None else result.detail,
+                         f", {result.temperature_c} °C" if result.temperature_c is not None
+                         else (f", temperature {result.temperature_code}" if result.temperature_code else ""))
                 if result.code in (OK, NO_BATTERY):
                     out.append(reading(n, result, time.time()))
                 self.state.save()
@@ -240,6 +256,8 @@ class App:
                     result["code"] = st.get("code")
                     result["role"] = st.get("role", "")
                     result["battery_mv"] = st.get("battery_mv")
+                    result["route"] = st.get("last_route_label") or ""
+                    result["temperature_c"] = st.get("temperature_c") if st.get("temp_code") == "ok" else None
                     result["message"] = st.get("detail") or st.get("code") or ""
                     if kind == "poll_now" and readings:
                         self.queue(readings)
@@ -287,11 +305,19 @@ class App:
             st = self.state.value["nodes"].get(n.node_id, {})
             nodes.append({
                 "node_id": n.node_id, "name": n.name, "snr": n.snr, "rssi": n.rssi,
-                "last_seen": n.last_seen, "zero_hop": n.zero_hop, "selected": n.node_id in selected,
+                "last_seen": n.last_seen, "zero_hop": n.zero_hop, "hops": n.hops,
+                "routes": [r.as_dict() for r in n.routes], "reachable": bool(self.routes_for(n)),
+                "selected": n.node_id in selected,
                 "password_set": self.secrets.has_password(n.node_id),
                 "code": st.get("code"), "detail": st.get("detail"), "role": st.get("role"),
                 "battery_mv": st.get("battery_mv"), "last_success": st.get("last_success"),
-                "last_attempt": st.get("last_attempt"),
+                "last_attempt": st.get("last_attempt"), "retried": bool(st.get("retried")),
+                "no_reply_count": st.get("no_reply_count") or 0,
+                "last_route": st.get("last_route"), "last_route_label": st.get("last_route_label"),
+                "temperature_c": st.get("temperature_c"), "temp_at": st.get("temp_at"),
+                "temp_code": st.get("temp_code"), "temp_misses": st.get("temp_misses") or 0,
+                "temperature_skip": n.node_id in self.settings.temperature_skip,
+                "uptime_secs": st.get("uptime_secs"),
             })
         brokers = []
         for b in (self.ohcfg.brokers if self.ohcfg else []):

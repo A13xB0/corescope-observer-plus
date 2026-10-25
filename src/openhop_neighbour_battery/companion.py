@@ -4,6 +4,12 @@ Only the commands this plugin needs: pin a contact's path to direct, read it
 back, log in and ask for status. Every request is checked after sending: the
 server's RESP_CODE_SENT says whether the packet went out as a flood, and the
 plugin treats that as a failure it must never repeat.
+
+Status goes as a binary request (CMD_SEND_BINARY_REQ), not CMD_SEND_STATUS_REQ:
+openHop sends a binary request once and leaves retries to the client, but it
+resends a slow CMD_SEND_STATUS_REQ itself as a flood. The reply is matched on
+the tag from RESP_CODE_SENT, so a late answer to an earlier request can't be
+taken for this one.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ CMD_ADD_UPDATE_CONTACT = 9
 CMD_SEND_LOGIN = 26
 CMD_SEND_STATUS_REQ = 27
 CMD_GET_CONTACT_BY_KEY = 30
+CMD_SEND_BINARY_REQ = 50
 
 RESP_CODE_OK = 0
 RESP_CODE_ERR = 1
@@ -28,6 +35,10 @@ RESP_CODE_SENT = 6
 PUSH_CODE_LOGIN_SUCCESS = 0x85
 PUSH_CODE_LOGIN_FAIL = 0x86
 PUSH_CODE_STATUS_RESPONSE = 0x87
+PUSH_CODE_BINARY_RESPONSE = 0x8C
+
+REQ_TYPE_GET_STATUS = 0x01
+REQ_TYPE_GET_TELEMETRY = 0x03
 
 ERR_CODE_NOT_FOUND = 2
 
@@ -61,11 +72,21 @@ def encode_frame(payload: bytes) -> bytes:
     return bytes([FRAME_TO_SERVER]) + struct.pack("<H", len(payload)) + payload
 
 
-def encode_contact(pubkey: bytes, name: str, *, out_path_len: int = 0) -> bytes:
-    """CMD_ADD_UPDATE_CONTACT body for a repeater with the given path length.
+def path_len_byte(path: bytes, hash_size: int) -> int:
+    """MeshCore's out_path_len byte: hop count, with the hash width in the top two bits."""
+    if not path:
+        return 0
+    if hash_size not in (1, 2, 3) or len(path) % hash_size:
+        raise ValueError("path must be whole hashes of 1, 2 or 3 bytes")
+    return ((hash_size - 1) << 6) | (len(path) // hash_size)
 
-    out_path_len 0 is "direct, empty path": the packet has no next hop, so only
-    a node in radio range can receive it.
+
+def encode_contact(pubkey: bytes, name: str, *, path: bytes = b"", hash_size: int = 1) -> bytes:
+    """CMD_ADD_UPDATE_CONTACT body for a repeater reached along path.
+
+    An empty path is "direct, zero hops": the packet has no next hop, so only
+    a node in radio range can receive it. A one-hash path sends it direct to
+    that relay, which passes it on; nothing is ever flooded.
     """
     if len(pubkey) != 32:
         raise ValueError("pubkey must be 32 bytes")
@@ -73,26 +94,96 @@ def encode_contact(pubkey: bytes, name: str, *, out_path_len: int = 0) -> bytes:
     return (
         bytes([CMD_ADD_UPDATE_CONTACT])
         + pubkey
-        + bytes([ADV_TYPE_REPEATER, 0, out_path_len & 0xFF])
-        + b"\x00" * PATH_SIZE
+        + bytes([ADV_TYPE_REPEATER, 0, path_len_byte(path, hash_size)])
+        + path.ljust(PATH_SIZE, b"\x00")
         + name_b
         + struct.pack("<IiiI", 0, 0, 0, int(time.time()))
     )
 
 
-def contact_out_path_len(frame: bytes) -> int:
-    """out_path_len from a RESP_CODE_CONTACT frame; -1 means unknown (flood)."""
+def contact_route(frame: bytes) -> tuple[int, bytes]:
+    """(out_path_len byte, path) from a RESP_CODE_CONTACT frame; -1 means unknown (flood)."""
     if len(frame) < 36 or frame[0] != RESP_CODE_CONTACT:
         raise CompanionError("not a contact frame")
     value = frame[35]
-    return -1 if value == OUT_PATH_UNKNOWN else value
+    if value == OUT_PATH_UNKNOWN:
+        return -1, b""
+    nbytes = (value & 0x3F) * ((value >> 6) + 1)
+    return value, frame[36 : 36 + nbytes]
 
 
-def status_battery_mv(frame: bytes) -> int:
-    """batt_milli_volts, the first RepeaterStats field of a status push."""
-    if len(frame) < 10 or frame[0] != PUSH_CODE_STATUS_RESPONSE:
-        raise CompanionError("not a status response")
-    return struct.unpack_from("<H", frame, 8)[0]
+def contact_out_path_len(frame: bytes) -> int:
+    """out_path_len from a RESP_CODE_CONTACT frame; -1 means unknown (flood)."""
+    return contact_route(frame)[0]
+
+
+# RepeaterStats (MeshCore examples/simple_repeater/MyMesh.h), in order. Older
+# firmware sends a shorter struct; fields past its end are left out.
+STATS_FIELDS = (
+    ("battery_mv", "H"), ("tx_queue", "H"), ("noise_floor", "h"), ("last_rssi", "h"),
+    ("packets_recv", "I"), ("packets_sent", "I"), ("tx_air_secs", "I"), ("uptime_secs", "I"),
+    ("sent_flood", "I"), ("sent_direct", "I"), ("recv_flood", "I"), ("recv_direct", "I"),
+    ("err_events", "H"), ("last_snr_x4", "h"), ("direct_dups", "H"), ("flood_dups", "H"),
+    ("rx_air_secs", "I"), ("recv_errors", "I"),
+)
+
+
+def parse_stats(data: bytes) -> dict:
+    """The RepeaterStats fields present in a status reply."""
+    if len(data) < 2:
+        raise CompanionError("status reply too short")
+    out: dict = {}
+    off = 0
+    for name, fmt in STATS_FIELDS:
+        size = struct.calcsize("<" + fmt)
+        if off + size > len(data):
+            break
+        (value,) = struct.unpack_from("<" + fmt, data, off)
+        off += size
+        if name == "last_snr_x4":
+            out["last_snr"] = value / 4
+        else:
+            out[name] = value
+    return out
+
+
+def stats_battery_mv(stats: bytes) -> int:
+    """batt_milli_volts, the first RepeaterStats field."""
+    return parse_stats(stats)["battery_mv"]
+
+
+# CayenneLPP as MeshCore writes it (src/helpers/sensors/LPPDataHelpers.h):
+# type -> (size, multiplier, signed).
+LPP_TEMPERATURE = 103
+LPP_VOLTAGE = 116
+TELEM_CHANNEL_SELF = 1
+_LPP_SIZES = {
+    0: 1, 1: 1, 2: 2, 3: 2, 100: 4, 101: 2, 102: 1, 103: 2, 104: 2, 113: 6, 115: 2,
+    116: 2, 117: 2, 118: 4, 120: 1, 121: 2, 125: 2, 128: 2, 130: 4, 131: 4, 132: 2,
+    133: 4, 134: 6, 135: 3, 136: 9, 142: 1,
+}
+
+
+def parse_lpp(data: bytes) -> list[tuple[int, int, bytes]]:
+    """(channel, type, raw value) records, stopping at padding or an unknown type."""
+    out = []
+    i = 0
+    while i + 2 <= len(data):
+        channel, kind = data[i], data[i + 1]
+        size = _LPP_SIZES.get(kind)
+        if channel == 0 or size is None or i + 2 + size > len(data):
+            break
+        out.append((channel, kind, data[i + 2 : i + 2 + size]))
+        i += 2 + size
+    return out
+
+
+def lpp_temperature(data: bytes) -> float | None:
+    """The repeater's own temperature (channel 1) in °C, or None if it sent none."""
+    for channel, kind, raw in parse_lpp(data):
+        if channel == TELEM_CHANNEL_SELF and kind == LPP_TEMPERATURE:
+            return struct.unpack(">h", raw)[0] / 10
+    return None
 
 
 class CompanionClient:
@@ -177,8 +268,8 @@ class CompanionClient:
             if frame and frame[0] in codes and (match is None or match(frame)):
                 return frame
 
-    def _expect_sent(self) -> float:
-        """Wait for RESP_CODE_SENT; refuse a flood. Returns the server's timeout hint."""
+    def _expect_sent(self) -> tuple[float, bytes]:
+        """Wait for RESP_CODE_SENT; refuse a flood. Returns the wait and the tag."""
         frame = self._wait({RESP_CODE_SENT, RESP_CODE_ERR}, self.timeout)
         if frame is None:
             raise CompanionError("no reply to the send command")
@@ -190,28 +281,37 @@ class CompanionClient:
         (timeout_ms,) = struct.unpack_from("<I", frame, 6)
         # The hint covers airtime both ways; a weak or busy neighbour can take
         # longer, so allow at least MIN_REPLY_WAIT.
-        return max(MIN_REPLY_WAIT, min(45.0, timeout_ms / 1000.0 + 5.0))
+        return max(MIN_REPLY_WAIT, min(45.0, timeout_ms / 1000.0 + 5.0)), frame[2:6]
 
     # -- commands -----------------------------------------------------------
 
-    def pin_direct(self, pubkey: bytes, name: str) -> bool:
-        """Set the contact's path to direct and read it back. True if it is 0."""
-        self._send(encode_contact(pubkey, name, out_path_len=0))
+    def pin_route(self, pubkey: bytes, name: str, path: bytes = b"", hash_size: int = 1) -> bool:
+        """Set the contact's path and read it back. True if it stuck exactly."""
+        self._send(encode_contact(pubkey, name, path=path, hash_size=hash_size))
         frame = self._wait({RESP_CODE_OK, RESP_CODE_ERR}, self.timeout)
         if frame is None or frame[0] != RESP_CODE_OK:
             return False
-        return self.out_path_len(pubkey) == 0
+        got = self.route(pubkey)
+        return got == (path_len_byte(path, hash_size), path)
 
-    def out_path_len(self, pubkey: bytes) -> int | None:
+    def pin_direct(self, pubkey: bytes, name: str) -> bool:
+        """Set the contact's path to direct, zero hops, and read it back."""
+        return self.pin_route(pubkey, name)
+
+    def route(self, pubkey: bytes) -> tuple[int, bytes] | None:
         self._send(bytes([CMD_GET_CONTACT_BY_KEY]) + pubkey)
         frame = self._wait({RESP_CODE_CONTACT, RESP_CODE_ERR}, self.timeout)
         if frame is None or frame[0] != RESP_CODE_CONTACT:
             return None
-        return contact_out_path_len(frame)
+        return contact_route(frame)
+
+    def out_path_len(self, pubkey: bytes) -> int | None:
+        got = self.route(pubkey)
+        return None if got is None else got[0]
 
     def login(self, pubkey: bytes, password: str) -> LoginResult:
         self._send(bytes([CMD_SEND_LOGIN]) + pubkey + password.encode("utf-8"))
-        wait = self._expect_sent()
+        wait, _tag = self._expect_sent()
         prefix = pubkey[:6]
         frame = self._wait(
             {PUSH_CODE_LOGIN_SUCCESS, PUSH_CODE_LOGIN_FAIL},
@@ -226,14 +326,27 @@ class CompanionClient:
         perms = frame[12] if len(frame) > 12 else 0
         return LoginResult(ok=True, role="admin" if admin else "guest", permissions=perms)
 
-    def battery_mv(self, pubkey: bytes) -> int | None:
-        """Ask for status; the battery in mV, or None if no answer came."""
-        self._send(bytes([CMD_SEND_STATUS_REQ]) + pubkey)
-        wait = self._expect_sent()
-        prefix = pubkey[:6]
+    def binary_request(self, pubkey: bytes, request: bytes) -> bytes | None:
+        """Send one binary request; the reply data after the tag, or None."""
+        self._send(bytes([CMD_SEND_BINARY_REQ]) + pubkey + request)
+        wait, tag = self._expect_sent()
         frame = self._wait(
-            {PUSH_CODE_STATUS_RESPONSE}, wait, match=lambda f: f[2:8] == prefix
+            {PUSH_CODE_BINARY_RESPONSE}, wait, match=lambda f: f[2:6] == tag
         )
         if frame is None:
             return None
-        return status_battery_mv(frame)
+        return frame[6:]
+
+    def status(self, pubkey: bytes) -> dict | None:
+        """Ask for status; the RepeaterStats fields, or None if no answer came."""
+        data = self.binary_request(pubkey, bytes([REQ_TYPE_GET_STATUS]))
+        return None if data is None else parse_stats(data)
+
+    def battery_mv(self, pubkey: bytes) -> int | None:
+        """Ask for status; the battery in mV, or None if no answer came."""
+        stats = self.status(pubkey)
+        return None if stats is None else stats["battery_mv"]
+
+    def telemetry(self, pubkey: bytes) -> bytes | None:
+        """Ask for telemetry; the CayenneLPP bytes, or None if no answer came."""
+        return self.binary_request(pubkey, bytes([REQ_TYPE_GET_TELEMETRY]))

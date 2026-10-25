@@ -2,8 +2,8 @@
   "schema": 1,
   "id": "openhop.neighbour_battery",
   "name": "Neighbour Battery",
-  "version": "0.1.2",
-  "description": "Reads the battery of the repeaters this node hears directly and publishes it to MQTT as this repeater's observer.",
+  "version": "0.2.0",
+  "description": "Reads the battery of the repeaters this node hears directly or through one relay and publishes it to MQTT as this repeater's observer.",
   "runtime": {
     "type": "python",
     "entrypoint": "openhop-neighbour-battery"
@@ -23,7 +23,11 @@
       "targets": [],
       "brokers": [],
       "max_age_hours": 24,
-      "spacing_seconds": 20
+      "spacing_seconds": 20,
+      "read_temperature": false,
+      "temperature_skip": [],
+      "max_hops": 0,
+      "alternative_routes": false
     }
   }
 }

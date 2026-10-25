@@ -147,3 +147,29 @@ def test_check_now_polls_every_target_and_publishes(tmp_path, monkeypatch):
         assert a.actions["check_now"]["message"] == "1 of 1 read"
     finally:
         fake.close()
+
+
+def test_one_hop_targets_need_max_hops(tmp_path, monkeypatch):
+    from openhop_neighbour_battery.openhop import Route
+    fake = FakeCompanion()
+    try:
+        a, _ = make_app(tmp_path, fake, enabled=True, targets=[NODE])
+        monkeypatch.setattr(a, "refresh", lambda: None)
+        a.ohcfg = load_openhop_config(tmp_path / "config.yaml")
+        a.check = {"companion": {"ok": True}}
+        via = Route(relay_id="4128a6" + "11" * 29, relay_name="sco-edi-garvald", hash_size=3, adverts=3)
+        a.candidates = [Neighbour(NODE, "Dalgety Bay", None, None, 0, False, routes=[via])]
+        assert a.poll([NODE]) == []
+        assert fake.commands == []
+        a.settings.max_hops = 1
+        out = a.poll([NODE])
+        assert out and out[0]["reply_hops"] == 1 and out[0]["via"] == via.relay_id
+        assert fake.contacts[bytes.fromhex(NODE)] == (0x81, bytes.fromhex("4128a6"))
+    finally:
+        fake.close()
+
+
+def test_settings_new_options():
+    s = parse({"max_hops": 3, "read_temperature": 1, "temperature_skip": [NODE, "x"], "alternative_routes": True})
+    assert s.max_hops == 1 and s.read_temperature and s.temperature_skip == [NODE]
+    assert s.alternative_routes

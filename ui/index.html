@@ -36,19 +36,28 @@
     </section>
 
     <section class="card" aria-labelledby="poll-h">
-      <h2 id="poll-h">Battery polling</h2>
-      <div class="row">
-        <label class="switch-row"><input id="enabled" type="checkbox"> Poll selected neighbours</label>
-        <label>Every
-          <select id="interval_minutes">
+      <h2 id="poll-h">Polling</h2>
+      <div class="options">
+        <label class="option"><input id="enabled" type="checkbox"> <span><strong>Poll selected repeaters</strong>
+          <span class="muted small">Every
+          <select id="interval_minutes" aria-label="Polling interval">
             <option value="30">30 minutes</option>
             <option value="60">hour</option>
             <option value="180">3 hours</option>
             <option value="360">6 hours</option>
-          </select>
-        </label>
+          </select></span></span></label>
+        <label class="option"><input id="read_temperature" type="checkbox"> <span><strong>Read temperature</strong>
+          <span class="muted small">Adds a telemetry request after each status request. Chip temperature, on ESP32 and nRF52 boards.</span></span></label>
+        <div class="option"><span></span><span><strong id="reach-label">Reach</strong>
+          <span class="segmented" role="radiogroup" aria-labelledby="reach-label">
+            <label><input type="radio" name="max_hops" value="0"> Direct only</label>
+            <label><input type="radio" name="max_hops" value="1"> Up to 1 hop</label>
+          </span>
+          <span class="muted small">One-hop requests go direct through a relay you hear directly. Each costs the relay two transmissions.</span></span></div>
+        <label class="option"><input id="alternative_routes" type="checkbox"> <span><strong>Try an alternative route</strong>
+          <span class="muted small">If the best route gets no answer, the one retry uses the next route heard in adverts.</span></span></label>
       </div>
-      <p class="muted small">Requests are always sent direct to repeaters heard at zero hops. They are never flooded.</p>
+      <p class="muted small">Every request and retry is sent direct. Nothing is ever flooded. Each reading also carries the repeater's status stats (uptime, noise floor, airtime, packet counts), which come with every status reply.</p>
     </section>
 
     <section class="card" aria-labelledby="brokers-h">
@@ -62,14 +71,16 @@
 
     <section class="card" aria-labelledby="nodes-h">
       <div class="card-head">
-        <h2 id="nodes-h">Neighbours <span id="selected-count" class="muted small"></span></h2>
+        <h2 id="nodes-h">Repeaters <span id="selected-count" class="muted small"></span></h2>
         <button id="check-now" class="button ghost" type="button">Check now</button>
       </div>
+      <div class="table-wrap">
       <table class="table">
-        <thead><tr><th scope="col"></th><th scope="col">Repeater</th><th scope="col">SNR</th><th scope="col">Heard</th><th scope="col">Login</th><th scope="col">Battery</th><th scope="col"></th></tr></thead>
+        <thead><tr><th scope="col"></th><th scope="col">Repeater</th><th scope="col">Route</th><th scope="col">Heard</th><th scope="col">Login</th><th scope="col">Battery</th><th scope="col" class="temp-col">Temp</th><th scope="col"></th></tr></thead>
         <tbody id="nodes"></tbody>
       </table>
-      <p class="muted small">Only repeaters heard directly (zero hops) can be selected.</p>
+      </div>
+      <p id="reach-note" class="muted small"></p>
     </section>
 
     <div class="actions">
@@ -77,15 +88,26 @@
     </div>
   </div>
 
-  <dialog id="login-dialog">
-    <form method="dialog" id="login-form">
-      <h3 id="login-title">Login</h3>
-      <p class="muted small">Leave blank to log in automatically: as a guest when the repeater has no guest password, or through its ACL if it lists this plugin's key. A password is kept on this observer only and never published. An admin password works but gives full control and makes the repeater write to flash at each login, so prefer a guest password or an ACL entry.</p>
-      <label>Password <input id="login-password" type="password" autocomplete="off"></label>
+  <dialog id="details-dialog">
+    <form method="dialog" id="details-form">
+      <h3 id="details-title">Repeater</h3>
+      <label for="login-password">Login password</label>
+      <input id="login-password" type="password" autocomplete="off" placeholder="Blank: guest or ACL">
+      <p class="muted small">Blank logs in automatically: as a guest when the repeater has no guest password, or through its ACL if it lists this plugin's key. A password is kept on this observer only and never published. An admin password works but gives full control and makes the repeater write to flash at each login, so prefer a guest password or an ACL entry.</p>
+      <label class="check"><input id="remove-password" type="checkbox"> Remove the saved password</label>
+      <label class="check"><input id="temp-this" type="checkbox"> Read temperature for this repeater <span id="temp-last" class="muted small"></span></label>
+      <h4>Routes, best first</h4>
+      <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th scope="col"></th><th scope="col">Route</th><th scope="col">Adverts</th><th scope="col">Avg SNR</th><th scope="col">Last result</th></tr></thead>
+        <tbody id="routes"></tbody>
+      </table>
+      </div>
+      <p class="muted small">From adverts heard in the last day. At most 2 routes are tried per poll, and the route that last answered moves to the top.</p>
       <div class="actions">
-        <button value="remove" class="button ghost" type="submit">Remove password</button>
+        <button value="test" class="button ghost" type="submit">Test now</button>
         <button value="cancel" class="button ghost" type="submit">Cancel</button>
-        <button value="save" class="button" type="submit">Set password</button>
+        <button value="save" class="button" type="submit">Apply</button>
       </div>
     </form>
   </dialog>

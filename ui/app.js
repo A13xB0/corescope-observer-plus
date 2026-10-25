@@ -10,7 +10,8 @@
   let runtime = {};
   let dirty = false;
   let passwordUpdates = {};
-  let loginTarget = null;
+  let tempSkip = null; // pending per-repeater temperature choices (a Set), null = unchanged
+  let detailsTarget = null;
   let showKey = false; // the companion key is masked until asked for
 
   // maskKey keeps the first and last four characters, which is enough to
@@ -93,14 +94,64 @@
 
   const CODE_TEXT = {
     ok: "", no_battery: "No battery fitted", needs_password: "Needs password", password_rejected: "Password rejected",
-    no_reply: "No reply", not_direct: "Not direct", not_heard: "Not heard", error: "Error",
+    no_reply: "No reply", not_direct: "Not reachable", not_heard: "Not heard", error: "Error",
   };
+
+  const maxHops = () => Number((document.querySelector('input[name="max_hops"]:checked') || {}).value || 0);
+  const skipSet = () => tempSkip || new Set(config.temperature_skip || []);
+  const reachable = (n) => (n.routes || []).some((r) => r.hops <= maxHops());
+
+  // The routes in the order the plugin will try them: best first, the one that
+  // last answered on top.
+  function orderedRoutes(n) {
+    const routes = (n.routes || []).filter((r) => r.hops <= maxHops());
+    const i = routes.findIndex((r) => r.key === n.last_route);
+    if (i > 0) routes.unshift(routes.splice(i, 1)[0]);
+    return routes;
+  }
+
+  const routeName = (r) => (r.hops ? `1 hop ${esc(r.label)}` : "Direct");
+  const snrText = (snr) => (snr == null ? "" : `SNR ${snr > 0 ? "+" : ""}${Number(snr).toFixed(1)} dB`);
+
+  function routeCell(n) {
+    const all = n.routes || [];
+    if (!all.length) return '<span class="muted">2+ hops</span><div class="muted small">beyond reach</div>';
+    const routes = orderedRoutes(n);
+    if (!routes.length) return `<span class="muted">1 hop</span><div class="muted small">set Reach to "Up to 1 hop"</div>`;
+    const best = routes[0];
+    const notes = [];
+    if (n.retried && n.last_route_label && n.code === "ok") notes.push(`last answered ${esc(n.last_route_label)}`);
+    else if (snrText(best.snr)) notes.push(snrText(best.snr));
+    if (routes.length > 1) notes.push(`${routes.length - 1} other route${routes.length > 2 ? "s" : ""}`);
+    return `<div class="route"><b>${routeName(best)}</b><div class="muted small">${notes.join(" · ")}</div></div>`;
+  }
+
+  function loginCell(n) {
+    if (n.code === "needs_password" || n.code === "password_rejected") return `<span class="pill bad">${esc(CODE_TEXT[n.code])}</span>`;
+    if (n.code === "no_reply" && n.no_reply_count >= 2) return `<span class="pill bad">no answer ×${n.no_reply_count}</span>`;
+    if (n.code === "ok" && n.retried) return '<span class="pill warn">retry used</span>';
+    const pending = passwordUpdates[n.node_id];
+    const pwSet = pending !== undefined ? !!pending : n.password_set;
+    if (n.role) return `<span class="pill good">${esc(n.role)}</span>${pwSet ? '<div class="muted small">password set</div>' : ""}`;
+    return `<span class="muted small">${pwSet ? "Password set" : "Automatic"}</span>`;
+  }
 
   function batteryCell(n) {
     if (n.code === "ok" && n.battery_mv) return `<strong>${(n.battery_mv / 1000).toFixed(2)} V</strong><div class="muted small">${ago(n.last_success)}</div>`;
-    if (!n.code) return '<span class="muted">—</span>';
-    const kind = n.code === "no_battery" ? "neutral" : "warn";
-    return `<span class="pill ${kind}">${esc(CODE_TEXT[n.code] || n.code)}</span>${n.detail ? `<div class="muted small">${esc(n.detail)}</div>` : ""}`;
+    if (n.code === "no_battery") return '<span class="pill neutral">No battery fitted</span>';
+    if (!n.code || n.code === "ok") return '<span class="muted">—</span>';
+    if (n.battery_mv) return `<span class="muted">${(n.battery_mv / 1000).toFixed(2)} V</span><div class="muted small">${ago(n.last_success)}</div>`;
+    return `<span class="pill warn">${esc(CODE_TEXT[n.code] || n.code)}</span>${n.detail ? `<div class="muted small">${esc(n.detail)}</div>` : ""}`;
+  }
+
+  function tempCell(n) {
+    if (skipSet().has(n.node_id)) return '<span class="muted small">off</span>';
+    if (n.temp_code === "ok" || (n.temperature_c != null && n.temp_misses < 3)) {
+      return n.temperature_c == null ? '<span class="muted">—</span>'
+        : `${Number(n.temperature_c).toFixed(1)} °C<div class="muted small">${ago(n.temp_at)}</div>`;
+    }
+    if (n.temp_misses >= 3) return '<span class="muted small">none reported</span>';
+    return '<span class="muted">—</span>';
   }
 
   function render() {
@@ -126,9 +177,20 @@
     if (!dirty) {
       $("enabled").checked = !!config.enabled;
       $("interval_minutes").value = String(config.interval_minutes || 60);
+      $("read_temperature").checked = !!config.read_temperature;
+      $("alternative_routes").checked = !!config.alternative_routes;
+      const hops = String(config.max_hops ? 1 : 0);
+      document.querySelectorAll('input[name="max_hops"]').forEach((el) => { el.checked = el.value === hops; });
     }
+    const showTemp = $("read_temperature").checked;
+    document.querySelectorAll(".temp-col").forEach((el) => { el.hidden = !showTemp; });
 
-    const chosenBrokers = new Set(config.brokers || []);
+    // While editing, keep what's ticked on screen rather than the saved lists.
+    const ticked = (attr, saved) => {
+      const els = [...document.querySelectorAll(`[data-${attr}]`)];
+      return new Set(dirty && els.length ? els.filter((el) => el.checked).map((el) => el.dataset[attr]) : saved || []);
+    };
+    const chosenBrokers = ticked("broker", config.brokers);
     $("brokers").innerHTML = (runtime.brokers || []).map((b) => {
       const last = b.last_error ? `<span class="pill warn" title="${esc(b.last_error)}">Failed</span> <span class="muted small">${esc(b.last_error)}</span>`
         : b.last_ok ? `${ago(b.last_ok)} · ${b.last_count} reading(s)` : '<span class="muted">—</span>';
@@ -138,22 +200,25 @@
         <td>${last}${b.queued ? ` <span class="muted small">· ${b.queued} queued</span>` : ""}</td></tr>`;
     }).join("") || '<tr><td colspan="4" class="muted">No brokers configured in openHop.</td></tr>';
 
-    const chosen = new Set(config.targets || []);
-    const nodes = (runtime.nodes || []).slice().sort((a, b) => (b.zero_hop - a.zero_hop) || ((b.snr ?? -99) - (a.snr ?? -99)));
+    const chosen = ticked("node", config.targets);
+    const hopsOf = (n) => (n.hops == null ? 9 : n.hops);
+    const nodes = (runtime.nodes || []).slice().sort((a, b) => (hopsOf(a) - hopsOf(b)) || ((b.snr ?? -99) - (a.snr ?? -99)));
     $("selected-count").textContent = `${chosen.size} selected`;
     $("nodes").innerHTML = nodes.map((n) => {
-      const pending = passwordUpdates[n.node_id];
-      const pwSet = pending !== undefined ? !!pending : n.password_set;
-      const login = `${pwSet ? "Password set" : "Automatic"}${n.role ? ` <span class="muted small">(${esc(n.role)})</span>` : ""}`;
-      return `<tr class="${n.zero_hop ? "" : "dim"}">
-        <td><input type="checkbox" data-node="${esc(n.node_id)}" ${chosen.has(n.node_id) ? "checked" : ""} ${n.zero_hop ? "" : "disabled"} aria-label="Poll ${esc(n.name)}"></td>
-        <td><strong>${esc(n.name)}</strong><div class="muted small mono">${esc(n.node_id.slice(0, 8))}…${n.zero_hop ? "" : " · not direct"}</div></td>
-        <td>${n.snr == null ? "—" : `${n.snr > 0 ? "+" : ""}${Number(n.snr).toFixed(1)} dB`}</td>
+      const ok = reachable(n);
+      return `<tr class="${ok ? "" : "dim"}">
+        <td><input type="checkbox" data-node="${esc(n.node_id)}" ${chosen.has(n.node_id) ? "checked" : ""} ${ok ? "" : "disabled"} aria-label="Poll ${esc(n.name)}"></td>
+        <td><strong>${esc(n.name)}</strong><div class="muted small mono">${esc(n.node_id.slice(0, 8))}…${n.uptime_secs ? ` · up ${Math.floor(n.uptime_secs / 86400)} d` : ""}</div></td>
+        <td>${routeCell(n)}</td>
         <td>${ago(n.last_seen)}</td>
-        <td>${login} <button class="button ghost small" type="button" data-login="${esc(n.node_id)}" ${n.zero_hop ? "" : "disabled"}>Set</button></td>
-        <td>${batteryCell(n)}</td>
-        <td><button class="button ghost small" type="button" data-test="${esc(n.node_id)}" ${n.zero_hop ? "" : "disabled"}>Test</button></td></tr>`;
-    }).join("") || '<tr><td colspan="7" class="muted">No repeaters heard yet.</td></tr>';
+        <td>${ok || n.role ? loginCell(n) : ""}</td>
+        <td>${ok ? batteryCell(n) : ""}</td>
+        <td class="temp-col" ${showTemp ? "" : "hidden"}>${ok ? tempCell(n) : ""}</td>
+        <td><button class="button ghost small" type="button" data-details="${esc(n.node_id)}" ${ok ? "" : "disabled"}>Details</button></td></tr>`;
+    }).join("") || '<tr><td colspan="8" class="muted">No repeaters heard yet.</td></tr>';
+    $("reach-note").textContent = maxHops()
+      ? "Repeaters heard direct, or through one relay you hear directly."
+      : "Only repeaters heard directly (zero hops) can be selected. Set Reach to \"Up to 1 hop\" for more.";
   }
 
   function collect() {
@@ -161,6 +226,10 @@
     config.interval_minutes = Number($("interval_minutes").value);
     config.brokers = [...document.querySelectorAll("[data-broker]")].filter((el) => el.checked).map((el) => el.dataset.broker);
     config.targets = [...document.querySelectorAll("[data-node]")].filter((el) => el.checked).map((el) => el.dataset.node);
+    config.read_temperature = $("read_temperature").checked;
+    config.alternative_routes = $("alternative_routes").checked;
+    config.max_hops = maxHops();
+    config.temperature_skip = [...skipSet()];
   }
 
   async function connect() {
@@ -184,12 +253,13 @@
   }
 
   async function test(nodeId) {
-    notice("Logging in and asking for status. This can take up to a minute…");
+    notice("Asking for status, logging in if needed. This can take up to a minute…");
     try {
       const id = await request("test_login", nodeId);
       const a = await waitForAction("test_login", id);
-      const text = a.code === "ok" ? `Logged in${a.role ? " as " + a.role : ""}: ${(a.battery_mv / 1000).toFixed(2)} V`
-        : a.code === "no_battery" ? `Logged in${a.role ? " as " + a.role : ""}: no battery fitted (0 mV)`
+      const extra = `${a.route ? ` ${a.route}` : ""}${a.temperature_c != null ? `, ${Number(a.temperature_c).toFixed(1)} °C` : ""}`;
+      const text = a.code === "ok" ? `Answered${a.role ? " as " + a.role : ""}${extra}: ${(a.battery_mv / 1000).toFixed(2)} V`
+        : a.code === "no_battery" ? `Answered${a.role ? " as " + a.role : ""}${extra}: no battery fitted (0 mV)`
         : `${CODE_TEXT[a.code] || a.code || "Failed"}${a.message && a.message !== a.code ? ": " + a.message : ""}`;
       notice(text, a.code === "ok" || a.code === "no_battery" ? (a.role === "admin" ? "warn" : "good") : "bad");
     } catch (e) {
@@ -227,30 +297,57 @@
     if (!ok) throw new Error("copy refused");
   }
 
-  function openLogin(nodeId) {
-    loginTarget = nodeId;
+  function openDetails(nodeId) {
+    detailsTarget = nodeId;
     const n = (runtime.nodes || []).find((x) => x.node_id === nodeId);
-    $("login-title").textContent = `Login for ${n ? n.name : nodeId.slice(0, 8)}`;
+    if (!n) return;
+    $("details-title").textContent = n.name;
     $("login-password").value = "";
-    $("login-dialog").showModal();
+    $("remove-password").checked = false;
+    const pending = passwordUpdates[nodeId];
+    $("remove-password").disabled = !(pending !== undefined ? pending : n.password_set);
+    const tempOn = $("read_temperature").checked;
+    $("temp-this").checked = !skipSet().has(nodeId);
+    $("temp-this").disabled = !tempOn;
+    $("temp-last").textContent = !tempOn ? "(turn on Read temperature first)"
+      : n.temperature_c != null ? `Last: ${Number(n.temperature_c).toFixed(1)} °C, ${ago(n.temp_at)}`
+      : n.temp_misses >= 3 ? "None reported so far" : "";
+    const routes = orderedRoutes(n);
+    $("routes").innerHTML = routes.map((r, i) => {
+      const last = r.key === n.last_route ? (n.code === "ok" ? '<span class="pill good">answered</span>' : '<span class="pill bad">no answer</span>')
+        : i === 0 && n.code === "no_reply" ? '<span class="pill bad">no answer</span>' : '<span class="muted small">not tried</span>';
+      return `<tr><td class="muted">${i + 1}</td><td>${routeName(r)}</td><td>${r.adverts}</td><td>${r.snr == null ? "—" : `${Number(r.snr).toFixed(1)} dB`}</td><td>${last}</td></tr>`;
+    }).join("") || '<tr><td colspan="5" class="muted">No usable route.</td></tr>';
+    $("details-dialog").showModal();
   }
 
-  $("login-form").addEventListener("submit", (ev) => {
+  $("details-form").addEventListener("submit", (ev) => {
     const action = ev.submitter && ev.submitter.value;
-    if (!loginTarget || action === "cancel") return;
-    passwordUpdates[loginTarget] = action === "remove" ? "" : $("login-password").value;
+    if (!detailsTarget || action === "cancel") return;
+    if (action === "test") { test(detailsTarget); return; }
+    const pw = $("login-password").value;
+    if ($("remove-password").checked) passwordUpdates[detailsTarget] = "";
+    else if (pw) passwordUpdates[detailsTarget] = pw;
+    if (!$("temp-this").disabled) {
+      const skip = new Set(skipSet());
+      if ($("temp-this").checked) skip.delete(detailsTarget); else skip.add(detailsTarget);
+      tempSkip = skip;
+    }
     dirty = true;
     render();
-    notice("Save to apply the login change.");
+    notice("Save to apply the changes.");
   });
 
   document.addEventListener("click", (ev) => {
     const t = ev.target;
-    if (t.dataset.login) openLogin(t.dataset.login);
-    else if (t.dataset.test) test(t.dataset.test);
+    if (t.dataset.details) openDetails(t.dataset.details);
   });
   document.addEventListener("change", (ev) => {
-    if (ev.target.matches("input, select")) dirty = true;
+    if (ev.target.closest("dialog")) return;
+    if (ev.target.matches("input, select")) {
+      dirty = true;
+      if (ev.target.name === "max_hops" || ev.target.id === "read_temperature") render();
+    }
   });
   $("connect").addEventListener("click", connect);
   $("check-now").addEventListener("click", checkNow);
@@ -273,6 +370,7 @@
       const extra = Object.keys(passwordUpdates).length ? { password_updates: passwordUpdates } : {};
       await saveConfig(extra);
       passwordUpdates = {};
+      tempSkip = null;
       dirty = false;
       notice("Saved.", "good");
     } catch (e) {

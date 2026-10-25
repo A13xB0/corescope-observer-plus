@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,6 +20,42 @@ class OpenHopError(Exception):
     pass
 
 
+ADVERT_PACKET_TYPE = 4
+ADVERT_PACKET_LIMIT = 10000
+
+
+@dataclass
+class Route:
+    """One way to reach a repeater: direct, or through one relay heard direct."""
+
+    relay_id: str = ""  # lowercase 64-hex of the relay; "" for direct
+    relay_name: str = ""
+    hash_size: int = 1  # bytes per hop hash on this route
+    adverts: int = 0  # the repeater's adverts heard this way in the window
+    snr: float | None = None  # their average SNR
+
+    @property
+    def hops(self) -> int:
+        return 1 if self.relay_id else 0
+
+    @property
+    def key(self) -> str:
+        return self.relay_id or "direct"
+
+    @property
+    def path(self) -> bytes:
+        return bytes.fromhex(self.relay_id)[: self.hash_size] if self.relay_id else b""
+
+    @property
+    def label(self) -> str:
+        return f"via {self.relay_name or self.relay_id[:8]}" if self.relay_id else "direct"
+
+    def as_dict(self) -> dict:
+        return {"key": self.key, "hops": self.hops, "relay_id": self.relay_id,
+                "relay_name": self.relay_name, "label": self.label, "adverts": self.adverts,
+                "snr": None if self.snr is None else round(self.snr, 1)}
+
+
 @dataclass
 class Neighbour:
     node_id: str  # lowercase 64-hex
@@ -25,6 +64,16 @@ class Neighbour:
     rssi: int | None
     last_seen: float
     zero_hop: bool
+    routes: list[Route] = field(default_factory=list)  # best first
+
+    def __post_init__(self):
+        if self.zero_hop and not self.routes:
+            self.routes = [Route(snr=self.snr)]
+
+    @property
+    def hops(self) -> int | None:
+        """Fewest hops of any known route; None when it was only heard further away."""
+        return min((r.hops for r in self.routes), default=0 if self.zero_hop else None)
 
 
 @dataclass
@@ -129,6 +178,24 @@ class OpenHopAPI:
         out.sort(key=lambda n: (not n.zero_hop, -(n.snr if n.snr is not None else -99)))
         return out
 
+    def advert_packets(self, max_age_hours: int) -> list[dict]:
+        body = self._get(
+            "/api/filtered_packets", type=ADVERT_PACKET_TYPE, limit=ADVERT_PACKET_LIMIT,
+            start_timestamp=int(time.time() - max_age_hours * 3600),
+        )
+        rows = body.get("data", []) if isinstance(body, dict) else []
+        return [r for r in rows if isinstance(r, dict)]
+
+    def repeaters(self, max_age_hours: int) -> list[Neighbour]:
+        """Repeaters heard in the window, each with its direct and one-relay routes."""
+        neighbours = self.zero_hop_repeaters(max_age_hours)
+        try:
+            packets = self.advert_packets(max_age_hours)
+        except OpenHopError:
+            packets = []
+        attach_routes(neighbours, packets)
+        return neighbours
+
     def mqtt_status(self) -> dict[str, dict]:
         """Broker name -> {connected, enabled, format} from openHop's own connections."""
         body = self._get("/api/mqtt_status")
@@ -228,3 +295,70 @@ def companion_port(cfg: OpenHopConfig, name: str) -> int | None:
     return int(port) if port else None
 
 
+
+
+def _path_hashes(row: dict) -> list[str] | None:
+    """The hop hashes an advert came through, as lowercase hex; None if unreadable."""
+    raw = row.get("original_path")
+    if raw in (None, "", "null"):
+        return []
+    try:
+        hops = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return None
+    if not isinstance(hops, list):
+        return None
+    out = [str(h).lower() for h in hops]
+    return out if all(len(h) in (2, 4, 6) for h in out) else None
+
+
+def attach_routes(neighbours: list[Neighbour], packets: list[dict]) -> None:
+    """Fill each neighbour's routes from recorded advert packets, best first.
+
+    A route through a relay is kept only when the relay's hash matches exactly
+    one repeater heard direct, so a request can be addressed to it. The hash
+    width is the one the relay itself forwarded the advert with, so the relay
+    is known to understand it.
+    """
+    by_id = {n.node_id: n for n in neighbours}
+    heard_direct = {n.node_id for n in neighbours if n.zero_hop}
+    for row in packets:
+        key = str(row.get("payload") or "")[:64].lower()
+        if key in by_id and _path_hashes(row) == []:
+            heard_direct.add(key)
+    direct = [by_id[k] for k in heard_direct]
+    counts: dict[tuple[str, str], list] = defaultdict(lambda: [0, 0.0, 0, 1])
+    for row in packets:
+        key = str(row.get("payload") or "")[:64].lower()
+        if key not in by_id:
+            continue
+        hops = _path_hashes(row)
+        if hops is None or len(hops) > 1:
+            continue
+        relay = ""
+        size = 1
+        if hops:
+            matches = [n for n in direct if n.node_id.startswith(hops[0]) and n.node_id != key]
+            if len(matches) != 1:
+                continue
+            relay = matches[0].node_id
+            size = len(hops[0]) // 2
+        c = counts[(key, relay)]
+        c[0] += 1
+        if isinstance(row.get("snr"), (int, float)):
+            c[1] += float(row["snr"])
+            c[2] += 1
+        c[3] = max(c[3], size)
+    for n in neighbours:
+        routes = []
+        for (key, relay), (count, snr_sum, snr_n, size) in counts.items():
+            if key != n.node_id:
+                continue
+            routes.append(Route(
+                relay_id=relay, relay_name=by_id[relay].name if relay else "", hash_size=size,
+                adverts=count, snr=snr_sum / snr_n if snr_n else None,
+            ))
+        if n.zero_hop and not any(r.hops == 0 for r in routes):
+            routes.append(Route(adverts=0, snr=n.snr))
+        routes.sort(key=lambda r: (-r.adverts, -(r.snr if r.snr is not None else -99)))
+        n.routes = routes
