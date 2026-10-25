@@ -51,12 +51,16 @@ def make_jwt(identity: LocalIdentity, audience: str, now: datetime | None = None
     return f"{signing_input}.{binascii.hexlify(signature).decode()}"
 
 
-def topic_for(broker: Broker, cfg: OpenHopConfig, public_key_hex: str) -> str:
+def _topic(broker: Broker, cfg: OpenHopConfig, public_key_hex: str, leaf: str) -> str:
     if broker.base_topic:
-        return f"{broker.base_topic.rstrip('/')}/battery"
+        return f"{broker.base_topic.rstrip('/')}/{leaf}"
     if broker.format == "mqtt":
-        return f"meshcore/repeater/{cfg.node_name}/battery"
-    return f"meshcore/{cfg.iata_code}/{public_key_hex}/battery"
+        return f"meshcore/repeater/{cfg.node_name}/{leaf}"
+    return f"meshcore/{cfg.iata_code}/{public_key_hex}/{leaf}"
+
+
+def topic_for(broker: Broker, cfg: OpenHopConfig, public_key_hex: str) -> str:
+    return _topic(broker, cfg, public_key_hex, "battery")
 
 
 def build_payload(cfg: OpenHopConfig, public_key_hex: str, readings: list[dict]) -> dict:
@@ -83,11 +87,27 @@ class Publisher:
         return f"meshcore_{self.public_key_hex}_{broker.host}_battery"
 
     def publish(self, broker: Broker, readings: list[dict]) -> None:
-        """Connect, publish one batch at QoS 1, wait for the ack, disconnect."""
+        """Connect, publish one battery batch at QoS 1, wait for the ack, disconnect."""
+        payload = json.dumps(build_payload(self.cfg, self.public_key_hex, readings))
+        self._send(broker, topic_for(broker, self.cfg, self.public_key_hex), payload)
+
+    def publish_claim(self, broker: Broker, node_ids: list[str]) -> None:
+        """Tell CoreScope which repeaters this observer polls under the shared
+        key, so a decoded reply is credited to it ("requested by …")."""
+        payload = json.dumps({
+            "v": 1,
+            "origin": self.cfg.node_name,
+            "origin_id": self.public_key_hex,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "plugin": PLUGIN_TAG,
+            "nodes": [str(n).lower() for n in node_ids],
+        })
+        self._send(broker, _topic(broker, self.cfg, self.public_key_hex, "sharedclaim"), payload)
+
+    def _send(self, broker: Broker, topic: str, payload: str) -> None:
+        """Connect, publish one message at QoS 1, wait for the ack, disconnect."""
         if broker.format not in MC2MQTT_FORMATS and broker.format != "mqtt":
             raise RuntimeError(f"unsupported broker format {broker.format!r}")
-        payload = json.dumps(build_payload(self.cfg, self.public_key_hex, readings))
-        topic = topic_for(broker, self.cfg, self.public_key_hex)
 
         client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,

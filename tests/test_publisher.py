@@ -52,6 +52,9 @@ def test_topic_and_payload():
     payload = pub.build_payload(p.cfg, p.public_key_hex, [{"node_id": "x"}])
     assert payload["v"] == 1 and payload["origin_id"] == p.public_key_hex
     assert payload["origin"] == "Cadham Village"
+    # The claim topic shares the structure, with a sharedclaim leaf.
+    assert pub._topic(b, p.cfg, p.public_key_hex, "sharedclaim") == f"meshcore/EDI/{p.public_key_hex}/sharedclaim"
+    assert pub._topic(custom, p.cfg, p.public_key_hex, "sharedclaim") == "home/obs/sharedclaim"
 
 
 def test_client_id_differs_from_openhops():
@@ -130,3 +133,15 @@ def test_unknown_broker_format_refused(monkeypatch):
     monkeypatch.setattr(pub.mqtt, "Client", FakeClient)
     with pytest.raises(RuntimeError):
         pub.Publisher(cfg()).publish(Broker(name="x", host="h", port=1, format="weird"), [])
+
+
+def test_publish_claim_sends_nodes(monkeypatch):
+    p = pub.Publisher(cfg())
+    b = Broker(name="ScotMesh", host="h", port=443, format="meshcoretomqtt")
+    captured = {}
+    monkeypatch.setattr(p, "_send",
+                        lambda broker, topic, payload: captured.update(topic=topic, payload=json.loads(payload)))
+    p.publish_claim(b, ["AB" * 32, "CD" * 32])
+    assert captured["topic"] == f"meshcore/EDI/{p.public_key_hex}/sharedclaim"
+    assert captured["payload"]["nodes"] == ["ab" * 32, "cd" * 32]
+    assert captured["payload"]["origin_id"] == p.public_key_hex and captured["payload"]["v"] == 1

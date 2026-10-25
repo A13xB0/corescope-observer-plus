@@ -307,6 +307,31 @@ class App:
             q = self.state.broker(name).setdefault("queue", [])
             q.extend(readings)
 
+    def publish_claims(self, now: float) -> None:
+        """Tell CoreScope which repeaters this observer polls under the shared
+        key, so decoded replies are credited to it. Refreshed at most twice an
+        hour; the claim lasts 3 h on CoreScope."""
+        if not self.ohcfg or not self.check.get("publish", {}).get("ok"):
+            return
+        nodes = [n for n in self.settings.shared_key_targets if self.uses_shared_key(n)]
+        if not nodes or now - float(self.state.value.get("claims_at") or 0) < 1800:
+            return
+        publisher = Publisher(self.ohcfg)
+        brokers = {b.name: b for b in self.ohcfg.brokers}
+        sent = False
+        for name in self.settings.brokers:
+            b = brokers.get(name)
+            if b is None:
+                continue
+            try:
+                publisher.publish_claim(b, nodes)
+                sent = True
+            except Exception as exc:  # noqa: BLE001 - retried next tick
+                LOG.warning("shared-key claim to %s failed: %s", name, exc)
+        if sent:
+            self.state.value["claims_at"] = now
+            self.state.save()
+
     def flush(self) -> None:
         if not self.ohcfg or not self.check.get("publish", {}).get("ok"):
             return
@@ -403,6 +428,8 @@ class App:
             readings = self.poll(self.settings.targets)
             if readings:
                 self.queue(readings)
+        if self.settings.enabled:
+            self.publish_claims(time.time())
         self.flush()
         self.write_runtime()
 
