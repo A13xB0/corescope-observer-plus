@@ -26,15 +26,13 @@ DEFAULTS = {
     "corescope_url": "https://corescope.scotmesh.net",
     "max_hops": 0,
     "alternative_routes": False,
-    "shared_key_name": "",
-    "shared_key_version": 0,
-    "shared_key_public": "",
     "shared_key_targets": [],
+    "check_corescope": True,
 }
 
 # Written by the plugin page, consumed and cleared by the plugin. Secrets go
 # straight to secrets.json so they never stay in config.json.
-TRANSIENT_KEYS = ("api_token_input", "password_updates", "requests", "shared_key_private_input")
+TRANSIENT_KEYS = ("api_token_input", "password_updates", "requests")
 
 
 @dataclass
@@ -56,14 +54,12 @@ class Settings:
     corescope_url: str = "https://corescope.scotmesh.net"
     max_hops: int = 0  # 0 = direct neighbours only, 1 = also through one relay
     alternative_routes: bool = False
-    # The shared guest key, opt-in per repeater. Name, version and public half
-    # are not secret and live here; the private half is in secrets.json. A
-    # repeater is polled under the shared key only if its id is in
-    # shared_key_targets (and it has no saved password).
-    shared_key_name: str = ""
-    shared_key_version: int = 0
-    shared_key_public: str = ""
+    # Repeaters opted in to the shared guest key (polled under the key CoreScope
+    # serves, if it serves one, and if they have no saved password).
     shared_key_targets: list[str] = field(default_factory=list)
+    # Before a shared-key repeater's early retry, ask CoreScope whether it
+    # already has a fresh reading (from any observer); if so, skip the retry.
+    check_corescope: bool = True
 
 
 def parse(raw: dict) -> Settings:
@@ -109,15 +105,9 @@ def parse(raw: dict) -> Settings:
     url = str(raw.get("corescope_url") or "").strip().rstrip("/")
     if url.startswith(("http://", "https://")):
         s.corescope_url = url
-    s.shared_key_name = str(raw.get("shared_key_name") or "")[:64]
-    try:
-        s.shared_key_version = max(0, int(raw.get("shared_key_version") or 0))
-    except (TypeError, ValueError):
-        pass
-    pub = str(raw.get("shared_key_public") or "").strip().lower()
-    s.shared_key_public = pub if KEY_RE.match(pub) else ""
     s.shared_key_targets = sorted({str(k).lower() for k in raw.get("shared_key_targets") or []
                                    if KEY_RE.match(str(k).lower())})
+    s.check_corescope = bool(raw.get("check_corescope", True))
     return s
 
 

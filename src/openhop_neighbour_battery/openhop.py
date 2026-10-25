@@ -396,3 +396,40 @@ def search_corescope(base_url: str, query: str, *, timeout: float = 10.0) -> lis
                     "last_seen": n.get("last_heard") or n.get("last_seen"),
                     "lat": n.get("lat"), "lon": n.get("lon")})
     return out
+
+
+def fetch_shared_guest_key(base_url: str, *, timeout: float = 5.0) -> dict | None:
+    """The shared guest key CoreScope serves, or None.
+
+    CoreScope holds the key; the plugin asks for it here. A key coming back
+    both provides the key and signals the feature is live on this CoreScope.
+    None on any error or an empty response, so the plugin simply has no shared
+    key and polls with its own.
+    """
+    try:
+        r = requests.get(f"{base_url}/api/shared-guest/key", timeout=timeout)
+        if r.status_code != 200:
+            return None
+        body = r.json()
+    except (requests.RequestException, ValueError):
+        return None
+    if not isinstance(body, dict) or not body.get("public_key") or not body.get("private_key"):
+        return None
+    return body
+
+
+def corescope_latest_battery_ts(base_url: str, node_id: str, *, timeout: float = 5.0) -> str | None:
+    """CoreScope's newest battery timestamp for a node (ISO), or None.
+
+    None on any error, so the caller falls back to retrying rather than
+    skipping. The timestamp is whatever observer reported last, which is the
+    point: another observer's reading counts.
+    """
+    try:
+        r = requests.get(f"{base_url}/api/nodes/{node_id}/battery", params={"days": 1}, timeout=timeout)
+        r.raise_for_status()
+        body = r.json()
+    except (requests.RequestException, ValueError):
+        return None
+    ts = body.get("latest_ts") if isinstance(body, dict) else None
+    return ts if isinstance(ts, str) and ts else None

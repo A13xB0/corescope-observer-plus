@@ -40,27 +40,16 @@
         <h2 id="shared-h">Shared guest key</h2>
         <span id="shared-state" class="pill neutral">Off</span>
       </div>
-      <p class="muted small">A public guest identity used to poll a repeater, so any observer that hears the reply can feed CoreScope. A built-in key is used by default — just opt a repeater in from its Details. It is only ever used with a blank password, and never with admin: the private half is public, so anyone holding the key could log in as it.</p>
+      <p class="muted small">A public guest identity used to poll a repeater, so any observer that hears the reply can feed CoreScope. The key comes from CoreScope — nothing to set up here beyond its address. Opt a repeater in from its Details. It is only ever used with a blank password, and never with admin.</p>
       <div id="shared-set" class="kv">
         <div><span class="muted">Key</span> <strong id="shared-name">—</strong> <span id="shared-ver" class="muted small"></span> <code id="shared-pub" class="muted">—</code></div>
+        <div><span class="muted">From</span> <code id="shared-from">—</code></div>
       </div>
-      <details id="shared-edit">
-        <summary>Override the built-in key</summary>
-        <p class="muted small">Optional. Paste a different shared key to override the built-in one. The private half is stored on this observer only and never shown again. Clear it to return to the built-in key.</p>
-        <label for="shared-name-in">Name</label>
-        <input id="shared-name-in" type="text" autocomplete="off" placeholder="CoreScope shared guest">
-        <div class="row">
-          <span><label for="shared-ver-in">Version</label><input id="shared-ver-in" type="number" min="0" step="1" value="1"></span>
-        </div>
-        <label for="shared-pub-in">Public key</label>
-        <input id="shared-pub-in" type="text" autocomplete="off" placeholder="64-character public key" class="mono">
-        <label for="shared-priv-in">Private key</label>
-        <input id="shared-priv-in" type="password" autocomplete="off" placeholder="64- or 128-character private key" class="mono">
-        <div class="actions">
-          <button id="shared-clear" class="button ghost" type="button">Clear key</button>
-          <button id="shared-apply" class="button" type="button">Apply key</button>
-        </div>
-      </details>
+      <label for="corescope_url" style="display:block;margin-top:12px">CoreScope address</label>
+      <input id="corescope_url" type="text" autocomplete="off" placeholder="https://corescope.example" class="mono" style="width:100%;max-width:480px;padding:8px;margin-top:4px;border:1px solid var(--line);border-radius:8px;background:var(--bg);box-sizing:border-box">
+      <p class="muted small">Where the plugin fetches the key, looks up repeaters, and checks whether a reading already arrived.</p>
+      <label class="option" style="margin-top:8px"><input id="check_corescope" type="checkbox"> <span><strong>Skip a retry when CoreScope already has it</strong>
+        <span class="muted small">If a shared-key repeater doesn't answer but CoreScope already has a fresh reading from another observer, don't retry.</span></span></label>
     </section>
 
     <section class="card" aria-labelledby="poll-h">

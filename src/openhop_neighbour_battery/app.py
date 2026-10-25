@@ -16,11 +16,13 @@ from .openhop import (
     OpenHopError,
     Route,
     companion_port,
+    corescope_latest_battery_ts,
+    fetch_shared_guest_key,
     load_openhop_config,
     search_corescope,
 )
 from . import shared_key as sk
-from .poller import ADMIN_STOP, NO_BATTERY, OK, is_due, poll_one, poll_one_shared, reading, record, utc_iso
+from .poller import ADMIN_STOP, NO_BATTERY, NO_REPLY, OK, is_due, poll_one, poll_one_shared, reading, record, utc_iso
 from .publisher import Publisher
 from .settings import TRANSIENT_KEYS, Settings, parse, read_raw, write_raw
 from .storage import Secrets, State
@@ -46,6 +48,7 @@ class App:
         self.companion_key = ""
         self.actions: dict[str, dict] = self.state.value.setdefault("actions", {})
         self._last_refresh = 0.0
+        self._shared_cache: dict = {}  # the shared key fetched from CoreScope, cached by URL
 
     # -- settings ---------------------------------------------------------
 
@@ -64,10 +67,6 @@ class App:
                     self.secrets.set_password(node_id, str(pw or ""))
                     self.state.node(node_id)["password_changed"] = True
                     LOG.info("login password %s for %s", "set" if pw else "removed", node_id[:8])
-        shared_priv = raw.get("shared_key_private_input")
-        if isinstance(shared_priv, str):
-            self.secrets.set_shared_private_key(shared_priv)
-            LOG.info("shared guest key %s", "saved" if shared_priv.strip() else "cleared")
         requests = raw.get("requests")
         if isinstance(requests, list):
             self.state.value.setdefault("pending", []).extend(
@@ -158,23 +157,29 @@ class App:
         """The routes polling may use for n under the current reach setting."""
         return [r for r in n.routes if r.hops <= self.settings.max_hops]
 
-    def shared_key(self) -> sk.SharedKey | None:
-        """The shared guest key in use: the operator's override, else the
-        fixed built-in.
+    def _corescope_covers(self, node_id: str, within_s: float, now: float) -> bool:
+        """True if CoreScope already has a battery reading for the node newer
+        than within_s — from any observer. A failed lookup is False, so the
+        plugin falls back to retrying rather than skipping."""
+        ts = corescope_latest_battery_ts(self.settings.corescope_url, node_id)
+        if not ts:
+            return False
+        return now - _ts(ts) < within_s
 
-        An override takes a public half in settings and a private half in
-        secrets; without a complete, valid override the built-in key compiled
-        into the plugin is used, so the feature needs no setup.
+    def shared_key(self, now: float | None = None) -> sk.SharedKey | None:
+        """The shared guest key, fetched from CoreScope and cached.
+
+        The plugin keeps no key of its own: it asks the configured CoreScope,
+        which holds the one key for its network. Cached for 24 hours per URL.
+        None when CoreScope serves no key or can't be reached — the plugin then
+        has no shared key and falls back to polling with its own.
         """
-        s = self.settings
-        private_hex = self.secrets.shared_private_key()
-        if s.shared_key_public and private_hex:
-            try:
-                return sk.SharedKey(s.shared_key_name or "shared guest", s.shared_key_version,
-                                    bytes.fromhex(s.shared_key_public), bytes.fromhex(private_hex))
-            except (ValueError, sk.SharedKeyError):
-                pass
-        return sk.builtin_shared_key()
+        now = now or time.time()
+        url = self.settings.corescope_url
+        c = self._shared_cache
+        if not (c.get("url") == url and now - float(c.get("at") or 0) < 24 * 3600):
+            self._shared_cache = {"url": url, "at": now, "key": sk.SharedKey.from_api(fetch_shared_guest_key(url))}
+        return self._shared_cache.get("key")
 
     def uses_shared_key(self, node_id: str) -> bool:
         """Whether this repeater is polled under the shared key.
@@ -207,8 +212,22 @@ class App:
             if n is None or not self.routes_for(n):
                 st["code"] = "not_direct" if n else "not_heard"
                 continue
-            if force or is_due(st, interval, self.secrets.has_password(node_id), now):
-                due.append(n)
+            if not (force or is_due(st, interval, self.secrets.has_password(node_id), now)):
+                continue
+            # A shared-key repeater that only answered late (its early retry is
+            # due): skip the retry if CoreScope already has a fresh reading from
+            # any observer — a neighbour's overhear covers it. Only when
+            # CoreScope has the shared-guest feature live, and never on a forced
+            # poll. The lookup fails open, so an unreachable CoreScope retries.
+            if (not force and self.settings.check_corescope and st.get("code") == NO_REPLY
+                    and self.uses_shared_key(node_id)
+                    and self._corescope_covers(node_id, interval, now)):
+                st["covered_at"] = now
+                st["last_attempt"] = now  # reschedule; another observer has it for now
+                LOG.info("skip %s (%s): CoreScope already has a fresh reading from another observer",
+                         n.name, node_id[:8])
+                continue
+            due.append(n)
         due.sort(key=lambda n: float(self.state.node(n.node_id).get("last_attempt") or 0))
         out = []
         if not due:
@@ -235,6 +254,8 @@ class App:
                     )
                 record(st, result, bool(pw), time.time())
                 st.pop("password_changed", None)
+                if result.code in (OK, NO_BATTERY):
+                    st.pop("covered_at", None)
                 st["name"] = n.name
                 if result.code == ADMIN_STOP:
                     self._disable_shared_key(n, result)
@@ -250,14 +271,12 @@ class App:
         return out
 
     def _shared_key_runtime(self) -> dict:
-        """What the plugin page shows for the shared key: the key in use (the
-        built-in unless overridden), whether it is the built-in, and the opt-in
-        list."""
+        """What the plugin page shows for the shared key: the key CoreScope
+        serves (if any), where it came from, and the opt-in list."""
         key = self.shared_key()
-        builtin = key is not None and key.public_key.hex() == sk.BUILTIN_PUBLIC
         return {
             "configured": key is not None,
-            "builtin": builtin,
+            "from": self.settings.corescope_url,
             "name": key.name if key else "",
             "version": key.version if key else 0,
             "public": key.public_key.hex() if key else "",
@@ -414,6 +433,7 @@ class App:
                 "shared_admin_seen": bool(st.get("shared_admin_seen")),
                 "shared_admin_removed": st.get("shared_admin_removed"),
                 "shared_admin_at": st.get("shared_admin_at"),
+                "covered_at": st.get("covered_at"),
             })
         brokers = []
         for b in (self.ohcfg.brokers if self.ohcfg else []):
@@ -439,6 +459,11 @@ class App:
             "brokers": brokers,
             "actions": self.actions,
             "shared_key": self._shared_key_runtime(),
+            "corescope": {
+                "url": self.settings.corescope_url,
+                "check": self.settings.check_corescope,
+                "shared_enabled": self.shared_key() is not None,
+            },
         }
         path = self.data_dir / "runtime.json"
         tmp = path.with_suffix(".tmp")

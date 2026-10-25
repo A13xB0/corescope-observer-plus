@@ -41,9 +41,12 @@ your repeater's observer, for CoreScope to show.
 
 A repeater can be polled under a shared, public guest identity instead of this
 observer's own key, so any observer that hears the reply can feed CoreScope.
-Off by default; turned on per repeater from its Details. A fixed built-in key
-(the same one CoreScope holds) is used unless you paste an override, so there
-is nothing to set up.
+Off by default; turned on per repeater from its Details.
+
+The plugin keeps no key of its own: it fetches the shared key from CoreScope
+(`GET /api/shared-guest/key` on `corescope_url`). When CoreScope serves a key,
+opted-in repeaters are polled under it; when it serves none, they fall back to
+this observer's own key. The key is public by design.
 
 - Requests, logins and the route update are built and encrypted by the plugin
   with the shared key and sent as finished raw packets (`CMD_SEND_RAW_PACKET`);
@@ -55,6 +58,10 @@ is nothing to set up.
   then a verifying login) and tells you.
 - Readings taken this way are published with `"key":"shared"`, which CoreScope
   credits as "shared key".
+- Before an unanswered shared-key repeater's early retry, the plugin asks
+  CoreScope whether it already has a fresh reading from any observer; if so it
+  skips the retry (a nearby observer's overhear covered it). Read-only, fails
+  open, and off for own-key polling. Toggle with `check_corescope`.
 
 ## Install
 

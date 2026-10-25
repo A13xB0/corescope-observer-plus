@@ -13,7 +13,6 @@
   let tempTargets = null; // pending per-repeater temperature choices (a Set), null = unchanged
   let detailsTarget = null;
   let showKey = false; // the companion key is masked until asked for
-  let sharedPrivate = null; // pending shared-key private half to save (write-only), null = unchanged
 
   // maskKey keeps the first and last four characters, which is enough to
   // recognise the key without showing it.
@@ -202,16 +201,17 @@
     document.querySelectorAll(".temp-col").forEach((el) => { el.hidden = !showTemp; });
 
     const sk = runtime.shared_key || {};
+    const nTargets = (sk.targets || []).length;
     const skPill = $("shared-state");
-    skPill.textContent = sk.configured ? (`${(sk.targets || []).length} repeater${(sk.targets || []).length === 1 ? "" : "s"}`) : "Off";
-    skPill.className = "pill " + (sk.configured ? "good" : "neutral");
-    $("shared-name").textContent = sk.name || (sk.configured ? "shared guest" : "not set");
-    $("shared-ver").textContent = sk.configured ? `· v${sk.version || 0}${sk.builtin ? " · built-in" : ""}` : "";
+    skPill.textContent = sk.configured ? (nTargets ? `${nTargets} repeater${nTargets === 1 ? "" : "s"}` : "ready") : "No key from CoreScope";
+    skPill.className = "pill " + (sk.configured ? "good" : "warn");
+    $("shared-name").textContent = sk.name || (sk.configured ? "shared guest" : "none served");
+    $("shared-ver").textContent = sk.configured ? `· v${sk.version || 0}` : "";
     $("shared-pub").textContent = sk.public ? maskKey(sk.public.toUpperCase()) : "—";
+    $("shared-from").textContent = sk.from || (config.corescope_url || "—");
     if (!dirty) {
-      $("shared-name-in").value = config.shared_key_name || "";
-      $("shared-ver-in").value = String(config.shared_key_version || 1);
-      $("shared-pub-in").value = config.shared_key_public || "";
+      $("corescope_url").value = config.corescope_url || "";
+      $("check_corescope").checked = config.check_corescope !== false;
     }
 
     // While editing, keep what's ticked on screen rather than the saved lists.
@@ -262,6 +262,9 @@
     config.alternative_routes = $("alternative_routes").checked;
     config.max_hops = maxHops();
     config.temperature_targets = [...tempSet()];
+    const url = $("corescope_url").value.trim().replace(/\/+$/, "");
+    if (url) config.corescope_url = url;
+    config.check_corescope = $("check_corescope").checked;
   }
 
   async function connect() {
@@ -448,40 +451,6 @@
   $("connect").addEventListener("click", connect);
   $("check-now").addEventListener("click", checkNow);
 
-  $("shared-apply").addEventListener("click", async () => {
-    const name = $("shared-name-in").value.trim();
-    const version = Math.max(0, Number($("shared-ver-in").value) || 0);
-    const pub = $("shared-pub-in").value.trim().toLowerCase();
-    const priv = $("shared-priv-in").value.trim().toLowerCase();
-    if (!KEY_RE.test(pub)) { notice("The public key must be 64 hex characters.", "warn"); return; }
-    if (!/^([0-9a-f]{64}|[0-9a-f]{128})$/.test(priv)) { notice("The private key must be 64 or 128 hex characters.", "warn"); return; }
-    try {
-      config.shared_key_name = name;
-      config.shared_key_version = version;
-      config.shared_key_public = pub;
-      sharedPrivate = priv;
-      collect();
-      await saveConfig({ shared_key_private_input: priv,
-        ...(Object.keys(passwordUpdates).length ? { password_updates: passwordUpdates } : {}) });
-      passwordUpdates = {}; tempTargets = null; sharedPrivate = null; dirty = false;
-      $("shared-priv-in").value = "";
-      notice("Shared key saved.", "good");
-    } catch (e) { notice(e.message, "bad"); }
-  });
-
-  $("shared-clear").addEventListener("click", async () => {
-    try {
-      config.shared_key_name = "";
-      config.shared_key_version = 0;
-      config.shared_key_public = "";
-      sharedPrivate = "";
-      collect();
-      await saveConfig({ shared_key_private_input: "" });
-      sharedPrivate = null; dirty = false;
-      $("shared-priv-in").value = "";
-      notice("Shared key cleared.", "good");
-    } catch (e) { notice(e.message, "bad"); }
-  });
   $("show-key").addEventListener("click", () => { showKey = !showKey; render(); });
   $("copy-key").addEventListener("click", async () => {
     const key = ($("companion-key").dataset.key || "").toUpperCase();
@@ -499,11 +468,9 @@
     try {
       collect();
       const extra = Object.keys(passwordUpdates).length ? { password_updates: passwordUpdates } : {};
-      if (sharedPrivate !== null) extra.shared_key_private_input = sharedPrivate;
       await saveConfig(extra);
       passwordUpdates = {};
       tempTargets = null;
-      sharedPrivate = null;
       dirty = false;
       notice("Saved.", "good");
     } catch (e) {

@@ -183,58 +183,68 @@ def test_manual_repeaters_and_corescope_url_settings():
     assert parse({"corescope_url": "ftp://nope"}).corescope_url == "https://corescope.scotmesh.net"
 
 
-def _shared_keypair():
-    """A usable shared keypair via openhop_core, if it is installed."""
+def _serve_key(monkeypatch):
+    """Make CoreScope serve a usable shared key to the app under test."""
     import pytest
     pytest.importorskip("openhop_core")
     from openhop_core.protocol.identity import LocalIdentity
     while True:
         lid = LocalIdentity()
         if lid.get_public_key()[0] not in (0x00, 0xFF):
-            return lid.get_public_key().hex(), lid.get_signing_key_bytes().hex()
+            break
+    key = {"name": "CoreScope shared guest", "version": 1,
+           "public_key": lid.get_public_key().hex(),
+           "private_key": lid.get_signing_key_bytes().hex()}
+    monkeypatch.setattr(app_mod, "fetch_shared_guest_key", lambda url, **k: dict(key))
+    return key
 
 
-def test_shared_key_config_and_secret_split(tmp_path):
+def test_shared_key_fetched_from_corescope(tmp_path, monkeypatch):
     fake = FakeCompanion()
     try:
-        pub, priv = _shared_keypair()
-        a, data = make_app(tmp_path, fake, shared_key_name="CoreScope shared guest",
-                           shared_key_version=1, shared_key_public=pub,
-                           shared_key_targets=[NODE], shared_key_private_input=priv)
-        cfg = json.loads((data / "config.json").read_text())
-        # The private half never stays in config.json; the public half may.
-        assert "shared_key_private_input" not in cfg
-        assert priv not in json.dumps(cfg)
-        assert a.secrets.shared_private_key() == priv
-        assert a.shared_key() is not None
+        key = _serve_key(monkeypatch)
+        a, data = make_app(tmp_path, fake, shared_key_targets=[NODE])
+        got = a.shared_key()
+        assert got is not None and got.public_key.hex() == key["public_key"]
+        assert a.uses_shared_key(NODE) is True
         a.write_runtime()
-        runtime = (data / "runtime.json").read_text()
-        assert priv not in runtime
-        assert json.loads(runtime)["shared_key"]["configured"] is True
+        rt = json.loads((data / "runtime.json").read_text())
+        assert rt["shared_key"]["configured"] is True
+        assert rt["shared_key"]["public"] == key["public_key"]
+        # The private half is public by design, but config.json never stores the key.
+        assert "shared_key_private" not in (data / "config.json").read_text()
     finally:
         fake.close()
 
 
-def test_shared_key_never_used_with_a_password(tmp_path):
+def test_no_shared_key_when_corescope_serves_none(tmp_path, monkeypatch):
     fake = FakeCompanion()
     try:
-        pub, priv = _shared_keypair()
-        a, _ = make_app(tmp_path, fake, shared_key_public=pub, shared_key_version=1,
-                        shared_key_targets=[NODE], shared_key_private_input=priv,
+        monkeypatch.setattr(app_mod, "fetch_shared_guest_key", lambda url, **k: None)
+        a, _ = make_app(tmp_path, fake, shared_key_targets=[NODE])
+        assert a.shared_key() is None
+        assert a.uses_shared_key(NODE) is False  # opted in, but no key to use
+    finally:
+        fake.close()
+
+
+def test_shared_key_never_used_with_a_password(tmp_path, monkeypatch):
+    fake = FakeCompanion()
+    try:
+        _serve_key(monkeypatch)
+        a, _ = make_app(tmp_path, fake, shared_key_targets=[NODE],
                         password_updates={NODE: "a-real-secret"})
-        # Opted in, key configured — but a saved password blocks the shared key.
         assert a.secrets.has_password(NODE)
-        assert a.uses_shared_key(NODE) is False
+        assert a.uses_shared_key(NODE) is False  # a saved password blocks the shared key
     finally:
         fake.close()
 
 
-def test_shared_key_blocked_after_an_admin_answer(tmp_path):
+def test_shared_key_blocked_after_an_admin_answer(tmp_path, monkeypatch):
     fake = FakeCompanion()
     try:
-        pub, priv = _shared_keypair()
-        a, _ = make_app(tmp_path, fake, shared_key_public=pub, shared_key_version=1,
-                        shared_key_targets=[NODE], shared_key_private_input=priv)
+        _serve_key(monkeypatch)
+        a, _ = make_app(tmp_path, fake, shared_key_targets=[NODE])
         assert a.uses_shared_key(NODE) is True
         a.state.node(NODE)["shared_admin_seen"] = True
         assert a.uses_shared_key(NODE) is False
@@ -242,31 +252,32 @@ def test_shared_key_blocked_after_an_admin_answer(tmp_path):
         fake.close()
 
 
-def test_shared_key_off_when_not_opted_in(tmp_path):
+def test_shared_key_off_when_not_opted_in(tmp_path, monkeypatch):
     fake = FakeCompanion()
     try:
-        pub, priv = _shared_keypair()
-        a, _ = make_app(tmp_path, fake, shared_key_public=pub, shared_key_version=1,
-                        shared_key_private_input=priv)
-        assert a.uses_shared_key(NODE) is False  # configured but not opted in
+        _serve_key(monkeypatch)
+        a, _ = make_app(tmp_path, fake)  # key available but no repeater opted in
+        assert a.shared_key() is not None
+        assert a.uses_shared_key(NODE) is False
     finally:
         fake.close()
 
 
-def test_builtin_shared_key_is_the_default(tmp_path):
+def test_corescope_covers_skips_a_fresh_reading(tmp_path, monkeypatch):
     fake = FakeCompanion()
     try:
-        # No key pasted at all: the built-in key is used, and a repeater opted
-        # in is polled under it.
-        a, _ = make_app(tmp_path, fake, shared_key_targets=[NODE])
-        key = a.shared_key()
-        assert key is not None
-        from openhop_neighbour_battery import shared_key as sk
-        assert key.public_key.hex() == sk.BUILTIN_PUBLIC
-        assert a.uses_shared_key(NODE) is True
-        a.write_runtime()
-        rt = json.loads((tmp_path / "data" / "runtime.json").read_text())
-        assert rt["shared_key"]["builtin"] is True
-        assert rt["shared_key"]["configured"] is True
+        import time as _t
+        from openhop_neighbour_battery.poller import utc_iso
+        a, _ = make_app(tmp_path, fake)
+        now = _t.time()
+        # A reading 5 minutes old is within a 60-minute window -> covered.
+        monkeypatch.setattr(app_mod, "corescope_latest_battery_ts", lambda url, nid, **k: utc_iso(now - 300))
+        assert a._corescope_covers(NODE, 3600, now) is True
+        # Two hours old -> not covered.
+        monkeypatch.setattr(app_mod, "corescope_latest_battery_ts", lambda url, nid, **k: utc_iso(now - 7200))
+        assert a._corescope_covers(NODE, 3600, now) is False
+        # Lookup failure fails open (not covered -> plugin retries).
+        monkeypatch.setattr(app_mod, "corescope_latest_battery_ts", lambda url, nid, **k: None)
+        assert a._corescope_covers(NODE, 3600, now) is False
     finally:
         fake.close()
