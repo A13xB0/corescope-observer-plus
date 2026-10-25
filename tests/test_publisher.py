@@ -141,7 +141,10 @@ def test_publish_claim_sends_nodes(monkeypatch):
     captured = {}
     monkeypatch.setattr(p, "_send",
                         lambda broker, topic, payload: captured.update(topic=topic, payload=json.loads(payload)))
-    p.publish_claim(b, ["AB" * 32, "CD" * 32])
+    p.publish_claim(b, [{"node_id": "ab" * 32, "reply_hops": 0},
+                        {"node_id": "cd" * 32, "reply_hops": 1, "via": "ef" * 32}])
     assert captured["topic"] == f"meshcore/EDI/{p.public_key_hex}/sharedclaim"
-    assert captured["payload"]["nodes"] == ["ab" * 32, "cd" * 32]
+    nodes = captured["payload"]["nodes"]
+    assert nodes[0] == {"node_id": "ab" * 32, "reply_hops": 0}
+    assert nodes[1]["via"] == "ef" * 32 and nodes[1]["reply_hops"] == 1
     assert captured["payload"]["origin_id"] == p.public_key_hex and captured["payload"]["v"] == 1

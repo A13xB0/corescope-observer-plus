@@ -195,7 +195,12 @@ def _serve_key(monkeypatch):
     key = {"name": "CoreScope shared guest", "version": 1,
            "public_key": lid.get_public_key().hex(),
            "private_key": lid.get_signing_key_bytes().hex()}
-    monkeypatch.setattr(app_mod, "fetch_shared_guest_key", lambda url, **k: dict(key))
+    key["_calls"] = calls = []
+
+    def fake_fetch(url, **k):
+        calls.append(url)
+        return {k2: v for k2, v in key.items() if k2 != "_calls"}
+    monkeypatch.setattr(app_mod, "fetch_shared_guest_key", fake_fetch)
     return key
 
 
@@ -255,10 +260,12 @@ def test_shared_key_blocked_after_an_admin_answer(tmp_path, monkeypatch):
 def test_shared_key_off_when_not_opted_in(tmp_path, monkeypatch):
     fake = FakeCompanion()
     try:
-        _serve_key(monkeypatch)
+        key = _serve_key(monkeypatch)
         a, _ = make_app(tmp_path, fake)  # key available but no repeater opted in
-        assert a.shared_key() is not None
+        # With nothing opted in the plugin never calls CoreScope for the key.
+        assert a.shared_key() is None
         assert a.uses_shared_key(NODE) is False
+        assert key["_calls"] == [], "fetched the key with no shared targets"
     finally:
         fake.close()
 

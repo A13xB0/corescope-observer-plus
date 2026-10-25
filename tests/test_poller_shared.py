@@ -66,6 +66,11 @@ class FakeRepeater:
         self.battery_mv = battery_mv
         self.cli_commands: list[str] = []
         self._outbox: list[bytes] = []
+        self._clk = 1_700_000_000  # the repeater's own clock, distinct from request tags
+
+    def _clock(self) -> int:
+        self._clk += 1
+        return self._clk
 
     # -- CompanionClient surface the poller uses ---------------------------
 
@@ -94,11 +99,13 @@ class FakeRepeater:
         ptype = pkt.get_payload_type()
         payload = pkt.get_payload()
         if ptype == PAYLOAD_TYPE_ANON_REQ:
-            plaintext = CryptoUtils.mac_then_decrypt(self.secret[:16], self.secret, payload[33:])
-            tag = int.from_bytes(plaintext[:4], "little")
             if self.answer_login:
                 admin_code = 1 if self.admin else 0
-                self._reply(tag, bytes([0, 60, admin_code, admin_code]) + os.urandom(4))
+                # Real firmware puts the repeater's OWN clock first in a login
+                # reply, not the request's tag (MyMesh.cpp), so the plugin can't
+                # match it by tag and must tell it by shape. Use a clock value
+                # unrelated to any request tag here to prove that path.
+                self._reply(self._clock(), bytes([0, 60, admin_code, admin_code]) + os.urandom(4))
             return
         if ptype == PAYLOAD_TYPE_REQ:
             plaintext = CryptoUtils.mac_then_decrypt(self.secret[:16], self.secret, payload[2:])

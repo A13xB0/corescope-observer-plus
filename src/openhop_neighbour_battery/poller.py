@@ -277,71 +277,76 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
     under it.
     """
     now = now or time.time()
-    key = bytes.fromhex(n.node_id)
-    live = ordered_routes([r for r in routes], node_state.get("last_route"))
-    if not live:
-        return PollResult(NOT_DIRECT, key_mode="shared", detail="no direct or one-hop route heard")
-    route = live[0]
-    out_path = route.path
-    plen = path_len_byte(out_path, route.hash_size)
-    one_hop = route.hops > 0
-    candidates = [key]
-
-    def listen(pending: dict[int, str], want: set[str]) -> dict[str, sk.Reply]:
-        """Collect replies within one window, keyed by the kind each tag was."""
-        got: dict[str, sk.Reply] = {}
-        for frame in client.collect_rx(reply_window):
-            reply = sk.decode_rx(frame, shared, candidates)
-            if reply is None:
-                continue
-            kind = pending.get(reply.tag)
-            if kind:
-                got[kind] = reply
-                if want <= set(got):
-                    break
-        return got
-
-    # Status direct; telemetry only through a relay (same airtime reasoning as
-    # the own-key poll).
-    kind = "telemetry" if one_hop else "status"
     reply = None
     admin = False
-    logged_in = bool(node_state.get("logged_in_at"))
     try:
+        key = bytes.fromhex(n.node_id)
+        live = ordered_routes([r for r in routes], node_state.get("last_route"))
+        if not live:
+            return PollResult(NOT_DIRECT, key_mode="shared", detail="no direct or one-hop route heard")
+        route = live[0]
+        out_path = route.path
+        plen = path_len_byte(out_path, route.hash_size)
+        one_hop = route.hops > 0
+
+        def collect(data_tag: int) -> tuple[sk.Reply | None, sk.LoginResult | None]:
+            """One window: the data reply (matched by our tag) and the login
+            answer (told by shape — its own tag is the repeater's clock, not
+            ours). Stops early on an admin answer or once both are in hand."""
+            data = login = None
+            for frame in client.collect_rx(reply_window):
+                r = sk.decode_rx(frame, shared, [key])
+                if r is None:
+                    continue
+                if r.tag == data_tag and data is None:
+                    data = r
+                elif login is None:
+                    lr = sk.login_result(r)
+                    if lr is not None:
+                        login = lr
+                        if lr.is_admin:
+                            break
+                if data is not None and login is not None:
+                    break
+            return data, login
+
+        # Status direct; telemetry only through a relay (same airtime reasoning
+        # as the own-key poll). A login goes out on every poll so the role is
+        # re-checked each time: a key that was made admin answers a blank login
+        # as admin, and that must be caught in steady state, not only on first
+        # contact. The route is taught only on first contact.
+        kind = "telemetry" if one_hop else "status"
+        teach = not node_state.get("logged_in_at")
         for attempt in range(max(1, attempts)):
             if attempt:
                 sleep(RETRY_GAP_SECONDS)
-            login_tag = -1
-            if not logged_in:
-                # Log in blank so the repeater adds the key as a guest, then
-                # teach it the route back so its replies come direct, not
-                # flooded (a key freshly added by login has no return path —
-                # firmware ClientACL.putClient). For a one-hop repeater the
-                # return path is back through the same relay; for a direct
-                # neighbour it is empty (direct).
-                login_body, login_tag = sk.build_login(shared, key, out_path, plen, "")
-                client.send_raw_packet(login_body)
+            # Blank login (adds/keeps the key as a guest; never carries a
+            # password); teach the return path once so replies come direct, not
+            # flooded (firmware ClientACL.putClient leaves a new key pathless).
+            client.send_raw_packet(sk.build_login(shared, key, out_path, plen, "")[0])
+            if teach:
                 if one_hop:
                     client.send_raw_packet(sk.build_route_update(
                         shared, key, out_path, plen, return_path=out_path, return_path_len=plen))
                 else:
                     client.send_raw_packet(sk.build_route_update(shared, key, out_path, plen))
-                sleep(LOGIN_SETTLE_SECONDS)
-                logged_in = True  # proven by any reply below; reset on no answer
-            body, tag = (sk.build_status_request if kind == "status"
-                         else sk.build_telemetry_request)(shared, key, out_path, plen)
+                teach = False
+            sleep(LOGIN_SETTLE_SECONDS)
+            body, data_tag = (sk.build_status_request if kind == "status"
+                              else sk.build_telemetry_request)(shared, key, out_path, plen)
             client.send_raw_packet(body)
-            heard = listen({tag: kind, login_tag: "login"}, {kind})
-            if "login" in heard:
-                res = sk.login_result(heard["login"])
-                if res is not None and res.is_admin:
+            data, login = collect(data_tag)
+            if login is not None:
+                node_state["logged_in_at"] = now
+                if login.is_admin:
                     admin = True
                     break
-            if kind in heard:
-                reply = heard[kind]
+            if data is not None:
+                reply = data
                 break
-            # No answer: re-login and re-teach the route on the next attempt.
-            logged_in = False
+            # No answer at all: teach the route again next attempt (a reboot
+            # drops the key and its path).
+            teach = True
             node_state.pop("logged_in_at", None)
         if admin:
             removed = _admin_removal_drill(client, shared, key, out_path, plen, sleep)
@@ -350,7 +355,9 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                               detail="the repeater answered the shared key as admin")
     except sk.UnsafeSharedPassword as exc:
         return PollResult(ERROR, key_mode="shared", detail=str(exc))
-    except (CompanionError, OSError, sk.SharedKeyError) as exc:
+    except (CompanionError, OSError, sk.SharedKeyError, ValueError) as exc:
+        # ValueError guards a bad route/path so one repeater can't abort the
+        # whole poll cycle (and the own-key polls in it).
         return PollResult(ERROR, key_mode="shared", detail=str(exc))
 
     if reply is None:
@@ -391,21 +398,26 @@ def _admin_removal_drill(client: CompanionClient, shared: sk.SharedKey, key: byt
     except (CompanionError, OSError, sk.SharedKeyError):
         return False
     sleep(ADMIN_REMOVE_SETTLE)
+    # A one-hop repeater's return path is back through the relay (non-empty
+    # out_path); a direct neighbour's is empty.
+    rp, rlen = (out_path, plen) if out_path else (b"", None)
     for attempt in range(ADMIN_REMOVE_TRIES):
         if attempt:
             sleep(RETRY_GAP_SECONDS)
         try:
-            body, tag = sk.build_login(shared, key, out_path, plen, "")
-            client.send_raw_packet(body)
+            client.send_raw_packet(sk.build_login(shared, key, out_path, plen, "")[0])
             # setperm 0 deleted the ACL entry and its return path, so teach the
             # route again or the verifying reply floods and we miss it.
-            client.send_raw_packet(sk.build_route_update(shared, key, out_path, plen))
+            client.send_raw_packet(sk.build_route_update(shared, key, out_path, plen,
+                                                         return_path=rp, return_path_len=rlen))
         except (CompanionError, OSError, sk.SharedKeyError, sk.UnsafeSharedPassword):
             continue
         for frame in client.collect_rx(SHARED_REPLY_WINDOW):
             reply = sk.decode_rx(frame, shared, [key])
-            if reply is None or reply.tag != tag:
+            if reply is None:
                 continue
+            # The login answer is told by shape, not tag (it carries the
+            # repeater's clock); a non-admin answer confirms the key is demoted.
             result = sk.login_result(reply)
             if result is not None and not result.is_admin:
                 return True

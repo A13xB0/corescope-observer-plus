@@ -119,10 +119,18 @@ class SharedKey:
         pub = str(body.get("public_key") or "")
         priv = str(body.get("private_key") or "")
         try:
-            return cls(str(body.get("name") or "shared guest"), int(body.get("version") or 0),
-                       bytes.fromhex(pub), bytes.fromhex(priv))
+            key = cls(str(body.get("name") or "shared guest"), int(body.get("version") or 0),
+                      bytes.fromhex(pub), bytes.fromhex(priv))
         except (ValueError, SharedKeyError):
             return None
+        # The public half must belong to the private half, or every request is
+        # encrypted to a key no one holds and a setperm would name the wrong key.
+        try:
+            if key.identity().get_public_key() != key.public_key:
+                return None
+        except Exception:  # noqa: BLE001 - a bad key is simply no key
+            return None
+        return key
 
 
 @dataclass(frozen=True)
@@ -321,15 +329,20 @@ class LoginResult:
 
 
 def login_result(reply: Reply) -> LoginResult | None:
-    """Read a reply the caller knows was a login answer.
+    """Read a reply as a login answer, or None if its shape isn't one.
 
-    Login reply after the tag: response_code(1) + keep_alive(1) + admin_code(1)
-    + permissions(1) + random(4), then AES padding. Only call this for a tag the
-    caller sent as a login; the bytes of a stats or telemetry reply would parse
-    as nonsense here (which is exactly why the kind is never guessed from them).
+    A login reply carries the repeater's own clock first, not the request tag
+    (simple_repeater MyMesh.cpp), so it can't be matched by tag; instead it is
+    told apart by shape. After that 4-byte clock it is response_code(1) +
+    keep_alive(1) + admin_code(1) + permissions(1) + random(4). The response
+    code is 0 or 1 and the admin code is 0..3; a stats or telemetry reply's
+    bytes fall outside that, so this returns None for them and no non-login
+    reply is ever read as admin.
     """
     body = reply.data
     if len(body) < 4:
         return None
-    _response_code, _keep_alive, admin_code, permissions = body[0], body[1], body[2], body[3]
+    response_code, _keep_alive, admin_code, permissions = body[0], body[1], body[2], body[3]
+    if response_code > 1 or admin_code > 3:
+        return None
     return LoginResult(is_admin=admin_code == LOGIN_ADMIN_CODE_ADMIN, permissions=permissions)

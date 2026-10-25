@@ -91,16 +91,19 @@ class Publisher:
         payload = json.dumps(build_payload(self.cfg, self.public_key_hex, readings))
         self._send(broker, topic_for(broker, self.cfg, self.public_key_hex), payload)
 
-    def publish_claim(self, broker: Broker, node_ids: list[str]) -> None:
+    def publish_claim(self, broker: Broker, claims: list[dict]) -> None:
         """Tell CoreScope which repeaters this observer polls under the shared
-        key, so a decoded reply is credited to it ("requested by …")."""
+        key, and by what route, so a decoded reply is credited to it
+        ("requested by …") with the right hops — CoreScope can't see the route
+        from the overheard reply. ``claims`` is a list of
+        {node_id, reply_hops, via}."""
         payload = json.dumps({
             "v": 1,
             "origin": self.cfg.node_name,
             "origin_id": self.public_key_hex,
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "plugin": PLUGIN_TAG,
-            "nodes": [str(n).lower() for n in node_ids],
+            "nodes": claims,
         })
         self._send(broker, _topic(broker, self.cfg, self.public_key_hex, "sharedclaim"), payload)
 

@@ -80,6 +80,15 @@ class App:
             write_raw(self.data_dir, raw)
             self.state.save()
         self.settings = parse(raw)
+        # Re-opting a repeater into the shared key (adding it back to the list
+        # after an admin answer disabled it) clears the admin stop, so it can
+        # be tried again deliberately.
+        for node_id in self.settings.shared_key_targets:
+            st = self.state.value.get("nodes", {}).get(node_id)
+            if st and st.get("shared_admin_seen"):
+                for k in ("shared_admin_seen", "shared_admin_removed", "shared_admin_at"):
+                    st.pop(k, None)
+                self.state.save()
 
     def api(self) -> OpenHopAPI:
         return OpenHopAPI(self.settings.openhop_api_url, self.secrets.api_token)
@@ -174,6 +183,10 @@ class App:
         None when CoreScope serves no key or can't be reached — the plugin then
         has no shared key and falls back to polling with its own.
         """
+        # Nothing opted in: don't call CoreScope at all (an own-key-only install
+        # never fetches the shared key).
+        if not self.settings.shared_key_targets:
+            return None
         now = now or time.time()
         url = self.settings.corescope_url
         c = self._shared_cache
@@ -268,7 +281,12 @@ class App:
                          f"{result.battery_mv} mV" if result.battery_mv is not None else result.detail,
                          f", {result.temperature_c} °C" if result.temperature_c is not None
                          else (f", temperature {result.temperature_code}" if result.temperature_code else ""))
-                if result.code in (OK, NO_BATTERY):
+                # A shared-key reading is not published here: CoreScope decodes
+                # it from the raw reply (which this node's openHop uploads like
+                # any observer) and credits it to this poller via the claim, so
+                # publishing it too would double the row. Own-key readings are
+                # published as before.
+                if result.code in (OK, NO_BATTERY) and result.key_mode != "shared":
                     out.append(reading(n, result, time.time()))
                 self.state.save()
         return out
@@ -316,8 +334,23 @@ class App:
         hour; the claim lasts 3 h on CoreScope."""
         if not self.ohcfg or not self.check.get("publish", {}).get("ok"):
             return
-        nodes = [n for n in self.settings.shared_key_targets if self.uses_shared_key(n)]
-        if not nodes or now - float(self.state.value.get("claims_at") or 0) < 1800:
+        claims = []
+        for node_id in self.settings.shared_key_targets:
+            n = self._neighbour(node_id)
+            # Claim only repeaters still selected for polling, reachable, and
+            # actually using the shared key — not ones left in the list but
+            # unticked or out of range.
+            if n is None or node_id not in self.settings.targets or not self.uses_shared_key(node_id):
+                continue
+            routes = self.routes_for(n)
+            if not routes:
+                continue
+            r = routes[0]
+            entry = {"node_id": node_id, "reply_hops": r.hops}
+            if r.relay_id:
+                entry["via"] = r.relay_id
+            claims.append(entry)
+        if not claims or now - float(self.state.value.get("claims_at") or 0) < 1800:
             return
         publisher = Publisher(self.ohcfg)
         brokers = {b.name: b for b in self.ohcfg.brokers}
@@ -327,7 +360,7 @@ class App:
             if b is None:
                 continue
             try:
-                publisher.publish_claim(b, nodes)
+                publisher.publish_claim(b, claims)
                 sent = True
             except Exception as exc:  # noqa: BLE001 - retried next tick
                 LOG.warning("shared-key claim to %s failed: %s", name, exc)

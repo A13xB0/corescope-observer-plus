@@ -107,7 +107,12 @@ def parse(raw: dict) -> Settings:
         s.corescope_url = url
     s.shared_key_targets = sorted({str(k).lower() for k in raw.get("shared_key_targets") or []
                                    if KEY_RE.match(str(k).lower())})
-    s.check_corescope = bool(raw.get("check_corescope", True))
+    cc = raw.get("check_corescope", True)
+    # A JSON false, or the strings "false"/"0"/"no"/"off" from a form, all mean off.
+    if isinstance(cc, str):
+        s.check_corescope = cc.strip().lower() not in ("false", "0", "no", "off", "")
+    else:
+        s.check_corescope = bool(cc)
     return s
 
 
