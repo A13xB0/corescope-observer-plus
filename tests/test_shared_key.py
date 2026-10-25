@@ -156,6 +156,27 @@ def test_wrong_repeater_for_the_hash_ruled_out_by_mac():
     assert reply is not None and reply.repeater_pubkey == sender.get_public_key()
 
 
+def test_route_update_builds_a_direct_path_packet():
+    from openhop_core.protocol.constants import PAYLOAD_TYPE_PATH
+    from openhop_core.protocol.packet import Packet
+    shared, _ = _shared()
+    rpub = _identity().get_public_key()
+    body = sk.build_route_update(shared, rpub, b"", 0)
+    assert body[0] == sk.PRIORITY_NORMAL
+    pkt = Packet()
+    assert pkt.read_from(body[1:])
+    assert pkt.get_payload_type() == PAYLOAD_TYPE_PATH
+    # Sent direct (route type 2), not flood, so it stays off the wider mesh.
+    assert pkt.get_route_type() == 2
+
+
+def test_route_update_refuses_to_flood():
+    shared, _ = _shared()
+    rpub = _identity().get_public_key()
+    with pytest.raises(sk.SharedKeyError):
+        sk.build_route_update(shared, rpub, b"", -1)
+
+
 def test_admin_removal_builds_the_setperm_command():
     shared, _ = _shared()
     rpub = _identity().get_public_key()

@@ -301,36 +301,47 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                     break
         return got
 
+    # Status direct; telemetry only through a relay (same airtime reasoning as
+    # the own-key poll).
+    kind = "telemetry" if one_hop else "status"
+    reply = None
+    admin = False
+    logged_in = bool(node_state.get("logged_in_at"))
     try:
-        # Log in (blank) so the repeater knows the key, then watch for its reply.
-        login_body, login_tag = sk.build_login(shared, key, out_path, plen, "")
-        client.send_raw_packet(login_body)
-        heard = listen({login_tag: "login"}, {"login"})
-        if "login" in heard:
-            node_state["logged_in_at"] = now
-            result = sk.login_result(heard["login"])
-            if result is not None and result.is_admin:
-                removed = _admin_removal_drill(client, shared, key, out_path, plen, sleep)
-                return PollResult(ADMIN_STOP, role="admin", key_mode="shared", route=route,
-                                  admin_seen=True, admin_removed=removed,
-                                  detail="the repeater answered the shared key as admin")
-
-        # Ask for the reading. Status direct; telemetry only through a relay
-        # (same airtime reasoning as the own-key poll).
-        kind = "telemetry" if one_hop else "status"
-        reply = None
         for attempt in range(max(1, attempts)):
             if attempt:
                 sleep(RETRY_GAP_SECONDS)
-            if kind == "status":
-                body, tag = sk.build_status_request(shared, key, out_path, plen)
-            else:
-                body, tag = sk.build_telemetry_request(shared, key, out_path, plen)
+            login_tag = -1
+            if not logged_in:
+                # Log in blank so the repeater adds the key as a guest, then
+                # teach it the route back so its replies come direct: a key
+                # freshly added by login has no return path and would flood
+                # every reply (firmware ClientACL.putClient). Both go direct.
+                login_body, login_tag = sk.build_login(shared, key, out_path, plen, "")
+                client.send_raw_packet(login_body)
+                client.send_raw_packet(sk.build_route_update(shared, key, out_path, plen))
+                sleep(LOGIN_SETTLE_SECONDS)
+                logged_in = True  # proven by any reply below; reset on no answer
+            body, tag = (sk.build_status_request if kind == "status"
+                         else sk.build_telemetry_request)(shared, key, out_path, plen)
             client.send_raw_packet(body)
-            heard = listen({tag: kind}, {kind})
+            heard = listen({tag: kind, login_tag: "login"}, {kind})
+            if "login" in heard:
+                res = sk.login_result(heard["login"])
+                if res is not None and res.is_admin:
+                    admin = True
+                    break
             if kind in heard:
                 reply = heard[kind]
                 break
+            # No answer: re-login and re-teach the route on the next attempt.
+            logged_in = False
+            node_state.pop("logged_in_at", None)
+        if admin:
+            removed = _admin_removal_drill(client, shared, key, out_path, plen, sleep)
+            return PollResult(ADMIN_STOP, role="admin", key_mode="shared", route=route,
+                              admin_seen=True, admin_removed=removed,
+                              detail="the repeater answered the shared key as admin")
     except sk.UnsafeSharedPassword as exc:
         return PollResult(ERROR, key_mode="shared", detail=str(exc))
     except (CompanionError, OSError, sk.SharedKeyError) as exc:
@@ -380,6 +391,9 @@ def _admin_removal_drill(client: CompanionClient, shared: sk.SharedKey, key: byt
         try:
             body, tag = sk.build_login(shared, key, out_path, plen, "")
             client.send_raw_packet(body)
+            # setperm 0 deleted the ACL entry and its return path, so teach the
+            # route again or the verifying reply floods and we miss it.
+            client.send_raw_packet(sk.build_route_update(shared, key, out_path, plen))
         except (CompanionError, OSError, sk.SharedKeyError, sk.UnsafeSharedPassword):
             continue
         for frame in client.collect_rx(SHARED_REPLY_WINDOW):

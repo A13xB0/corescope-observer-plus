@@ -41,6 +41,7 @@ from openhop_core.protocol.constants import (
     REQ_TYPE_GET_TELEMETRY_DATA,
     TXT_TYPE_CLI_COMMAND,
 )
+from openhop_core.protocol.constants import PAYLOAD_TYPE_PATH as _PT_PATH
 from openhop_core.protocol.identity import Identity, LocalIdentity
 from openhop_core.protocol.packet import Packet
 from openhop_core.protocol.packet_builder import PacketBuilder
@@ -188,6 +189,35 @@ def build_telemetry_request(shared: SharedKey, repeater_pubkey: bytes, out_path:
         contact, shared.identity(), want_location=False, route_type="direct"
     )
     return _frame(packet), tag
+
+
+def build_route_update(shared: SharedKey, repeater_pubkey: bytes, out_path: bytes, out_path_len: int,
+                       return_path: bytes = b"", return_path_len: int | None = None) -> bytes:
+    """A PATH packet teaching the repeater its route back to the shared key.
+
+    A key freshly added by login has no return route (firmware
+    ClientACL.putClient sets OUT_PATH_UNKNOWN), so the repeater floods its first
+    replies. Sending this once, direct, after the first login makes it reply
+    direct instead. ``return_path`` is the hops from the repeater back to the
+    shared key (empty for a direct neighbour); ``out_path``/``out_path_len`` is
+    how this packet reaches the repeater (zero-hop direct, or one relay).
+
+    MeshCore builds a PATH return as a flood; this node's neighbours are in
+    range, so it is sent direct to keep it off the wider mesh.
+    """
+    if out_path_len < 0:
+        raise SharedKeyError("the shared key is never flooded; pin a route first")
+    secret = Identity(repeater_pubkey).calc_shared_secret(shared.identity().get_private_key())
+    packet = PacketBuilder.create_path_return(
+        dest_hash=repeater_pubkey[0], src_hash=shared.hash_byte, secret=secret,
+        path=return_path, path_len_encoded=return_path_len,
+    )
+    # create_path_return marks the packet flood; send it direct to the repeater
+    # instead (it is a neighbour), and carry the outer path if it is one hop.
+    packet.header = PacketBuilder._create_header(_PT_PATH, route_type="direct")
+    if out_path_len > 0 and out_path:
+        packet.set_path(out_path, out_path_len)
+    return _frame(packet)
 
 
 def build_admin_removal(shared: SharedKey, repeater_pubkey: bytes, out_path: bytes,
