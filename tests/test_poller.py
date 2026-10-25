@@ -98,12 +98,34 @@ def test_each_poll_starts_with_a_login_until_one_works(fake):
     fake.status_after_login_only = True
     fake.answer_login = False
     result, state = poll(fake, now=10_000.0)
-    assert result.code == poller.NO_REPLY and "link looks down" in result.detail
-    assert fake.commands.count(c.CMD_SEND_LOGIN) == 1 and not fake.requests  # silent login: nothing more sent
+    # A silent first login doesn't write the route off: all tries still go out.
+    assert result.code == poller.NO_REPLY
+    assert fake.commands.count(c.CMD_SEND_LOGIN) == 1 and len(statuses(fake)) == 3 and len(telemetries(fake)) == 3
     fake.answer_login = True
     fake.commands.clear()
     result, _ = poll(fake, state=state, now=11_200.0)
     assert result.code == poller.OK and fake.commands.count(c.CMD_SEND_LOGIN) == 1
+
+
+def test_lucklaw_regression_silent_first_login_then_other_route(fake):
+    # 25 Oct 13:14: no login on record, the first login's reply never came,
+    # and the route via West Lomond was written off, leaving one try.
+    fake.answer_login = False
+    fake.answer_paths = {bytes.fromhex("2eecdf")}
+    result, state = poll(fake, routes=[VIA_A, VIA_B], alternative_routes=True, now=10_000.0)
+    assert result.code == poller.OK and result.route is VIA_B and result.method == "telemetry"
+    assert [r[2] for r in telemetries(fake)] == [bytes.fromhex("4128a6"), bytes.fromhex("2eecdf")]
+    assert state["logged_in_at"] == 10_000.0  # an answer proves the repeater knows us
+
+
+def test_a_dead_route_does_not_use_up_tries(fake):
+    fake.answer_login = False
+    fake.answer_status = False
+    fake.answer_paths = {bytes.fromhex("2eecdf")}
+    fake.telemetry = None
+    poll(fake, routes=[VIA_A, VIA_B], alternative_routes=True, state=dict(LOGGED_IN), now=10_000.0)
+    # Try 1 via A fails, the probe via A is silent (A dead), then tries 2 and 3 both go via B.
+    assert [r[2] for r in telemetries(fake)] == [bytes.fromhex("4128a6"), bytes.fromhex("2eecdf"), bytes.fromhex("2eecdf")]
 
 
 def test_unanswered_request_probes_with_one_login(fake):

@@ -108,7 +108,7 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
     ordered = ordered_routes(routes, node_state.get("last_route"))
     if not ordered:
         return PollResult(NOT_DIRECT, detail="no direct or one-hop route heard")
-    plan = [ordered[i % len(ordered)] if alternative_routes else ordered[0] for i in range(max(1, attempts))]
+    attempts = max(1, attempts)
 
     ctx = {"role": node_state.get("role", ""), "pinned": None, "pinned_any": False, "login_sent": False,
            "refused": "", "dead": set(), "tries": 0, "blocked": None}
@@ -122,8 +122,13 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
         ctx["pinned"], ctx["pinned_any"] = route.key, True
         return True
 
-    def login(route: Route) -> str:
-        """"ok", "silent" or "refused"; at most once per poll."""
+    def login(route: Route, probe: bool = True) -> str:
+        """"ok", "silent" or "refused"; at most once per poll.
+
+        Only a probe's silence marks the route dead: the reply to a first
+        login is flooded by the repeater and can arrive late or not at all
+        while the route itself works.
+        """
         ctx["login_sent"] = True
         node_state["login_attempt_at"] = now
         result = client.login(key, password)
@@ -134,7 +139,8 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
             sleep(LOGIN_SETTLE_SECONDS)
             return "ok"
         if result.timed_out:
-            ctx["dead"].add(route.key)
+            if probe:
+                ctx["dead"].add(route.key)
             return "silent"
         fails = int(node_state.get("login_fails") or 0) + 1
         node_state["login_fails"] = fails
@@ -143,18 +149,27 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
         ctx["refused"] = f"login refused ({fails} of {LOGIN_FAILS_BEFORE_BLOCK})"
         return "refused"
 
+    def next_route(i: int) -> Route | None:
+        """The route for try i: the best live one, or round the live ones."""
+        live = [r for r in ordered if r.key not in ctx["dead"]]
+        if not live:
+            return None
+        return live[i % len(live)] if alternative_routes else live[0]
+
     def ask(request: Callable[[], object]):
-        """The answer and the route it came by, or (None, None)."""
-        gap = False
-        for i, route in enumerate(plan):
-            if route.key in ctx["dead"] or ctx["blocked"]:
-                continue
-            if gap:
+        """Up to `attempts` sends; the answer and the route it came by, or (None, None)."""
+        sends = 0
+        while sends < attempts and not ctx["blocked"]:
+            route = next_route(sends)
+            if route is None:
+                break
+            if sends:
                 sleep(retry_gap)
-            gap = True
             if not pin(route):
+                ctx["dead"].add(route.key)
                 continue
-            ctx["tries"] = max(ctx["tries"], i)
+            ctx["tries"] = max(ctx["tries"], sends)
+            sends += 1
             answer = request()
             if answer is not None:
                 return answer, route
@@ -166,7 +181,7 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
 
     # Through a relay every byte costs airtime twice, so a repeater one hop
     # away is asked by telemetry only (battery and temperature, no stats).
-    one_hop = all(r.hops > 0 for r in plan)
+    one_hop = all(r.hops > 0 for r in ordered)
     status_ignored = bool(node_state.get("status_ignored")) and \
         now - float(node_state.get("status_checked_at") or 0) < STATUS_RECHECK
     telemetry_only = one_hop or status_ignored
@@ -175,8 +190,8 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
     try:
         # A repeater ignores requests from a client it doesn't know, so log in
         # first until one login has worked.
-        if not node_state.get("logged_in_at") and pin(plan[0]):
-            login(plan[0])
+        if not node_state.get("logged_in_at") and pin(ordered[0]):
+            login(ordered[0], probe=False)
         if not telemetry_only:
             stats, used = ask(lambda: client.status(key))
             node_state["status_checked_at"] = now
@@ -192,6 +207,9 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
 
     if ctx["blocked"]:
         return ctx["blocked"]
+    if stats is not None or tel is not None:
+        # Any answer proves the repeater knows this node.
+        node_state.setdefault("logged_in_at", now)
     if not ctx["pinned_any"]:
         return PollResult(NOT_DIRECT, detail="the companion would not keep the route")
     role = ctx["role"]
@@ -209,7 +227,7 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
     if mv is None:
         if tel is not None:
             detail = "telemetry answered without a voltage"
-        elif ctx["dead"] and len(ctx["dead"]) >= len({r.key for r in plan}):
+        elif ctx["dead"] and len(ctx["dead"]) >= len(ordered):
             detail = "no answer to requests or login: the link looks down"
         else:
             detail = ctx["refused"] or "no answer to status or telemetry"
