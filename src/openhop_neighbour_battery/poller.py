@@ -33,7 +33,11 @@ LOGIN_SETTLE_SECONDS = 1.0
 LOGIN_FAILS_BEFORE_BLOCK = 3
 RETRY_GAP_SECONDS = 8.0
 NO_BATTERY_RECHECK = 24 * 3600
-NO_REPLY_BACKOFF = 6 * 3600
+# A repeater that didn't answer is tried again sooner: every 20 minutes (3 an
+# hour) for its first misses in a row, then at the normal interval. It is
+# never given up on.
+NO_REPLY_RETRY = 20 * 60
+NO_REPLY_FAST_TRIES = 9
 TEMP_MISSES_BEFORE_DAILY = 3
 TEMP_DAILY = 24 * 3600
 
@@ -196,8 +200,9 @@ def is_due(node_state: dict, interval_s: float, password_set: bool, now: float) 
             return False
     if code == NO_BATTERY:
         return now - last >= max(interval_s, NO_BATTERY_RECHECK)
-    if code == NO_REPLY and int(node_state.get("no_reply_count") or 0) >= 3:
-        return now - last >= max(interval_s, NO_REPLY_BACKOFF)
+    if code == NO_REPLY:
+        fast = int(node_state.get("no_reply_count") or 0) < NO_REPLY_FAST_TRIES
+        return now - last >= (min(interval_s, NO_REPLY_RETRY) if fast else interval_s)
     return now - last >= interval_s
 
 

@@ -13,6 +13,8 @@ your repeater's observer, for CoreScope to show.
   once an hour. Blank password: guest or ACL, unless you set one per repeater.
 - A "login failed" push only counts as a password problem after 3 in a row:
   stock repeaters don't answer a wrong password at all.
+- A repeater that didn't answer is tried again after 20 minutes (up to 3 tries
+  an hour), dropping to the normal interval after 9 misses in a row.
 - One direct retry per poll. With "Try an alternative route" on, the retry uses
   the next route heard in adverts; the route that last answered goes first.
 - Temperature, switched on per repeater in its Details: a telemetry request

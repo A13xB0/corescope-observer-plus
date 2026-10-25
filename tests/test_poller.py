@@ -205,12 +205,18 @@ def test_unanswered_telemetry_retries_once(fake):
     assert len([r for r in fake.requests if r[0] == c.REQ_TYPE_GET_TELEMETRY]) == 2
 
 
-def test_backoff_after_three_no_replies():
+def test_no_reply_retried_three_times_an_hour_then_hourly():
     st = {}
-    for t in (0, 1, 2):
-        poller.record(st, poller.PollResult(poller.NO_REPLY), False, now=t)
-    assert not poller.is_due(st, 3600, False, now=2 + 3600)
-    assert poller.is_due(st, 3600, False, now=2 + 6 * 3600)
+    poller.record(st, poller.PollResult(poller.NO_REPLY), False, now=0)
+    assert not poller.is_due(st, 3600, False, now=19 * 60)
+    assert poller.is_due(st, 3600, False, now=20 * 60)
+    for t in range(1, 9):
+        poller.record(st, poller.PollResult(poller.NO_REPLY), False, now=t * 1200)
+    last = 8 * 1200
+    assert not poller.is_due(st, 3600, False, now=last + 1200)  # 9 misses: back to hourly
+    assert poller.is_due(st, 3600, False, now=last + 3600)  # but never given up
+    poller.record(st, poller.PollResult(poller.OK, battery_mv=3900), False, now=last + 3600)
+    assert st["no_reply_count"] == 0
 
 
 def test_rejected_password_not_retried_until_changed():
