@@ -170,6 +170,6 @@ def test_one_hop_targets_need_max_hops(tmp_path, monkeypatch):
 
 
 def test_settings_new_options():
-    s = parse({"max_hops": 3, "read_temperature": 1, "temperature_skip": [NODE, "x"], "alternative_routes": True})
-    assert s.max_hops == 1 and s.read_temperature and s.temperature_skip == [NODE]
+    s = parse({"max_hops": 3, "temperature_targets": [NODE, "x"], "alternative_routes": True})
+    assert s.max_hops == 1 and s.temperature_targets == [NODE]
     assert s.alternative_routes

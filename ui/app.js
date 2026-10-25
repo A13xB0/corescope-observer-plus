@@ -10,7 +10,7 @@
   let runtime = {};
   let dirty = false;
   let passwordUpdates = {};
-  let tempSkip = null; // pending per-repeater temperature choices (a Set), null = unchanged
+  let tempTargets = null; // pending per-repeater temperature choices (a Set), null = unchanged
   let detailsTarget = null;
   let showKey = false; // the companion key is masked until asked for
 
@@ -98,7 +98,7 @@
   };
 
   const maxHops = () => Number((document.querySelector('input[name="max_hops"]:checked') || {}).value || 0);
-  const skipSet = () => tempSkip || new Set(config.temperature_skip || []);
+  const tempSet = () => tempTargets || new Set(config.temperature_targets || []);
   const reachable = (n) => (n.routes || []).some((r) => r.hops <= maxHops());
 
   // The routes in the order the plugin will try them: best first, the one that
@@ -145,7 +145,7 @@
   }
 
   function tempCell(n) {
-    if (skipSet().has(n.node_id)) return '<span class="muted small">off</span>';
+    if (!tempSet().has(n.node_id)) return '<span class="muted small">off</span>';
     if (n.temp_code === "ok" || (n.temperature_c != null && n.temp_misses < 3)) {
       return n.temperature_c == null ? '<span class="muted">—</span>'
         : `${Number(n.temperature_c).toFixed(1)} °C<div class="muted small">${ago(n.temp_at)}</div>`;
@@ -177,12 +177,11 @@
     if (!dirty) {
       $("enabled").checked = !!config.enabled;
       $("interval_minutes").value = String(config.interval_minutes || 60);
-      $("read_temperature").checked = !!config.read_temperature;
       $("alternative_routes").checked = !!config.alternative_routes;
       const hops = String(config.max_hops ? 1 : 0);
       document.querySelectorAll('input[name="max_hops"]').forEach((el) => { el.checked = el.value === hops; });
     }
-    const showTemp = $("read_temperature").checked;
+    const showTemp = tempSet().size > 0;
     document.querySelectorAll(".temp-col").forEach((el) => { el.hidden = !showTemp; });
 
     // While editing, keep what's ticked on screen rather than the saved lists.
@@ -226,10 +225,9 @@
     config.interval_minutes = Number($("interval_minutes").value);
     config.brokers = [...document.querySelectorAll("[data-broker]")].filter((el) => el.checked).map((el) => el.dataset.broker);
     config.targets = [...document.querySelectorAll("[data-node]")].filter((el) => el.checked).map((el) => el.dataset.node);
-    config.read_temperature = $("read_temperature").checked;
     config.alternative_routes = $("alternative_routes").checked;
     config.max_hops = maxHops();
-    config.temperature_skip = [...skipSet()];
+    config.temperature_targets = [...tempSet()];
   }
 
   async function connect() {
@@ -306,11 +304,8 @@
     $("remove-password").checked = false;
     const pending = passwordUpdates[nodeId];
     $("remove-password").disabled = !(pending !== undefined ? pending : n.password_set);
-    const tempOn = $("read_temperature").checked;
-    $("temp-this").checked = !skipSet().has(nodeId);
-    $("temp-this").disabled = !tempOn;
-    $("temp-last").textContent = !tempOn ? "(turn on Read temperature first)"
-      : n.temperature_c != null ? `Last: ${Number(n.temperature_c).toFixed(1)} °C, ${ago(n.temp_at)}`
+    $("temp-this").checked = tempSet().has(nodeId);
+    $("temp-last").textContent = n.temperature_c != null ? `Last: ${Number(n.temperature_c).toFixed(1)} °C, ${ago(n.temp_at)}`
       : n.temp_misses >= 3 ? "None reported so far" : "";
     const routes = orderedRoutes(n);
     $("routes").innerHTML = routes.map((r, i) => {
@@ -328,11 +323,9 @@
     const pw = $("login-password").value;
     if ($("remove-password").checked) passwordUpdates[detailsTarget] = "";
     else if (pw) passwordUpdates[detailsTarget] = pw;
-    if (!$("temp-this").disabled) {
-      const skip = new Set(skipSet());
-      if ($("temp-this").checked) skip.delete(detailsTarget); else skip.add(detailsTarget);
-      tempSkip = skip;
-    }
+    const temps = new Set(tempSet());
+    if ($("temp-this").checked) temps.add(detailsTarget); else temps.delete(detailsTarget);
+    tempTargets = temps;
     dirty = true;
     render();
     notice("Save to apply the changes.");
@@ -346,7 +339,7 @@
     if (ev.target.closest("dialog")) return;
     if (ev.target.matches("input, select")) {
       dirty = true;
-      if (ev.target.name === "max_hops" || ev.target.id === "read_temperature") render();
+      if (ev.target.name === "max_hops") render();
     }
   });
   $("connect").addEventListener("click", connect);
@@ -370,7 +363,7 @@
       const extra = Object.keys(passwordUpdates).length ? { password_updates: passwordUpdates } : {};
       await saveConfig(extra);
       passwordUpdates = {};
-      tempSkip = null;
+      tempTargets = null;
       dirty = false;
       notice("Saved.", "good");
     } catch (e) {

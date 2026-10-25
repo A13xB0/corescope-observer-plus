@@ -46,8 +46,6 @@
             <option value="180">3 hours</option>
             <option value="360">6 hours</option>
           </select></span></span></label>
-        <label class="option"><input id="read_temperature" type="checkbox"> <span><strong>Read temperature</strong>
-          <span class="muted small">Adds a telemetry request after each status request. Chip temperature, on ESP32 and nRF52 boards.</span></span></label>
         <div class="option"><span></span><span><strong id="reach-label">Reach</strong>
           <span class="segmented" role="radiogroup" aria-labelledby="reach-label">
             <label><input type="radio" name="max_hops" value="0"> Direct only</label>
@@ -95,7 +93,8 @@
       <input id="login-password" type="password" autocomplete="off" placeholder="Blank: guest or ACL">
       <p class="muted small">Blank logs in automatically: as a guest when the repeater has no guest password, or through its ACL if it lists this plugin's key. A password is kept on this observer only and never published. An admin password works but gives full control and makes the repeater write to flash at each login, so prefer a guest password or an ACL entry.</p>
       <label class="check"><input id="remove-password" type="checkbox"> Remove the saved password</label>
-      <label class="check"><input id="temp-this" type="checkbox"> Read temperature for this repeater <span id="temp-last" class="muted small"></span></label>
+      <label class="check"><input id="temp-this" type="checkbox"> <span>Read temperature <span id="temp-last" class="muted small"></span>
+        <span class="muted small" style="display:block">Adds a telemetry request after each status request. Chip temperature, on ESP32 and nRF52 boards.</span></span></label>
       <h4>Routes, best first</h4>
       <div class="table-wrap">
       <table class="table">

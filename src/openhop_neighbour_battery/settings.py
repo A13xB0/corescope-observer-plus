@@ -21,8 +21,7 @@ DEFAULTS = {
     "brokers": [],
     "max_age_hours": 24,
     "spacing_seconds": 20,
-    "read_temperature": False,
-    "temperature_skip": [],
+    "temperature_targets": [],
     "max_hops": 0,
     "alternative_routes": False,
 }
@@ -44,8 +43,7 @@ class Settings:
     brokers: list[str] = field(default_factory=list)
     max_age_hours: int = 24
     spacing_seconds: int = 20
-    read_temperature: bool = False
-    temperature_skip: list[str] = field(default_factory=list)  # repeaters not asked for temperature
+    temperature_targets: list[str] = field(default_factory=list)  # repeaters asked for temperature
     max_hops: int = 0  # 0 = direct neighbours only, 1 = also through one relay
     alternative_routes: bool = False
 
@@ -75,9 +73,8 @@ def parse(raw: dict) -> Settings:
         s.spacing_seconds = max(5, min(300, int(raw.get("spacing_seconds") or 20)))
     except (TypeError, ValueError):
         pass
-    s.read_temperature = bool(raw.get("read_temperature"))
-    s.temperature_skip = sorted({str(k).lower() for k in raw.get("temperature_skip") or []
-                                 if KEY_RE.match(str(k).lower())})
+    s.temperature_targets = sorted({str(k).lower() for k in raw.get("temperature_targets") or []
+                                    if KEY_RE.match(str(k).lower())})
     try:
         s.max_hops = 1 if int(raw.get("max_hops") or 0) >= 1 else 0
     except (TypeError, ValueError):

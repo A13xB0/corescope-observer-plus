@@ -183,7 +183,7 @@ class App:
                 pw = self.secrets.password(n.node_id)
                 result = poll_one(
                     client, n, pw, st, routes=routes, alternative_routes=s.alternative_routes,
-                    read_temperature=s.read_temperature and n.node_id not in s.temperature_skip,
+                    read_temperature=n.node_id in s.temperature_targets,
                 )
                 record(st, result, bool(pw), time.time())
                 st.pop("password_changed", None)
@@ -316,7 +316,7 @@ class App:
                 "last_route": st.get("last_route"), "last_route_label": st.get("last_route_label"),
                 "temperature_c": st.get("temperature_c"), "temp_at": st.get("temp_at"),
                 "temp_code": st.get("temp_code"), "temp_misses": st.get("temp_misses") or 0,
-                "temperature_skip": n.node_id in self.settings.temperature_skip,
+                "read_temperature": n.node_id in self.settings.temperature_targets,
                 "uptime_secs": st.get("uptime_secs"),
             })
         brokers = []

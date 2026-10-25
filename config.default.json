@@ -9,8 +9,7 @@
   "brokers": [],
   "max_age_hours": 24,
   "spacing_seconds": 20,
-  "read_temperature": false,
-  "temperature_skip": [],
   "max_hops": 0,
-  "alternative_routes": false
+  "alternative_routes": false,
+  "temperature_targets": []
 }

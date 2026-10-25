@@ -15,9 +15,9 @@ your repeater's observer, for CoreScope to show.
   stock repeaters don't answer a wrong password at all.
 - One direct retry per poll. With "Try an alternative route" on, the retry uses
   the next route heard in adverts; the route that last answered goes first.
-- Optional temperature: a telemetry request (type `0x03`) after status, reading
-  the chip temperature guests get on ESP32 and nRF52 boards. A repeater that
-  reports none 3 times is asked once a day.
+- Temperature, switched on per repeater in its Details: a telemetry request
+  (type `0x03`) after status, reading the chip temperature guests get on ESP32
+  and nRF52 boards. A repeater that reports none 3 times is asked once a day.
 - Every reading carries the status reply's counters (uptime, noise floor,
   airtime, packet counts), which cost no extra airtime.
 - Publishes `meshcore/{IATA}/{KEY}/battery` to the brokers you pick from openHop's list.
@@ -57,5 +57,5 @@ only" unless you set "Up to 1 hop".
 
 - `battery_mv` 0 means no battery fitted.
 - `reply_hops` 1 and `via` (the relay's 64-hex key) mark a reading taken through a relay; `snr` is then the advert SNR on that route and `rssi` is left out.
-- `temperature_c` is present only when temperature reading is on and the repeater reported one.
+- `temperature_c` is present only when temperature is on for that repeater and it reported one.
 - `stats` holds the fields the repeater's firmware sent; an older, shorter reply leaves later ones out.
