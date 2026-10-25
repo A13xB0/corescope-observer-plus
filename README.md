@@ -37,6 +37,23 @@ your repeater's observer, for CoreScope to show.
 - Publishes `meshcore/{IATA}/{KEY}/battery` to the brokers you pick from openHop's list.
 - No changes to openHop.
 
+### Shared guest key (opt-in)
+
+A repeater can be polled under a shared, public guest identity instead of this
+observer's own key, so any observer that hears the reply can feed CoreScope.
+Off by default; turned on per repeater from its Details.
+
+- Requests, logins and the route update are built and encrypted by the plugin
+  with the shared key and sent as finished raw packets (`CMD_SEND_RAW_PACKET`);
+  replies are read off the air from the raw RX log (`0x88`). Nothing is flooded.
+- The shared key is only ever used with a blank or `hello` password, enforced
+  where the packets are built. A repeater with a saved password can't use it.
+- It is never let near admin. If a repeater answers the key as admin, the
+  plugin stops using it there, removes the key's access (`setperm <key> 0`,
+  then a verifying login) and tells you.
+- Readings taken this way are published with `"key":"shared"`, which CoreScope
+  credits as "shared key".
+
 ## Install
 
 ```sh
