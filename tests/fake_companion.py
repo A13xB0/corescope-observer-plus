@@ -21,7 +21,8 @@ class FakeCompanion:
         self.answer_login = True
         self.login_fail_always = False  # answer every login with LOGIN_FAIL, like a misread reply
         self.answer_paths: set[bytes] | None = None  # only requests along these paths are answered
-        self.status_after_login_only = False  # status unanswered until a login succeeds
+        self.status_after_login_only = False  # requests unanswered until a login succeeds
+        self.ignore_status = False  # older firmware: a guest's status request is ignored
         self.logged_in = False
         self.telemetry: bytes | None = bytes([1, 116, 0x01, 0x8A, 1, 103, 0x01, 0x3B])  # 3.94 V, 31.5 °C
         self.commands: list[int] = []
@@ -122,10 +123,12 @@ class FakeCompanion:
             if self.answer_paths is not None and path not in self.answer_paths:
                 return
             if req[0] == c.REQ_TYPE_GET_STATUS:
-                if not self.answer_status or (self.status_after_login_only and not self.logged_in):
+                if not self.answer_status or self.ignore_status or (self.status_after_login_only and not self.logged_in):
                     return
                 stats = struct.pack("<HHhhIIIIIIIIHhHHII", self.battery_mv, 0, -116, -114, 81234, 20276,
                                     18301, 788089, 19211, 1065, 76198, 5012, 2, 5, 36, 56298, 73835, 28074)
                 self._out(conn, bytes([c.PUSH_CODE_BINARY_RESPONSE, 0]) + tag + stats + b"\x00" * 4)
             elif req[0] == c.REQ_TYPE_GET_TELEMETRY and self.telemetry is not None:
+                if self.status_after_login_only and not self.logged_in:
+                    return
                 self._out(conn, bytes([c.PUSH_CODE_BINARY_RESPONSE, 0]) + tag + self.telemetry + b"\x00" * 3)

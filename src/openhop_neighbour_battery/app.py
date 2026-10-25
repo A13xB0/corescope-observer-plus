@@ -325,7 +325,8 @@ class App:
                 "temperature_c": st.get("temperature_c"), "temp_at": st.get("temp_at"),
                 "temp_code": st.get("temp_code"), "temp_misses": st.get("temp_misses") or 0,
                 "read_temperature": n.node_id in self.settings.temperature_targets,
-                "uptime_secs": st.get("uptime_secs"),
+                "uptime_secs": st.get("uptime_secs"), "method": st.get("method"),
+                "status_ignored": bool(st.get("status_ignored")),
             })
         brokers = []
         for b in (self.ohcfg.brokers if self.ohcfg else []):

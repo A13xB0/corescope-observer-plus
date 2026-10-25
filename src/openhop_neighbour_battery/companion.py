@@ -178,6 +178,14 @@ def parse_lpp(data: bytes) -> list[tuple[int, int, bytes]]:
     return out
 
 
+def lpp_voltage_mv(data: bytes) -> int | None:
+    """The repeater's own voltage (channel 1) in mV, or None if it sent none."""
+    for channel, kind, raw in parse_lpp(data):
+        if channel == TELEM_CHANNEL_SELF and kind == LPP_VOLTAGE:
+            return struct.unpack(">H", raw)[0] * 10
+    return None
+
+
 def lpp_temperature(data: bytes) -> float | None:
     """The repeater's own temperature (channel 1) in °C, or None if it sent none."""
     for channel, kind, raw in parse_lpp(data):

@@ -140,7 +140,10 @@
   }
 
   function batteryCell(n) {
-    if (n.code === "ok" && n.battery_mv) return `<strong>${(n.battery_mv / 1000).toFixed(2)} V</strong><div class="muted small">${ago(n.last_success)}</div>`;
+    if (n.code === "ok" && n.battery_mv) {
+      const via = n.method === "telemetry" ? ' · <span title="This repeater ignores a guest\'s status request, so the battery comes from telemetry">telemetry</span>' : "";
+      return `<strong>${(n.battery_mv / 1000).toFixed(2)} V</strong><div class="muted small">${ago(n.last_success)}${via}</div>`;
+    }
     if (n.code === "no_battery") return '<span class="pill neutral">No battery fitted</span>';
     if (!n.code || n.code === "ok") return '<span class="muted">—</span>';
     if (n.battery_mv) return `<span class="muted">${(n.battery_mv / 1000).toFixed(2)} V</span><div class="muted small">${ago(n.last_success)}</div>`;

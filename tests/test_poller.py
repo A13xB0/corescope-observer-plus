@@ -46,14 +46,23 @@ def statuses(fake):
     return [r for r in fake.requests if r[0] == c.REQ_TYPE_GET_STATUS]
 
 
-def test_status_first_reads_battery_and_stats_without_login(fake):
-    result, state = poll(fake)
-    assert result.code == poller.OK
-    assert result.battery_mv == 3940
-    assert result.stats["uptime_secs"] == 788089
+def telemetries(fake):
+    return [r for r in fake.requests if r[0] == c.REQ_TYPE_GET_TELEMETRY]
+
+
+LOGGED_IN = {"logged_in_at": 1.0}
+
+
+def test_logs_in_once_then_never_again(fake):
+    result, state = poll(fake, now=10_000.0)
+    assert result.code == poller.OK and result.role == "guest"
+    assert fake.commands.count(c.CMD_SEND_LOGIN) == 1
+    assert result.battery_mv == 3940 and result.stats["uptime_secs"] == 788089
     assert result.stats["last_snr"] == 1.25
-    assert c.CMD_SEND_LOGIN not in fake.commands
     assert c.CMD_SEND_STATUS_REQ not in fake.commands  # openHop floods its retries of this one
+    fake.commands.clear()
+    result, _ = poll(fake, state=state, now=20_000.0)
+    assert result.code == poller.OK and c.CMD_SEND_LOGIN not in fake.commands
 
 
 def test_route_pinned_before_any_request(fake):
@@ -74,41 +83,47 @@ def test_nothing_sent_when_route_will_not_pin(fake):
 
 def test_a_flood_send_is_a_failure_and_not_repeated(fake):
     fake.send_as_flood = True
-    result, _ = poll(fake)
+    result, _ = poll(fake, state=dict(LOGGED_IN))
     assert result.code == poller.NOT_DIRECT
     assert fake.commands.count(c.CMD_SEND_BINARY_REQ) == 1
 
 
 def test_zero_mv_is_no_battery(fake):
     fake.battery_mv = 0
-    result, _ = poll(fake)
+    result, _ = poll(fake, state=dict(LOGGED_IN))
     assert result.code == poller.NO_BATTERY and result.battery_mv == 0
 
 
-def test_logs_in_when_status_gets_no_answer(fake):
-    fake.status_after_login_only = True
-    result, state = poll(fake, now=10_000.0)
-    assert result.code == poller.OK and result.role == "guest"
-    assert fake.commands.count(c.CMD_SEND_LOGIN) == 1
-    assert state["logged_in_at"] == 10_000.0
-
-
-def test_login_at_most_hourly(fake):
+def test_login_attempts_at_most_hourly_until_one_succeeds(fake):
     fake.status_after_login_only = True
     fake.answer_login = False
     _, state = poll(fake, now=10_000.0)
     fake.commands.clear()
-    result, _ = poll(fake, state=state, now=10_000.0 + 1800)
-    assert result.code == poller.NO_REPLY
+    result, state = poll(fake, state=state, now=10_000.0 + 1800)
+    assert result.code == poller.NO_REPLY and c.CMD_SEND_LOGIN not in fake.commands
+    fake.answer_login = True
+    result, _ = poll(fake, state=state, now=10_000.0 + 3600)
+    assert result.code == poller.OK
+
+
+def test_each_request_tried_three_times_all_direct(fake):
+    fake.answer_status = False
+    fake.telemetry = None
+    result, _ = poll(fake, state=dict(LOGGED_IN), routes=[DIRECT, VIA_A])
+    assert result.code == poller.NO_REPLY and result.retried
+    assert len(statuses(fake)) == 3 and len(telemetries(fake)) == 3
+    assert {r[2] for r in fake.requests} == {b""}  # no alternative routes: always the best one
+    assert all(r[1] >= 0 for r in fake.requests)  # never unknown path, so never flooded
     assert c.CMD_SEND_LOGIN not in fake.commands
 
 
-def test_retry_is_direct_on_the_same_route(fake):
-    fake.answer_status = False
-    result, _ = poll(fake, routes=[DIRECT, VIA_A])
-    assert result.code == poller.NO_REPLY and result.retried
-    assert [r[1:] for r in statuses(fake)] == [(0, b"")] * 3  # status, status after login, retry
-    assert all(r[1] >= 0 for r in fake.requests)  # never unknown path, so never flooded
+def test_login_forgotten_after_three_silent_polls(fake):
+    st = dict(LOGGED_IN)
+    for t in (1, 2):
+        poller.record(st, poller.PollResult(poller.NO_REPLY), False, now=t)
+    assert "logged_in_at" in st
+    poller.record(st, poller.PollResult(poller.NO_REPLY), False, now=3)
+    assert "logged_in_at" not in st
 
 
 def test_login_fail_is_not_a_password_problem_until_three_in_a_row(fake):
@@ -143,7 +158,7 @@ def test_admin_role_is_reported(fake):
 
 
 def test_one_hop_route_pins_relay_path(fake):
-    result, _ = poll(fake, routes=[VIA_A])
+    result, _ = poll(fake, routes=[VIA_A], state=dict(LOGGED_IN))
     assert result.code == poller.OK and result.route is VIA_A
     opl, path = fake.contacts[bytes.fromhex(NODE.node_id)]
     assert opl == 0x81 and path == bytes.fromhex("4128a6")
@@ -151,29 +166,49 @@ def test_one_hop_route_pins_relay_path(fake):
     assert r["reply_hops"] == 1 and r["via"] == RELAY_A and r["snr"] == -0.8 and "rssi" not in r
 
 
-def test_alternative_route_used_on_retry_and_remembered(fake):
-    fake.answer_paths = {bytes.fromhex("4128a6")}
-    fake.answer_login = False
-    result, state = poll(fake, routes=[DIRECT, VIA_A, VIA_B], alternative_routes=True, now=10_000.0)
-    assert result.code == poller.OK and result.route is VIA_A and result.retried
-    assert {r[2] for r in statuses(fake)} == {b"", bytes.fromhex("4128a6")}
+def test_alternative_routes_go_round_and_the_good_one_is_remembered(fake):
+    fake.answer_paths = {bytes.fromhex("2eecdf")}
+    fake.telemetry = None
+    state = dict(LOGGED_IN)
+    result, state = poll(fake, routes=[DIRECT, VIA_A, VIA_B], alternative_routes=True, state=state, now=10_000.0)
+    assert result.code == poller.OK and result.route is VIA_B and result.retried
+    assert [r[2] for r in statuses(fake)] == [b"", bytes.fromhex("4128a6"), bytes.fromhex("2eecdf")]
     poller.record(state, result, False, 10_000.0)
-    assert state["last_route"] == RELAY_A
+    assert state["last_route"] == RELAY_B
     fake.requests.clear()
     poll(fake, routes=[DIRECT, VIA_A, VIA_B], alternative_routes=True, state=state, now=20_000.0)
-    assert statuses(fake)[0][2] == bytes.fromhex("4128a6")  # last good route goes first
+    assert statuses(fake)[0][2] == bytes.fromhex("2eecdf")  # last good route goes first
 
 
 def test_without_alternative_routes_only_the_best_is_tried(fake):
     fake.answer_paths = {bytes.fromhex("4128a6")}
-    fake.answer_login = False
-    result, _ = poll(fake, routes=[DIRECT, VIA_A], now=10_000.0)
+    result, _ = poll(fake, routes=[DIRECT, VIA_A], state=dict(LOGGED_IN), now=10_000.0)
     assert result.code == poller.NO_REPLY
-    assert {r[2] for r in statuses(fake)} == {b""}
+    assert {r[2] for r in fake.requests} == {b""}
+
+
+def test_status_ignored_falls_back_to_telemetry(fake):
+    # Lucklaw Hill, 25 Oct 2026: guest status ignored, telemetry answered.
+    fake.ignore_status = True
+    fake.telemetry = bytes.fromhex("01740197016700a7")
+    state = dict(LOGGED_IN)
+    result, state = poll(fake, state=state, now=10_000.0)
+    assert result.code == poller.OK and result.battery_mv == 4070 and result.method == "telemetry"
+    assert result.temperature_c == 16.7 and not result.stats
+    poller.record(state, result, False, 10_000.0)
+    r = poller.reading(NODE, result, 1761300000)
+    assert r["method"] == "telemetry" and r["temperature_c"] == 16.7 and "stats" not in r
+    assert state["status_ignored"]
+    fake.requests.clear()
+    result, state = poll(fake, state=state, now=10_000.0 + 3600)
+    assert result.code == poller.OK and not statuses(fake) and len(telemetries(fake)) == 1  # telemetry first
+    fake.requests.clear()
+    poll(fake, state=state, now=10_000.0 + 25 * 3600)
+    assert statuses(fake)  # status checked again after a day
 
 
 def test_temperature_read_when_enabled(fake):
-    result, state = poll(fake, read_temperature=True)
+    result, state = poll(fake, read_temperature=True, state=dict(LOGGED_IN))
     assert result.temperature_c == 31.5 and result.temperature_code == "ok"
     poller.record(state, result, False, 1000.0)
     assert state["temperature_c"] == 31.5
@@ -181,14 +216,14 @@ def test_temperature_read_when_enabled(fake):
 
 
 def test_temperature_not_asked_when_off(fake):
-    result, _ = poll(fake)
+    result, _ = poll(fake, state=dict(LOGGED_IN))
     assert result.temperature_code == ""
-    assert not [r for r in fake.requests if r[0] == c.REQ_TYPE_GET_TELEMETRY]
+    assert not telemetries(fake)
 
 
 def test_no_temperature_reported_goes_daily_and_battery_still_published(fake):
     fake.telemetry = bytes([1, 116, 0x01, 0x8A])  # voltage only
-    state = {}
+    state = dict(LOGGED_IN)
     for now in (1000.0, 5000.0, 9000.0):
         result, state = poll(fake, state=state, now=now, read_temperature=True)
         assert result.code == poller.OK and result.temperature_code == "none"
@@ -198,11 +233,11 @@ def test_no_temperature_reported_goes_daily_and_battery_still_published(fake):
     assert "temperature_c" not in poller.reading(NODE, result, 1761300000)
 
 
-def test_unanswered_telemetry_retries_once(fake):
+def test_unanswered_telemetry_tried_three_times(fake):
     fake.telemetry = None
-    result, _ = poll(fake, read_temperature=True)
+    result, _ = poll(fake, read_temperature=True, state=dict(LOGGED_IN))
     assert result.code == poller.OK and result.temperature_code == "no_reply"
-    assert len([r for r in fake.requests if r[0] == c.REQ_TYPE_GET_TELEMETRY]) == 2
+    assert len(telemetries(fake)) == 3
 
 
 def test_no_reply_retried_three_times_an_hour_then_hourly():
@@ -250,6 +285,11 @@ def test_parse_stats_real_reply():
 def test_parse_stats_short_reply_leaves_fields_out():
     s = c.parse_stats(struct.pack("<HHhh", 3900, 0, -110, -90))
     assert s == {"battery_mv": 3900, "tx_queue": 0, "noise_floor": -110, "last_rssi": -90}
+
+
+def test_lpp_voltage():
+    assert c.lpp_voltage_mv(bytes.fromhex("01740197016700a7")) == 4070
+    assert c.lpp_voltage_mv(bytes([1, 103, 0, 1])) is None
 
 
 def test_lpp_temperature():
