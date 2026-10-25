@@ -173,3 +173,11 @@ def test_settings_new_options():
     s = parse({"max_hops": 3, "temperature_targets": [NODE, "x"], "alternative_routes": True})
     assert s.max_hops == 1 and s.temperature_targets == [NODE]
     assert s.alternative_routes
+
+
+def test_manual_repeaters_and_corescope_url_settings():
+    s = parse({"manual_repeaters": [{"node_id": NODE.upper(), "name": "Redstone"}, {"node_id": "bad"}, "x"],
+               "corescope_url": "https://cs.example/"})
+    assert s.manual_repeaters == [{"node_id": NODE, "name": "Redstone"}]
+    assert s.corescope_url == "https://cs.example"
+    assert parse({"corescope_url": "ftp://nope"}).corescope_url == "https://corescope.scotmesh.net"

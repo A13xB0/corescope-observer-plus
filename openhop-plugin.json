@@ -25,6 +25,8 @@
       "max_age_hours": 24,
       "spacing_seconds": 20,
       "temperature_targets": [],
+      "manual_repeaters": [],
+      "corescope_url": "https://corescope.scotmesh.net",
       "max_hops": 0,
       "alternative_routes": false
     }

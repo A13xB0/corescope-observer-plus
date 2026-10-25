@@ -60,3 +60,35 @@ def test_relay_must_not_be_the_target():
     attach_routes(ns, [adv(WL, ["02F1FE"], -1.0)])
     wl = next(n for n in ns if n.node_id == WL)
     assert [r.hops for r in wl.routes] == [0]
+
+
+def test_manual_repeater_counts_as_direct_and_can_relay():
+    from openhop_neighbour_battery.openhop import OpenHopAPI
+    RS = "d8dac32c" + "ab" * 28
+    api = OpenHopAPI("http://x", "t")
+    api.zero_hop_repeaters = lambda hours: nodes()
+    api.advert_packets = lambda hours: [adv(DALGETY, ["D8DAC3"], -6.0)]
+    ns = api.repeaters(24, [{"node_id": RS, "name": "sco-edi-redstone rigg"}])
+    rs = next(n for n in ns if n.node_id == RS)
+    assert rs.manual and rs.hops == 0 and rs.routes[0].hops == 0
+    d = next(n for n in ns if n.node_id == DALGETY)
+    assert [r.relay_name for r in d.routes] == ["sco-edi-redstone rigg"]
+
+
+def test_search_corescope_keeps_repeaters(monkeypatch):
+    from openhop_neighbour_battery import openhop
+
+    class R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"nodes": [
+                {"public_key": "d8" * 32, "name": "sco-edi-redstone rigg", "role": "repeater", "last_heard": "2026-10-25T11:45:52Z"},
+                {"public_key": "aa" * 32, "name": "redstone phone", "role": "companion"},
+            ]}
+    seen = {}
+    monkeypatch.setattr(openhop.requests, "get", lambda url, params, timeout: seen.update(url=url, params=params) or R())
+    out = openhop.search_corescope("https://cs.example", "redstone")
+    assert seen["url"] == "https://cs.example/api/nodes" and seen["params"]["search"] == "redstone"
+    assert [o["name"] for o in out] == ["sco-edi-redstone rigg"]

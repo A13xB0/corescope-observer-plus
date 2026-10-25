@@ -111,6 +111,8 @@
   }
 
   const routeName = (r) => (r.hops ? `1 hop ${esc(r.label)}` : "Direct");
+  const KEY_RE = /^[0-9a-f]{64}$/;
+  const manualList = () => config.manual_repeaters || [];
   const snrText = (snr) => (snr == null ? "" : `SNR ${snr > 0 ? "+" : ""}${Number(snr).toFixed(1)} dB`);
 
   function routeCell(n) {
@@ -123,6 +125,7 @@
     if (n.retried && n.last_route_label && n.code === "ok") notes.push(`last answered ${esc(n.last_route_label)}`);
     else if (snrText(best.snr)) notes.push(snrText(best.snr));
     if (routes.length > 1) notes.push(`${routes.length - 1} other route${routes.length > 2 ? "s" : ""}`);
+    if (n.manual && !best.hops) notes.unshift("added by you");
     return `<div class="route"><b>${routeName(best)}</b><div class="muted small">${notes.join(" · ")}</div></div>`;
   }
 
@@ -224,7 +227,11 @@
     config.enabled = $("enabled").checked;
     config.interval_minutes = Number($("interval_minutes").value);
     config.brokers = [...document.querySelectorAll("[data-broker]")].filter((el) => el.checked).map((el) => el.dataset.broker);
-    config.targets = [...document.querySelectorAll("[data-node]")].filter((el) => el.checked).map((el) => el.dataset.node);
+    // Targets with a row take its tick; one just added has no row until saved.
+    const boxes = [...document.querySelectorAll("[data-node]")];
+    const shown = new Set(boxes.map((el) => el.dataset.node));
+    config.targets = [...boxes.filter((el) => el.checked).map((el) => el.dataset.node),
+      ...(config.targets || []).filter((k) => !shown.has(k))];
     config.alternative_routes = $("alternative_routes").checked;
     config.max_hops = maxHops();
     config.temperature_targets = [...tempSet()];
@@ -304,6 +311,7 @@
     $("remove-password").checked = false;
     const pending = passwordUpdates[nodeId];
     $("remove-password").disabled = !(pending !== undefined ? pending : n.password_set);
+    $("remove-manual").hidden = !n.manual;
     $("temp-this").checked = tempSet().has(nodeId);
     $("temp-last").textContent = n.temperature_c != null ? `Last: ${Number(n.temperature_c).toFixed(1)} °C, ${ago(n.temp_at)}`
       : n.temp_misses >= 3 ? "None reported so far" : "";
@@ -320,6 +328,16 @@
     const action = ev.submitter && ev.submitter.value;
     if (!detailsTarget || action === "cancel") return;
     if (action === "test") { test(detailsTarget); return; }
+    if (action === "remove") {
+      const id = detailsTarget;
+      config.manual_repeaters = manualList().filter((m) => m.node_id !== id);
+      config.targets = (config.targets || []).filter((k) => k !== id);
+      document.querySelectorAll(`[data-node="${id}"]`).forEach((el) => { el.checked = false; });
+      dirty = true;
+      render();
+      notice("Save to remove the repeater.");
+      return;
+    }
     const pw = $("login-password").value;
     if ($("remove-password").checked) passwordUpdates[detailsTarget] = "";
     else if (pw) passwordUpdates[detailsTarget] = pw;
@@ -334,6 +352,7 @@
   document.addEventListener("click", (ev) => {
     const t = ev.target;
     if (t.dataset.details) openDetails(t.dataset.details);
+    else if (t.dataset.add) addManual(t.dataset.add, t.dataset.name);
   });
   document.addEventListener("change", (ev) => {
     if (ev.target.closest("dialog")) return;
@@ -342,6 +361,40 @@
       if (ev.target.name === "max_hops") render();
     }
   });
+  function addManual(nodeId, name) {
+    nodeId = nodeId.toLowerCase();
+    if (!manualList().some((m) => m.node_id === nodeId)) config.manual_repeaters = [...manualList(), { node_id: nodeId, name: name || nodeId.slice(0, 8) }];
+    if (!(config.targets || []).includes(nodeId)) config.targets = [...(config.targets || []), nodeId];
+    $("add-results").innerHTML = "";
+    $("add-query").value = "";
+    dirty = true;
+    notice(`Save to add ${name || nodeId.slice(0, 8)}. It is treated as heard direct; Details shows its routes once saved.`, "good");
+  }
+
+  $("add-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const q = $("add-query").value.trim();
+    if (KEY_RE.test(q.toLowerCase())) { addManual(q, ""); return; }
+    if (q.length < 3) { notice("Type at least 3 characters, or paste a 64-character key.", "warn"); return; }
+    if (dirty) { notice("Save first, then search.", "warn"); return; }
+    notice(`Searching CoreScope for "${q}"…`);
+    try {
+      const id = `lookup-${Date.now()}`;
+      await saveConfig({ requests: [{ id, type: "lookup", query: q }] });
+      const a = await waitForAction("lookup", id, 60000);
+      if (!a.ok) { notice(a.message, "bad"); return; }
+      const known = new Set((runtime.nodes || []).map((n) => n.node_id));
+      $("add-results").innerHTML = (a.results || []).map((r) => `<li><span><strong>${esc(r.name)}</strong>
+        <span class="muted small mono">${esc(r.node_id.slice(0, 8))}… · ${esc(r.role)}${r.last_seen ? " · heard " + esc(String(r.last_seen).replace("T", " ").slice(0, 16)) : ""}</span></span>
+        ${known.has(r.node_id) ? '<span class="muted small">already listed</span>'
+          : `<button class="button ghost small" type="button" data-add="${esc(r.node_id)}" data-name="${esc(r.name)}">Add</button>`}</li>`).join("")
+        || '<li class="muted">Nothing found.</li>';
+      notice(a.message);
+    } catch (e) {
+      notice(e.message, "bad");
+    }
+  });
+
   $("connect").addEventListener("click", connect);
   $("check-now").addEventListener("click", checkNow);
   $("show-key").addEventListener("click", () => { showKey = !showKey; render(); });

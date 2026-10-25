@@ -11,5 +11,7 @@
   "spacing_seconds": 20,
   "max_hops": 0,
   "alternative_routes": false,
-  "temperature_targets": []
+  "temperature_targets": [],
+  "manual_repeaters": [],
+  "corescope_url": "https://corescope.scotmesh.net"
 }

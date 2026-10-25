@@ -87,6 +87,11 @@ dialog .check { display: flex; gap: 8px; align-items: baseline; }
 .segmented label:has(input:checked) { background: var(--accent); color: #fff; }
 .segmented label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
 .table-wrap { overflow-x: auto; }
+.add-row { display: grid; gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.add-row .row { flex-wrap: nowrap; gap: 8px; }
+.add-row input { flex: 1; min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.add-results { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; }
+.add-results li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; }
 .route b { font-weight: 600; }
 .pill.neutral { background: var(--line); }
 @media (max-width: 640px) {

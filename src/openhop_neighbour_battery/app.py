@@ -17,6 +17,7 @@ from .openhop import (
     Route,
     companion_port,
     load_openhop_config,
+    search_corescope,
 )
 from .poller import NO_BATTERY, OK, is_due, poll_one, reading, record, utc_iso
 from .publisher import Publisher
@@ -95,7 +96,7 @@ class App:
             check["api"] = {"ok": False, "message": "no API token yet: use Connect on the plugin page"}
         else:
             try:
-                self.candidates = self.api().repeaters(self.settings.max_age_hours)
+                self.candidates = self.api().repeaters(self.settings.max_age_hours, self.settings.manual_repeaters)
                 self.openhop_brokers = self.api().mqtt_status()
                 direct = sum(n.hops == 0 for n in self.candidates)
                 one_hop = sum(n.hops == 1 for n in self.candidates)
@@ -275,6 +276,12 @@ class App:
                         + (f" ({', '.join(sorted(set(c for c in codes if c not in ('ok', 'no_battery'))))} for the rest)"
                            if len(readings) < len(self.settings.targets) else "")
                     )
+                elif kind == "lookup":
+                    query = str(req.get("query") or "").strip()
+                    if len(query) < 3:
+                        raise RuntimeError("type at least 3 characters")
+                    result["results"] = search_corescope(self.settings.corescope_url, query)
+                    result["message"] = f"{len(result['results'])} found in CoreScope"
                 elif kind == "refresh":
                     self.refresh()
                 else:
@@ -307,6 +314,7 @@ class App:
                 "node_id": n.node_id, "name": n.name, "snr": n.snr, "rssi": n.rssi,
                 "last_seen": n.last_seen, "zero_hop": n.zero_hop, "hops": n.hops,
                 "routes": [r.as_dict() for r in n.routes], "reachable": bool(self.routes_for(n)),
+                "manual": n.manual,
                 "selected": n.node_id in selected,
                 "password_set": self.secrets.has_password(n.node_id),
                 "code": st.get("code"), "detail": st.get("detail"), "role": st.get("role"),

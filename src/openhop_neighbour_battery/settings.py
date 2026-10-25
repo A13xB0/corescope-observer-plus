@@ -22,6 +22,8 @@ DEFAULTS = {
     "max_age_hours": 24,
     "spacing_seconds": 20,
     "temperature_targets": [],
+    "manual_repeaters": [],
+    "corescope_url": "https://corescope.scotmesh.net",
     "max_hops": 0,
     "alternative_routes": False,
 }
@@ -44,6 +46,10 @@ class Settings:
     max_age_hours: int = 24
     spacing_seconds: int = 20
     temperature_targets: list[str] = field(default_factory=list)  # repeaters asked for temperature
+    # Repeaters the operator added by key because no advert of theirs was
+    # heard: [{"node_id", "name"}]. Treated as heard direct.
+    manual_repeaters: list[dict] = field(default_factory=list)
+    corescope_url: str = "https://corescope.scotmesh.net"
     max_hops: int = 0  # 0 = direct neighbours only, 1 = also through one relay
     alternative_routes: bool = False
 
@@ -80,6 +86,17 @@ def parse(raw: dict) -> Settings:
     except (TypeError, ValueError):
         pass
     s.alternative_routes = bool(raw.get("alternative_routes"))
+    manual = {}
+    for m in raw.get("manual_repeaters") or []:
+        if not isinstance(m, dict):
+            continue
+        key = str(m.get("node_id") or "").lower()
+        if KEY_RE.match(key):
+            manual[key] = {"node_id": key, "name": str(m.get("name") or key[:8])[:64]}
+    s.manual_repeaters = [manual[k] for k in sorted(manual)]
+    url = str(raw.get("corescope_url") or "").strip().rstrip("/")
+    if url.startswith(("http://", "https://")):
+        s.corescope_url = url
     return s
 
 

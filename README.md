@@ -20,6 +20,8 @@ your repeater's observer, for CoreScope to show.
   and nRF52 boards. A repeater that reports none 3 times is asked once a day.
 - Every reading carries the status reply's counters (uptime, noise floor,
   airtime, packet counts), which cost no extra airtime.
+- A repeater whose adverts never arrive can be added by key, or found by name in
+  CoreScope (`corescope_url`). It is treated as heard direct.
 - Publishes `meshcore/{IATA}/{KEY}/battery` to the brokers you pick from openHop's list.
 - No changes to openHop.
 

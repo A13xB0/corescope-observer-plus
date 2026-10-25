@@ -65,6 +65,7 @@ class Neighbour:
     last_seen: float
     zero_hop: bool
     routes: list[Route] = field(default_factory=list)  # best first
+    manual: bool = False  # added by the operator, not found from an advert
 
     def __post_init__(self):
         if self.zero_hop and not self.routes:
@@ -186,9 +187,22 @@ class OpenHopAPI:
         rows = body.get("data", []) if isinstance(body, dict) else []
         return [r for r in rows if isinstance(r, dict)]
 
-    def repeaters(self, max_age_hours: int) -> list[Neighbour]:
-        """Repeaters heard in the window, each with its direct and one-relay routes."""
+    def repeaters(self, max_age_hours: int, manual: list[dict] | None = None) -> list[Neighbour]:
+        """Repeaters heard in the window, each with its direct and one-relay routes.
+
+        manual lists repeaters the operator added by key; each counts as heard
+        direct, whether or not one of its adverts arrived.
+        """
         neighbours = self.zero_hop_repeaters(max_age_hours)
+        by_id = {n.node_id: n for n in neighbours}
+        for m in manual or []:
+            n = by_id.get(m["node_id"])
+            if n is None:
+                n = Neighbour(m["node_id"], m["name"], None, None, 0, True)
+                neighbours.append(n)
+                by_id[n.node_id] = n
+            n.zero_hop = True
+            n.manual = True
         try:
             packets = self.advert_packets(max_age_hours)
         except OpenHopError:
@@ -362,3 +376,23 @@ def attach_routes(neighbours: list[Neighbour], packets: list[dict]) -> None:
             routes.append(Route(adverts=0, snr=n.snr))
         routes.sort(key=lambda r: (-r.adverts, -(r.snr if r.snr is not None else -99)))
         n.routes = routes
+
+
+def search_corescope(base_url: str, query: str, *, timeout: float = 10.0) -> list[dict]:
+    """Repeaters and room servers in CoreScope whose name or key matches query."""
+    try:
+        r = requests.get(f"{base_url}/api/nodes", params={"search": query, "limit": 20}, timeout=timeout)
+        r.raise_for_status()
+        body = r.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise OpenHopError(f"CoreScope search failed: {exc}") from exc
+    rows = body.get("nodes", []) if isinstance(body, dict) else body
+    out = []
+    for n in rows if isinstance(rows, list) else []:
+        key = str(n.get("public_key") or "").lower()
+        if len(key) != 64 or n.get("role") not in ("repeater", "room"):
+            continue
+        out.append({"node_id": key, "name": str(n.get("name") or key[:8]), "role": n.get("role"),
+                    "last_seen": n.get("last_heard") or n.get("last_seen"),
+                    "lat": n.get("lat"), "lon": n.get("lon")})
+    return out

@@ -79,6 +79,14 @@
       </table>
       </div>
       <p id="reach-note" class="muted small"></p>
+      <form id="add-form" class="add-row">
+        <label for="add-query"><strong>Add a repeater</strong> <span class="muted small">whose adverts this node hasn't heard: search CoreScope by name, or paste its public key</span></label>
+        <div class="row">
+          <input id="add-query" type="text" autocomplete="off" placeholder="Name or 64-character key">
+          <button class="button ghost" type="submit">Find</button>
+        </div>
+        <ul id="add-results" class="add-results"></ul>
+      </form>
     </section>
 
     <div class="actions">
@@ -104,6 +112,7 @@
       </div>
       <p class="muted small">From adverts heard in the last day. At most 2 routes are tried per poll, and the route that last answered moves to the top.</p>
       <div class="actions">
+        <button value="remove" id="remove-manual" class="button ghost" type="submit" hidden>Remove repeater</button>
         <button value="test" class="button ghost" type="submit">Test now</button>
         <button value="cancel" class="button ghost" type="submit">Cancel</button>
         <button value="save" class="button" type="submit">Apply</button>
