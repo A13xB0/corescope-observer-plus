@@ -591,3 +591,19 @@ def test_per_repeater_poll_interval():
     s = parse({"interval_minutes": 60, "poll_intervals": {k: 360, "cd" * 32: 7}})
     assert s.poll_intervals == {k: 360}
     assert s.interval_for(k) == 360 and s.interval_for("ef" * 32) == 60
+
+
+def test_each_repeater_keeps_its_own_last_twenty():
+    from openhop_neighbour_battery import packet_log
+    log = packet_log.PacketLog([])
+    a, b = [], []
+    la = log.for_node("aa" * 32, "A", "guest key", a)
+    lb = log.for_node("bb" * 32, "B", "guest key", b)
+    la.sent("login", "direct")
+    for _ in range(30):
+        lb.sent("route", "direct")
+    assert len(log.entries) == 20 and all(e["name"] == "B" for e in log.entries)
+    assert len(a) == 1 and a[0]["kind"] == "login"  # A's history survives B's traffic
+    e = la.sent("telemetry request", "direct")
+    la.answered(e, "radio", flooded=False)
+    assert a[-1]["reply"] == "answered" and log.entries[-1]["reply"] == "answered"

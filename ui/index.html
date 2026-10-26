@@ -86,7 +86,7 @@
 
     <section class="card" aria-labelledby="brokers-h">
       <h2 id="brokers-h">Publish to</h2>
-      <p class="muted small">Brokers already set up in openHop. Readings go out under this repeater's key on its own short connection; openHop's connection is not touched.</p>
+      <p class="muted small">Brokers already set up in openHop. Companion-key readings (repeaters with a saved password) go out under this repeater's key on its own short connection; openHop's connection is not touched. Guest-key readings aren't published here: openHop uploads the repeater's reply like any packet it hears, and CoreScope decrypts it with the polling key, so they never show in Last publish.</p>
       <div class="table-wrap">
       <table class="table">
         <thead><tr><th scope="col"></th><th scope="col">Broker</th><th scope="col">openHop</th><th scope="col">Last publish</th></tr></thead>
@@ -185,6 +185,13 @@
       </table>
       </div>
       <p class="muted small">From adverts heard in the last day. At most 2 routes are tried per poll, and the route that last answered moves to the top.</p>
+      <h4>Recent packets <span class="muted small">this repeater's last 20, newest first</span></h4>
+      <div class="table-wrap packets-scroll">
+      <table class="table">
+        <thead><tr><th scope="col">When</th><th scope="col">Sent</th><th scope="col">Route</th><th scope="col">Key</th><th scope="col">Answer</th></tr></thead>
+        <tbody id="node-packets"></tbody>
+      </table>
+      </div>
       <div id="test-status" class="live test-status" data-base="live test-status" hidden></div>
       <div class="actions dialog-actions">
         <button value="save" class="button" type="submit">Apply</button>

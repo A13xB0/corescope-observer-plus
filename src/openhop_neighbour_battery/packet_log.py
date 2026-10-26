@@ -29,15 +29,19 @@ class PacketLog:
         self.size = size
         del self.entries[:-size]
 
-    def for_node(self, node_id: str, name: str, key: str) -> "NodeLog":
-        return NodeLog(self, node_id, name, key)
+    def for_node(self, node_id: str, name: str, key: str, node_entries: list | None = None) -> "NodeLog":
+        """``node_entries``: the repeater's own list (in its state), which
+        keeps its last SIZE packets however busy the others are."""
+        return NodeLog(self, node_id, name, key, node_entries)
 
 
 class NodeLog:
     """The log as seen by one poll of one repeater."""
 
-    def __init__(self, log: PacketLog | None, node_id: str = "", name: str = "", key: str = ""):
+    def __init__(self, log: PacketLog | None, node_id: str = "", name: str = "", key: str = "",
+                 node_entries: list | None = None):
         self._log = log
+        self._mine = node_entries
         self._node = {"node_id": node_id, "name": name, "key": key}
 
     def sent(self, kind: str, route: str, detail: str = "") -> dict:
@@ -46,6 +50,10 @@ class NodeLog:
         if self._log is not None:
             self._log.entries.append(entry)
             del self._log.entries[:-self._log.size]
+        if self._mine is not None:
+            # The same dict, so answers recorded later show in both lists.
+            self._mine.append(entry)
+            del self._mine[:-SIZE]
         return entry
 
     @staticmethod

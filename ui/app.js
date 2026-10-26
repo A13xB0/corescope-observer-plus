@@ -249,16 +249,21 @@
     const after = e.after_s != null ? ` · ${Number(e.after_s).toFixed(1)} s` : "";
     return `<span class="pill good">answered</span>${how}<div class="muted small">${esc(via)}${after}${e.what ? " · " + esc(e.what) : ""}</div>`;
   }
-  function renderPackets() {
-    const log = (runtime.packet_log || []).slice().reverse();
-    $("packets").innerHTML = log.length ? log.map((e) => `<tr>
+  // Rows for a packet log, newest first; withName adds the Repeater column.
+  function packetRows(entries, withName) {
+    const log = (entries || []).slice().reverse();
+    const cols = withName ? 6 : 5;
+    return log.length ? log.map((e) => `<tr>
       <td class="small">${new Date(e.at * 1000).toLocaleTimeString()}<div class="muted small">${ago(e.at)}</div></td>
-      <td>${esc(e.name || String(e.node_id || "").slice(0, 8))}</td>
+      ${withName ? `<td>${esc(e.name || String(e.node_id || "").slice(0, 8))}</td>` : ""}
       <td><strong>${esc(e.kind)}</strong>${e.detail ? `<div class="muted small">${esc(e.detail)}</div>` : ""}${e.unconfirmed ? '<div class="muted small">openHop busy: sent unconfirmed</div>' : ""}</td>
       <td class="small">${esc(e.route || "")}</td>
       <td class="small">${esc(e.key || "")}</td>
       <td>${packetAnswer(e)}</td></tr>`).join("")
-      : '<tr><td colspan="6" class="muted">Nothing sent yet.</td></tr>';
+      : `<tr><td colspan="${cols}" class="muted">Nothing sent yet.</td></tr>`;
+  }
+  function renderPackets() {
+    $("packets").innerHTML = packetRows(runtime.packet_log, true);
   }
 
   function render() {
@@ -602,6 +607,7 @@
     } else {
       adminWarn.hidden = true;
     }
+    $("node-packets").innerHTML = packetRows(n.packets, false);
     const routes = orderedRoutes(n);
     $("routes").innerHTML = routes.map((r, i) => {
       const last = r.key === n.last_route ? (n.code === "ok" ? '<span class="pill good">answered</span>' : '<span class="pill bad">no answer</span>')
@@ -637,6 +643,7 @@
         if ($("remove-password").checked) passwordUpdates[detailsTarget] = "";
         else if (pw) passwordUpdates[detailsTarget] = pw;
       }
+      touched.add(detailsTarget);
       const pis = { ...(config.poll_intervals || {}) };
       const iv = $("node-interval").value;
       if (iv === "default") delete pis[detailsTarget]; else pis[detailsTarget] = Number(iv);
@@ -745,8 +752,28 @@
   // saveAll persists everything pending (page settings + any staged per-repeater
   // password/temperature/shared changes). Used by the page's Save bar and by
   // the details dialog's Apply.
+  // Repeaters whose per-repeater settings this page changed since its last save.
+  const touched = new Set();
+  // Per-repeater settings are merged into the latest saved copy, so a page
+  // loaded before someone else's change can't wipe another repeater's entry.
+  async function mergeLatest() {
+    try {
+      const body = await call(`${SETTINGS}?id=${encodeURIComponent(PLUGIN_ID)}`);
+      const latest = (body.data || body).config || {};
+      for (const k of ["guest_passwords", "poll_intervals"]) {
+        const merged = { ...(latest[k] || {}) };
+        for (const id of touched) {
+          if (id in (config[k] || {})) merged[id] = config[k][id]; else delete merged[id];
+        }
+        config[k] = merged;
+      }
+    } catch (_) { /* save what we have */ }
+  }
+
   async function saveAll() {
     collect();
+    await mergeLatest();
+    touched.clear();
     const extra = Object.keys(passwordUpdates).length ? { password_updates: passwordUpdates } : {};
     saveStatus("Saving…");
     await saveConfig(extra);
@@ -766,6 +793,9 @@
       await loadRuntime();
       if (!dirty) await loadConfig();
       render();
+      // Keep an open repeater dialog's packet list current.
+      const open = $("details-dialog").open && (runtime.nodes || []).find((x) => x.node_id === detailsTarget);
+      if (open) $("node-packets").innerHTML = packetRows(open.packets, false);
     } catch (e) {
       notice(e.message, "bad");
     }

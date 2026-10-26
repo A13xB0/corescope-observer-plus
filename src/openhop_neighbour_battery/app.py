@@ -387,7 +387,8 @@ class App:
                 shared = self.polling_key() if self.uses_shared_key(n.node_id) else None
                 plog = self.packets.for_node(
                     n.node_id, n.name, "companion" if shared is None
-                    else ("guest key" if shared.public_key == self.own_key().public_key else "shared key"))
+                    else ("guest key" if shared.public_key == self.own_key().public_key else "shared key"),
+                    st.setdefault("packets", []))
                 if shared is not None:
                     # Whatever we don't hear ourselves, the poll looks for in
                     # the packets CoreScope's observers heard, and decrypts.
@@ -720,6 +721,7 @@ class App:
                 "password_set": self.secrets.has_password(n.node_id),
                 # The guest password the guest key last logged in with (learnt).
                 "guest_password": st.get("shared_password"),
+                "packets": st.get("packets") or [],
                 "code": st.get("code"), "detail": st.get("detail"), "role": st.get("role"),
                 "battery_mv": st.get("battery_mv"), "last_success": st.get("last_success"),
                 "last_attempt": st.get("last_attempt"), "retried": bool(st.get("retried")),
