@@ -225,7 +225,7 @@ def test_skips_login_when_already_in_acl(shared):
     # request, no login — saving the login's airtime.
     rep = FakeRepeater(shared, battery_mv=4012)
     now = 2_000_000.0
-    state = {"logged_in_at": now - 60, "login_checked_at": now - 60}
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
                                  sleep=lambda s: None, now=now)
     assert res.code == poller.OK
@@ -237,7 +237,7 @@ def test_logs_in_when_acl_entry_is_gone(shared):
     # silence and logs in to be re-added, then reads the battery.
     rep = FakeRepeater(shared, require_login=True, battery_mv=4012)
     now = 2_000_000.0
-    state = {"logged_in_at": now - 60, "login_checked_at": now - 60}
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
                                  sleep=lambda s: None, now=now)
     assert res.code == poller.OK
@@ -249,7 +249,7 @@ def test_covered_takes_the_observers_reading(shared):
     # as heard (not a no-reply), and don't log in to retry.
     rep = FakeRepeater(shared, answer_status=False)
     now = 2_000_000.0
-    state = {"logged_in_at": now - 60, "login_checked_at": now - 60}
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
                                  sleep=lambda s: None, now=now, covered=lambda: True)
     assert res.code == poller.OK
@@ -272,7 +272,7 @@ def test_admin_recheck_forces_a_login(shared):
     # out, so a key quietly made admin is still caught.
     rep = FakeRepeater(shared, admin=True, battery_mv=4012)
     now = 2_000_000.0
-    state = {"logged_in_at": now - 60, "login_checked_at": now - (7 * 3600)}
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - (7 * 3600)}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
                                  sleep=lambda s: None, now=now)
     assert res.code == poller.ADMIN_STOP
@@ -294,7 +294,7 @@ def test_known_hello_is_sent_alone(shared, monkeypatch):
     real = poller.sk.build_login
     monkeypatch.setattr(poller.sk, "build_login", lambda *a, **k: (sent.append(a[4]), real(*a, **k))[1])
     rep = FakeRepeater(shared, battery_mv=4012)
-    state = {"shared_password": "hello"}
+    state = {"acl_key": shared.public_key.hex(), "shared_password": "hello"}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None)
     assert res.code == poller.OK
     assert sent == ["hello"]  # never a blank try for a repeater known to want hello
@@ -339,7 +339,7 @@ def test_route_retaught_after_unanswered_fast_path(shared, monkeypatch):
     monkeypatch.setattr(poller.sk, "build_route_update", lambda *a, **k: (taught.append(1), real(*a, **k))[1])
     rep = FakeRepeater(shared, battery_mv=4012, require_login=True)  # bare request ignored
     now = 2_000_000.0
-    state = {"logged_in_at": now - 60, "login_checked_at": now - 60}
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
                                  sleep=lambda s: None, now=now)
     assert res.code == poller.OK
@@ -380,3 +380,25 @@ def test_unconfirmed_send_keeps_listening(shared):
                                  sleep=lambda s: None, on_step=steps.append)
     assert res.code == poller.OK
     assert any("busy" in s for s in steps)
+
+
+
+def test_key_change_starts_the_acl_state_over(shared):
+    # State learnt under the shared key means nothing for this observer's own key.
+    rep = FakeRepeater(shared, battery_mv=4012)
+    state = {"acl_key": "ab" * 32, "logged_in_at": 1.0, "login_checked_at": 1.0, "shared_password": "hello"}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None)
+    assert res.code == poller.OK
+    assert state["acl_key"] == shared.public_key.hex()
+    assert rep.logins >= 1  # logged in afresh rather than trusting the old entry
+    assert "shared_password" not in state or state["shared_password"] != "hello"
+
+
+def test_own_key_remembers_a_blank_login(shared):
+    rep = FakeRepeater(shared, battery_mv=4012)
+    state: dict = {}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                 sleep=lambda s: None, personal=True)
+    assert res.code == poller.OK and state["shared_password"] == ""
+    assert poller.shared_password_order(state, 2, personal=True) == ["", ""]
+    assert poller.shared_password_order(state, 2, personal=False) == ["", "hello"]

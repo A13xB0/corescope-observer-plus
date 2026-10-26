@@ -7,6 +7,7 @@ import logging
 import time
 from pathlib import Path
 
+from openhop_core import LocalIdentity
 from openhop_core.protocol.packet_builder import PacketBuilder
 
 from . import __version__
@@ -20,10 +21,13 @@ from .openhop import (
     companion_port,
     corescope_battery_snapshot,
     corescope_latest_battery_ts,
+    corescope_owners,
     fetch_shared_guest_key,
     load_openhop_config,
+    register_guest_key,
     search_corescope,
 )
+from . import guest_key
 from . import shared_key as sk
 from .poller import ADMIN_STOP, NO_BATTERY, NO_REPLY, OK, is_due, poll_one, poll_one_shared, reading, record, utc_iso
 from .publisher import Publisher
@@ -61,6 +65,8 @@ class App:
         self.actions: dict[str, dict] = self.state.value.setdefault("actions", {})
         self._last_refresh = 0.0
         self._shared_cache: dict = {}  # the shared key fetched from CoreScope, cached by URL
+        self._own_key: sk.SharedKey | None = None  # this observer's polling key (guest_key.py)
+        self._owners: dict = {"at": 0.0, "ok_at": 0.0, "nodes": {}}  # who polls which repeater (CoreScope)
 
     # -- settings ---------------------------------------------------------
 
@@ -240,6 +246,64 @@ class App:
             self._shared_cache = {"url": url, "at": now, "key": sk.SharedKey.from_api(fetch_shared_guest_key(url))}
         return self._shared_cache.get("key")
 
+    @property
+    def observer_id(self) -> str:
+        return LocalIdentity(self.ohcfg.identity_key).get_public_key().hex() if self.ohcfg else ""
+
+    def own_key(self) -> sk.SharedKey:
+        if self._own_key is None:
+            self._own_key = guest_key.load_or_create(self.data_dir)
+        return self._own_key
+
+    def polling_key(self, now: float | None = None) -> sk.SharedKey | None:
+        """The key guest polls go out under: this observer's own key once
+        CoreScope has accepted it (registered within KEY_LIFETIME), otherwise
+        the public shared key. None when nothing is opted in."""
+        if not self.settings.shared_key_targets:
+            return None
+        now = now or time.time()
+        reg = self.state.value.setdefault("guest_reg", {})
+        if reg.get("url") != self.settings.corescope_url:
+            reg.clear()
+            reg["url"] = self.settings.corescope_url
+        retry = (guest_key.REREGISTER_EVERY if reg.get("ok")
+                 else 6 * 3600 if reg.get("unsupported") else 300)
+        if self.ohcfg and self.settings.corescope_url and now - float(reg.get("tried_at") or 0) >= retry:
+            self._register_own_key(reg, now)
+        if reg.get("ok") and now - float(reg.get("ok_at") or 0) < guest_key.KEY_LIFETIME:
+            return self.own_key()
+        return self.shared_key(now)
+
+    def _register_own_key(self, reg: dict, now: float) -> None:
+        """(Re)register this observer's polling key with CoreScope, signed by
+        the repeater key. A failure keeps an earlier registration until it
+        lapses; a CoreScope without the feature (404) means the shared key."""
+        body = guest_key.registration_body(LocalIdentity(self.ohcfg.identity_key), self.own_key(), now)
+        status, resp = register_guest_key(self.settings.corescope_url, body)
+        reg["tried_at"] = now
+        if status == 200 and resp.get("ok"):
+            reg.update(ok=True, ok_at=now, unsupported=False, error="", expires_at=resp.get("expires_at"))
+            LOG.info("own polling key %s registered with CoreScope", self.own_key().hex8)
+        elif status == 404:
+            reg.update(ok=False, unsupported=True, error="this CoreScope doesn't take per-observer keys")
+            LOG.info("CoreScope doesn't take per-observer keys; using the shared key")
+        else:
+            reg["error"] = str(resp.get("error") or (f"HTTP {status}" if status else "CoreScope unreachable"))
+            LOG.warning("couldn't register the polling key with CoreScope: %s", reg["error"])
+
+    def owners(self, now: float) -> dict:
+        """CoreScope's choice of poller per repeater, refreshed every 10 min.
+        Empty (poll everything ourselves) if it hasn't answered for 30 min."""
+        c = self._owners
+        if self.ohcfg and self.settings.corescope_url and now - c["at"] >= 600:
+            c["at"] = now
+            nodes = corescope_owners(self.settings.corescope_url, self.observer_id)
+            if nodes is not None:
+                c["nodes"], c["ok_at"] = nodes, now
+            elif now - c["ok_at"] > 1800:
+                c["nodes"] = {}
+        return c["nodes"]
+
     def uses_shared_key(self, node_id: str) -> bool:
         """Whether this repeater is polled under the shared key.
 
@@ -255,7 +319,7 @@ class App:
             return False
         if self.state.node(node_id).get("shared_admin_seen"):
             return False
-        return self.shared_key() is not None
+        return self.polling_key() is not None
 
     def poll(self, node_ids: list[str], *, force: bool = False, on_node=None, on_step=None) -> list[dict]:
         """Poll the given targets that are zero-hop now; return payload readings.
@@ -278,6 +342,17 @@ class App:
                 continue
             if not (force or is_due(st, interval, self.secrets.has_password(node_id), now)):
                 continue
+            # One poller per repeater: if CoreScope has another observer polling
+            # this one, leave it to them (its reading still reaches CoreScope).
+            # A forced Test or Check always polls.
+            if not force and self.uses_shared_key(node_id):
+                owner = self.owners(now).get(node_id)
+                if owner and not owner.get("mine"):
+                    st["polled_by"] = owner.get("owner_name") or str(owner.get("owner") or "")[:8]
+                    st["last_attempt"] = now
+                    LOG.info("skip %s (%s): polled by %s", n.name, node_id[:8], st["polled_by"])
+                    continue
+                st.pop("polled_by", None)
             # Before sending anything: a shared-key repeater whose last poll
             # went unanswered is skipped this time if CoreScope already has a
             # reading from within the interval — another observer has it. (The
@@ -306,7 +381,7 @@ class App:
                     time.sleep(s.spacing_seconds * (2 if routes[0].hops else 1))
                 st = self.state.node(n.node_id)
                 pw = self.secrets.password(n.node_id)
-                shared = self.shared_key() if self.uses_shared_key(n.node_id) else None
+                shared = self.polling_key() if self.uses_shared_key(n.node_id) else None
                 if shared is not None:
                     # If we don't hear the answer ourselves, the poll may take
                     # another observer's overhear of it from CoreScope instead
@@ -319,6 +394,7 @@ class App:
                         client, n, shared, st, routes=routes,
                         read_temperature=n.node_id in s.temperature_targets,
                         on_step=on_step, covered=covered,
+                        personal=shared.public_key == self.own_key().public_key,
                     )
                 else:
                     result = poll_one(
@@ -357,11 +433,18 @@ class App:
         return out
 
     def _shared_key_runtime(self) -> dict:
-        """What the plugin page shows for the shared key: the key CoreScope
-        serves (if any), where it came from, and the opt-in list."""
-        key = self.shared_key()
+        """What the plugin page shows for the polling key: whether it is this
+        observer's own (registered with CoreScope) or the public shared one,
+        where it came from, and the opt-in list."""
+        key = self.polling_key()
+        reg = self.state.value.get("guest_reg") or {}
+        personal = key is not None and self._own_key is not None and key.public_key == self._own_key.public_key
         return {
             "configured": key is not None,
+            "kind": "own" if personal else ("shared" if key is not None else ""),
+            "registered_at": reg.get("ok_at") if reg.get("ok") else None,
+            "expires_at": reg.get("expires_at") if reg.get("ok") else None,
+            "register_error": reg.get("error") or "",
             "from": self.settings.corescope_url,
             "name": key.name if key else "",
             "version": key.version if key else 0,
@@ -639,6 +722,7 @@ class App:
                 "shared_admin_at": st.get("shared_admin_at"),
                 "covered_at": st.get("covered_at"),
                 "covered": bool(st.get("last_covered")),
+                "polled_by": st.get("polled_by") or "",
             })
         brokers = []
         for b in (self.ohcfg.brokers if self.ohcfg else []):

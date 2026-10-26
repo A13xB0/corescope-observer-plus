@@ -376,3 +376,77 @@ def test_failed_request_is_not_left_running(tmp_path, monkeypatch):
         assert "companion gone" in act["message"]
     finally:
         fake.close()
+
+
+def _app_with_shared_target(tmp_path, monkeypatch, fake):
+    a, data = make_app(tmp_path, fake, targets=[NODE], shared_key_targets=[NODE],
+                       corescope_url="https://corescope.example")
+    a.ohcfg = load_openhop_config(tmp_path / "config.yaml")
+    return a, data
+
+
+def test_own_key_is_registered_signed_and_used(tmp_path, monkeypatch):
+    from openhop_core import LocalIdentity
+    from openhop_core.protocol.identity import Identity
+    from openhop_neighbour_battery import guest_key
+    fake = FakeCompanion()
+    sent = []
+    monkeypatch.setattr(app_mod, "register_guest_key",
+                        lambda url, body, **k: (sent.append(body), (200, {"ok": True, "expires_at": "2026-10-27T12:00:00Z"}))[1])
+    try:
+        a, data = _app_with_shared_target(tmp_path, monkeypatch, fake)
+        key = a.polling_key(now=1_000_000.0)
+        assert key is not None and key.public_key == a.own_key().public_key
+        body = sent[0]
+        observer = LocalIdentity(a.ohcfg.identity_key)
+        assert body["observer_id"] == observer.get_public_key().hex()
+        msg = guest_key.registration_message(body["observer_id"], body["public_key"], body["timestamp"])
+        assert Identity(observer.get_public_key()).verify(msg, bytes.fromhex(body["signature"]))
+        assert stat.S_IMODE(os.stat(data / guest_key.KEY_FILE).st_mode) == 0o600
+        # Re-registered only every 6 h, and the same key survives a restart.
+        a.polling_key(now=1_000_000.0 + 3600)
+        assert len(sent) == 1
+        a.polling_key(now=1_000_000.0 + 6 * 3600 + 1)
+        assert len(sent) == 2 and sent[1]["public_key"] == body["public_key"]
+        assert guest_key.load_or_create(data).public_key.hex() == body["public_key"]
+        rt = a._shared_key_runtime()
+        assert rt["kind"] == "own"
+    finally:
+        fake.close()
+
+
+def test_shared_key_when_corescope_takes_no_own_keys(tmp_path, monkeypatch):
+    fake = FakeCompanion()
+    key = _serve_key(monkeypatch)
+    monkeypatch.setattr(app_mod, "register_guest_key", lambda url, body, **k: (404, {}))
+    try:
+        a, _ = _app_with_shared_target(tmp_path, monkeypatch, fake)
+        got = a.polling_key(now=1_000_000.0)
+        assert got is not None and got.public_key.hex() == key["public_key"]
+        assert a._shared_key_runtime()["kind"] == "shared"
+    finally:
+        fake.close()
+
+
+def test_repeater_owned_by_another_observer_is_left_to_them(tmp_path, monkeypatch):
+    fake = FakeCompanion()
+    monkeypatch.setattr(app_mod, "register_guest_key", lambda url, body, **k: (200, {"ok": True}))
+    monkeypatch.setattr(app_mod, "corescope_owners",
+                        lambda url, obs, **k: {NODE: {"owner": "cc" * 32, "owner_name": "Cadham Village", "mine": False}})
+    calls = []
+
+    def fake_poll(*a, **k):
+        calls.append(1)
+        from openhop_neighbour_battery.poller import OK, PollResult
+        return PollResult(OK, battery_mv=4000, key_mode="shared")
+    monkeypatch.setattr(app_mod, "poll_one_shared", fake_poll)
+    try:
+        a, _ = _app_with_shared_target(tmp_path, monkeypatch, fake)
+        a.check = {"companion": {"ok": True}}
+        a.candidates = [Neighbour(NODE, "West Lomond", -5.0, -119, 0, True)]
+        a.poll([NODE])
+        assert calls == [] and a.state.node(NODE)["polled_by"] == "Cadham Village"
+        a.poll([NODE], force=True)  # Test / Check now still poll
+        assert calls == [1]
+    finally:
+        fake.close()

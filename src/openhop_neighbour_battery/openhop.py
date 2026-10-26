@@ -466,3 +466,37 @@ def corescope_battery_snapshot(base_url: str, node_id: str, *, timeout: float = 
         "by": sel.get("observer_name") or "",
         "key_mode": sel.get("key_mode") or "",
     }
+
+
+def register_guest_key(base_url: str, body: dict, *, timeout: float = 10.0) -> tuple[int, dict]:
+    """POST this observer's polling key to CoreScope. Returns (HTTP status,
+    JSON body); status 0 when CoreScope couldn't be reached. 404 means this
+    CoreScope doesn't take per-observer keys (the caller uses the shared key)."""
+    if not base_url:
+        return 0, {"error": "no CoreScope address set"}
+    try:
+        r = requests.post(f"{base_url}/api/guest-keys", json=body, timeout=timeout)
+    except requests.RequestException as exc:
+        return 0, {"error": str(exc)}
+    try:
+        payload = r.json()
+    except ValueError:
+        payload = {}
+    return r.status_code, payload if isinstance(payload, dict) else {}
+
+
+def corescope_owners(base_url: str, observer_id: str, *, timeout: float = 5.0) -> dict | None:
+    """Which observer CoreScope has chosen to poll each repeater this one
+    claims: {node_id: {"owner", "owner_name", "mine"}}. None on any error, so
+    the caller polls everything itself (fails open)."""
+    if not base_url:
+        return None
+    try:
+        r = requests.get(f"{base_url}/api/guest-polling/owners", params={"observer": observer_id}, timeout=timeout)
+        if r.status_code != 200:
+            return None
+        body = r.json()
+    except (requests.RequestException, ValueError):
+        return None
+    nodes = body.get("nodes") if isinstance(body, dict) else None
+    return nodes if isinstance(nodes, dict) else None

@@ -221,8 +221,12 @@
   // A small badge showing how a repeater is polled: under the shared key, or
   // stopped because it answered the key as admin.
   function keyBadge(n) {
-    if (n.shared_admin_seen) return ' · <span class="pill bad" title="Answered the shared key as admin; shared key stopped here">admin!</span>';
-    if (n.key_mode === "shared") return ' · <span class="pill good" title="Polled under the shared guest key">shared</span>';
+    if (n.shared_admin_seen) return ' · <span class="pill bad" title="Answered the guest key as admin; guest polling stopped here">admin!</span>';
+    if (n.polled_by) return ` · <span class="pill neutral" title="CoreScope has another observer polling this repeater, so this one leaves it to them. Its readings still reach CoreScope.">polled by ${esc(n.polled_by)}</span>`;
+    if (n.key_mode === "shared") {
+      const own = (runtime.shared_key || {}).kind === "own";
+      return ` · <span class="pill good" title="${own ? "Polled under this observer's own guest key, registered with CoreScope" : "Polled under the public shared guest key"}">${own ? "guest key" : "shared"}</span>`;
+    }
     if (n.shared_opt_in) return ' · <span class="muted small" title="Opted in, but the shared key is not usable here yet">shared (off)</span>';
     return "";
   }
@@ -264,13 +268,16 @@
     // Pre-opt-in the plugin hasn't fetched the key (by design), so "not
     // checked" rather than claiming CoreScope serves none; "none served" is
     // only honest once a repeater is opted in and the fetch came back empty.
-    skPill.textContent = sk.configured ? (nTargets ? `${nTargets} repeater${nTargets === 1 ? "" : "s"}` : "ready")
+    skPill.textContent = sk.configured ? (nTargets ? `${nTargets} repeater${nTargets === 1 ? "" : "s"}${sk.kind === "own" ? " · own key" : " · shared key"}` : "ready")
       : nTargets ? "No key from CoreScope"
       : corescopeSet ? "Opt a repeater in to use it"
       : "No CoreScope set";
     skPill.className = "pill " + (sk.configured ? "good" : nTargets ? "warn" : "neutral");
-    $("shared-name").textContent = sk.name || (sk.configured ? "shared guest" : nTargets ? "none served" : "not checked yet");
-    $("shared-ver").textContent = sk.configured ? `· v${sk.version || 0}` : "";
+    $("shared-name").textContent = sk.kind === "own" ? "This observer's own key"
+      : sk.name || (sk.configured ? "shared guest" : nTargets ? "none served" : "not checked yet");
+    $("shared-ver").textContent = sk.kind === "own" ? (sk.expires_at ? `· registered, kept until ${String(sk.expires_at).replace("T", " ").slice(0, 16)}` : "· registered")
+      : sk.configured ? `· v${sk.version || 0}` : "";
+    $("shared-reg").textContent = sk.kind !== "own" && sk.register_error ? `Own key not registered: ${sk.register_error}. Using the shared key meanwhile.` : "";
     $("shared-pub").textContent = sk.public ? maskKey(sk.public.toUpperCase()) : "—";
     $("shared-from").textContent = sk.from || (config.corescope_url || "—");
     if (!dirty) {

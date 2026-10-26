@@ -293,18 +293,20 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
                       temperature_c=temp, temperature_code=temp_code, method="telemetry")
 
 
-def shared_password_order(node_state: dict, attempts: int) -> list[str]:
-    """The passwords to log in with, one per try, under the shared key.
+def shared_password_order(node_state: dict, attempts: int, personal: bool = False) -> list[str]:
+    """The passwords to log in with, one per try, under a guest key.
 
-    Only "hello" is ever remembered: a blank login can succeed merely because
-    another observer already put the shared key in the repeater's ACL (one key,
-    one ACL entry for everyone), so a blank success says nothing about the
-    repeater's guest password. A repeater known to take "hello" is sent only
-    "hello"; otherwise blank comes first and "hello" only if blank goes
-    unanswered — so a blank-guest repeater that answers is never sent "hello".
+    A repeater known to take a password is sent only that one; otherwise blank
+    comes first and "hello" only if blank goes unanswered — so a blank-guest
+    repeater that answers is never sent "hello". With the public shared key
+    only "hello" is ever remembered: a blank login can succeed merely because
+    another observer put the shared key in the ACL (one key, one entry for
+    everyone), so it says nothing about the guest password. With this
+    observer's own key a blank success is our own entry, so it counts.
     """
-    if node_state.get("shared_password") == "hello":
-        order = ["hello"]
+    known = node_state.get("shared_password")
+    if known == "hello" or (personal and known == ""):
+        order = [known]
     else:
         order = list(sk.SHARED_PASSWORDS)
     while len(order) < max(1, attempts):
@@ -317,7 +319,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                     sleep: Callable[[float], None] = time.sleep,
                     reply_window: float = SHARED_REPLY_WINDOW, attempts: int = SHARED_ATTEMPTS,
                     on_step: Callable[[str], None] | None = None,
-                    covered: Callable[[], bool] | None = None) -> PollResult:
+                    covered: Callable[[], bool] | None = None, personal: bool = False) -> PollResult:
     """Poll one repeater under the shared guest key, as raw packets.
 
     Requests are built and encrypted with the shared key and replies are read
@@ -342,6 +344,12 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
     """
     now = now or time.time()
     step = on_step or (lambda *_a: None)
+    # The ACL entry, its route and the password it took all belong to the key:
+    # when the key changes (shared → this observer's own), start over.
+    if node_state.get("acl_key") != shared.public_key.hex():
+        for k in ("logged_in_at", "login_checked_at", "shared_password"):
+            node_state.pop(k, None)
+        node_state["acl_key"] = shared.public_key.hex()
     try:
         key = bytes.fromhex(n.node_id)
         live = ordered_routes(routes, node_state.get("last_route"))
@@ -450,7 +458,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
 
         # 2. Log in and request again.
         if reply is None and not admin:
-            for pw in shared_password_order(node_state, attempts):
+            for pw in shared_password_order(node_state, attempts, personal):
                 if tried:
                     sleep(RETRY_GAP_SECONDS)
                 login(pw, teach=not in_acl)
@@ -465,8 +473,8 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                         admin = True
                         break
                 if data is not None:
-                    if pw:
-                        node_state["shared_password"] = pw  # only "hello" is worth remembering
+                    if pw or personal:
+                        node_state["shared_password"] = pw  # see shared_password_order
                     reply = data
                     break
                 if lr is None:
