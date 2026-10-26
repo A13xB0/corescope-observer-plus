@@ -53,6 +53,9 @@ NO_REPLY_FAST_TRIES = 9
 # until it is heard again — no point polling a long-dead one every interval.
 UNHEARD_BACKOFF_AFTER = 24 * 3600
 UNHEARD_BACKOFF_INTERVAL = 24 * 3600
+# When we don't hear a shared-key reply ourselves, wait this long for another
+# observer's overhear to reach CoreScope before checking whether it landed.
+COVERED_SETTLE_SECONDS = 3.0
 TEMP_MISSES_BEFORE_DAILY = 3
 TEMP_DAILY = 24 * 3600
 
@@ -86,6 +89,7 @@ class PollResult:
     key_mode: str = "own"  # "own" (this observer's key) or "shared" (the guest key)
     admin_seen: bool = False  # the shared key was answered as admin
     admin_removed: bool | None = None  # removal drill result: True ok, False failed, None not run
+    covered: bool = False  # we didn't hear it, but CoreScope did (another observer overheard)
 
 
 def utc_iso(ts: float | None = None) -> str:
@@ -342,14 +346,16 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             client.send_raw_packet(body)
             return collect(data_tag)
 
-        def do_login(pw: str) -> None:
+        def login_and_request() -> tuple[sk.Reply | None, sk.LoginResult | None]:
             nonlocal teach
-            # The login carries only a password from SHARED_PASSWORDS: blank
-            # (most guests) or the throwaway "hello" some owners set as a guest
-            # password. A repeater that wants "hello" never answers a blank
-            # login, which just looked like a dead link.
-            step(f"Shared-key login ({'blank' if pw == '' else repr(pw)}) {route.label}")
-            client.send_raw_packet(sk.build_login(shared, key, out_path, plen, pw)[0])
+            # Offer both passwords the shared key may carry — blank and the
+            # public "hello" guest password — in the one window. We don't always
+            # know which a repeater wants; whichever matches adds the key to its
+            # guest ACL, and the other is simply ignored (wrong password → no
+            # reply, no side effect). Cheaper than a separate window per password.
+            for pw in sk.SHARED_PASSWORDS:
+                step(f"Shared-key login ({'blank' if pw == '' else repr(pw)}) {route.label}")
+                client.send_raw_packet(sk.build_login(shared, key, out_path, plen, pw)[0])
             if teach:
                 # teach the return path once so replies come direct, not flooded
                 # (firmware ClientACL.putClient leaves a new key pathless).
@@ -361,6 +367,19 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 teach = False
             node_state["login_checked_at"] = now
             sleep(LOGIN_SETTLE_SECONDS)
+            return send_request()
+
+        def check_covered() -> PollResult | None:
+            # We didn't hear it ourselves — give an observer's overhear a moment
+            # to reach CoreScope, then take that reading instead of retrying.
+            if covered is None:
+                return None
+            sleep(COVERED_SETTLE_SECONDS)
+            if covered():
+                step("Heard via another observer — CoreScope already has the reply")
+                return PollResult(OK, key_mode="shared", route=route, covered=True,
+                                  detail="reading obtained via another observer")
+            return None
 
         # The firmware keeps us in its guest ACL after a login, so poll without
         # logging in while we believe we are in it — saving the login's airtime.
@@ -376,38 +395,27 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 admin = True
             elif data is not None:
                 reply = data
-            elif covered is not None and covered():
-                # No answer, but another observer already fed CoreScope a fresh
-                # reading — don't re-send. Minimises airtime and retries.
-                step("CoreScope already has a fresh reading from another observer — not retrying")
-                node_state.pop("logged_in_at", None)
-                return PollResult(NO_REPLY, key_mode="shared", route=route,
-                                  detail="no direct answer; covered by another observer")
             else:
-                node_state.pop("logged_in_at", None)  # ACL entry likely gone — log in below
+                node_state.pop("logged_in_at", None)  # ACL entry likely gone
+                c = check_covered()
+                if c is not None:
+                    return c  # another observer got it; no need to log in and retry
 
-        # Known password first, so a "hello" repeater isn't slow every time.
-        passwords = list(sk.SHARED_PASSWORDS)
-        known = node_state.get("shared_password")
-        if known in passwords:
-            passwords.sort(key=lambda p: p != known)
         if reply is None and not admin:
-            for attempt, pw in enumerate(passwords):
+            for attempt in range(max(1, attempts)):
                 if attempt:
-                    if covered is not None and covered():
-                        step("CoreScope already has a fresh reading — not retrying")
-                        break
+                    c = check_covered()
+                    if c is not None:
+                        return c
                     sleep(RETRY_GAP_SECONDS)
-                do_login(pw)
+                data, login = login_and_request()
                 tried += 1
-                data, login = send_request()
                 if login is not None:
                     node_state["logged_in_at"] = now
                     if login.is_admin:
                         admin = True
                         break
                 if data is not None:
-                    node_state["shared_password"] = pw
                     reply = data
                     break
                 # No answer at all: teach the route again next attempt (a reboot
@@ -427,6 +435,9 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         return PollResult(ERROR, key_mode="shared", detail=str(exc))
 
     if reply is None:
+        c = check_covered()  # last chance: did an observer's overhear reach CoreScope?
+        if c is not None:
+            return c
         return PollResult(NO_REPLY, key_mode="shared", route=route, retried=tried > 1,
                           detail="no answer to the shared-key request")
     node_state.setdefault("logged_in_at", now)
@@ -492,6 +503,20 @@ def _admin_removal_drill(client: CompanionClient, shared: sk.SharedKey, key: byt
 
 def record(node_state: dict, result: PollResult, password_set: bool, now: float) -> None:
     node_state["last_attempt"] = now
+    if result.covered:
+        # We didn't hear it, but another observer did and CoreScope has the
+        # reading: count it as heard for scheduling (no retry, no backoff), and
+        # keep the last known battery value — we never decoded this one.
+        node_state["code"] = OK
+        node_state["detail"] = result.detail
+        node_state["method"] = "shared-observer"
+        node_state["last_success"] = now
+        node_state.pop("unheard_since", None)
+        node_state["no_reply_count"] = 0
+        if result.route is not None:
+            node_state["last_route"] = result.route.key
+            node_state["last_route_label"] = result.route.label
+        return
     node_state["code"] = result.code
     node_state["detail"] = result.detail
     node_state["retried"] = result.retried

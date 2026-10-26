@@ -113,6 +113,9 @@
     const route = x.route ? ` ${x.route}` : "";
     const temp = x.temperature_c != null ? `, ${Number(x.temperature_c).toFixed(1)} °C` : "";
     const role = x.role ? " as " + x.role : "";
+    // A "covered" poll was heard by another observer, not us, so there's no
+    // voltage of our own to show — CoreScope has the reading.
+    if (x.code === "ok" && x.battery_mv == null) return `heard via another observer${route}`;
     if (x.code === "ok") return `${(x.battery_mv / 1000).toFixed(2)} V${role}${route}${temp}`;
     if (x.code === "no_battery") return `no battery fitted${role}${route}${temp}`;
     return (CODE_TEXT[x.code] || x.code || "no answer") + (x.message && x.message !== x.code ? ": " + x.message : "");

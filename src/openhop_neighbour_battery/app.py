@@ -179,6 +179,13 @@ class App:
             return False
         return now - _ts(ts) < within_s
 
+    def _corescope_fresh_since(self, node_id: str, since: float) -> bool:
+        """True if CoreScope's newest reading for the node is from after `since`
+        — i.e. an observer overheard the reply to a request sent at that time.
+        A failed lookup is False, so the plugin falls back to retrying."""
+        ts = corescope_latest_battery_ts(self.settings.corescope_url, node_id)
+        return bool(ts) and _ts(ts) >= since - 5
+
     def _corescope_confirm(self, node_id: str, since: float) -> dict:
         """CoreScope's view of a node's battery for the live "did it land?"
         line. fresh is True when CoreScope's newest reading is from after the
@@ -281,12 +288,14 @@ class App:
                 pw = self.secrets.password(n.node_id)
                 shared = self.shared_key() if self.uses_shared_key(n.node_id) else None
                 if shared is not None:
-                    # Let the poll skip a retry when CoreScope already has a
-                    # fresh reading from another observer (overheard), to keep
-                    # airtime down — the same coverage test used to skip a poll.
+                    # If we don't hear the reply ourselves, let the poll take an
+                    # observer's overhear from CoreScope instead of retrying.
+                    # "Covered" means a reading landed since this poll began —
+                    # i.e. the answer to our own request, overheard.
                     covered = None
                     if self.settings.check_corescope:
-                        covered = lambda nid=n.node_id: self._corescope_covers(nid, interval, time.time())
+                        started = time.time()
+                        covered = lambda nid=n.node_id, t=started: self._corescope_fresh_since(nid, t)
                     result = poll_one_shared(
                         client, n, shared, st, routes=routes,
                         read_temperature=n.node_id in s.temperature_targets,

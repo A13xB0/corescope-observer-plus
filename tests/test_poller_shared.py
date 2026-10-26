@@ -241,17 +241,23 @@ def test_logs_in_when_acl_entry_is_gone(shared):
     assert rep.logins >= 1
 
 
-def test_covered_skips_retry_and_login(shared):
-    # No answer, but CoreScope already has a fresh reading from another observer:
-    # don't log in to retry.
+def test_covered_takes_the_observers_reading(shared):
+    # We don't hear it, but another observer did and CoreScope has it: count it
+    # as heard (not a no-reply), and don't log in to retry.
     rep = FakeRepeater(shared, answer_status=False)
     now = 2_000_000.0
     state = {"logged_in_at": now - 60, "login_checked_at": now - 60}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
                                  sleep=lambda s: None, now=now, covered=lambda: True)
-    assert res.code == poller.NO_REPLY
-    assert "covered" in res.detail
+    assert res.code == poller.OK
+    assert res.covered is True
     assert rep.logins == 0
+    # record() marks it heard so the backoff clock resets and it isn't retried.
+    st = {"unheard_since": now - 5 * 3600, "battery_mv": 3900}
+    poller.record(st, res, password_set=False, now=now)
+    assert st["last_success"] == now
+    assert "unheard_since" not in st
+    assert st["battery_mv"] == 3900  # last known value kept; this one wasn't decoded
 
 
 def test_admin_recheck_forces_a_login(shared):
