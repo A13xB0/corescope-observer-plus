@@ -101,6 +101,9 @@ class FakeCompanion:
             self._sent(conn)
             if not self.answer_login:
                 return
+            # A dead path loses the login too, like any request along it.
+            if self.answer_paths is not None and self.contacts.get(key, (-1, b""))[1] not in self.answer_paths:
+                return
             if self.login_fail_always:
                 self._out(conn, bytes([c.PUSH_CODE_LOGIN_FAIL, 0]) + key[:6])
                 return

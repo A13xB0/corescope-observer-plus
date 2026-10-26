@@ -76,6 +76,13 @@ ANTENNA_RECHECKS = (10.0, 15.0)
 # The route is re-sent before a no-login request only when it may be gone:
 # after a flooded reply, after a failed poll, or once this long since the last.
 ROUTE_REFRESH_SECONDS = 24 * 3600
+# An alternative route is tried only for a repeater that answered within this
+# long: for one silent all day it would just double every poll's logins.
+ALTERNATIVE_IF_HEARD_WITHIN = 24 * 3600
+
+
+def heard_recently(node_state: dict, now: float) -> bool:
+    return now - float(node_state.get("last_success") or 0) < ALTERNATIVE_IF_HEARD_WITHIN
 # Request tags remembered per repeater, so a late reply to an earlier poll's
 # request is never read as a login answer.
 RECENT_TAGS = 16
@@ -195,7 +202,8 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
         return PollResult(NOT_DIRECT, detail="no direct or one-hop route heard")
     attempts = max(1, attempts)
 
-    ctx = {"role": node_state.get("role", ""), "pinned": None, "pinned_any": False, "login_sent": False,
+    use_alternatives = alternative_routes and heard_recently(node_state, now)
+    ctx = {"proven": None, "role": node_state.get("role", ""), "pinned": None, "pinned_any": False, "login_sent": False,
            "refused": "", "dead": set(), "tries": 0, "blocked": None}
 
     def pin(route: Route) -> bool:
@@ -227,6 +235,7 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
         else:
             log.refused(entry, "login refused")
         if result.ok:
+            ctx["proven"] = route.key
             node_state["logged_in_at"] = now
             node_state["login_fails"] = 0
             ctx["role"] = result.role
@@ -258,11 +267,18 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
         return answer
 
     def next_route(i: int) -> Route | None:
-        """The route for try i: the best live one, or round the live ones."""
+        """The route for try i: the best live one, or round the live ones.
+        Once a login on a route is answered, that route works: stay on it."""
         live = [r for r in ordered if r.key not in ctx["dead"]]
         if not live:
             return None
-        return live[i % len(live)] if alternative_routes else live[0]
+        proven = next((r for r in live if r.key == ctx["proven"]), None)
+        if proven is not None:
+            return proven
+        if not use_alternatives:
+            # Only the best route, ever: if it is dead this poll, stop.
+            return ordered[0] if ordered[0].key not in ctx["dead"] else None
+        return live[i % len(live)]
 
     def ask(request: Callable[[], object], kind: str):
         """Up to `attempts` sends; the answer and the route it came by, or (None, None)."""
@@ -638,7 +654,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         reply, admin, logged_in, login_answered = attempt(False)
         used_alternative = False
         if (reply is None and not admin and not login_answered and alternative_routes
-                and len(live) > 1 and live[1].key != route.key):
+                and heard_recently(node_state, now) and len(live) > 1 and live[1].key != route.key):
             # Nothing at all came back on the best route: try the next one once.
             # Its return path differs, so the route packet always goes again.
             sleep(RETRY_GAP_SECONDS)
@@ -690,6 +706,8 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             why = f"no answer on the best route or the alternative ({route.label})"
         elif len(live) > 1 and not alternative_routes:
             why = "no answer; alternative route not tried (setting off)"
+        elif len(live) > 1 and not login_answered and not heard_recently(node_state, now):
+            why = "no answer; alternative route not tried (not heard in the last day)"
         elif len(live) > 1 and login_answered:
             why = "no answer to the request after the login was answered; alternative not needed"
         elif len(live) > 1:

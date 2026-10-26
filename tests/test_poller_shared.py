@@ -684,7 +684,7 @@ def test_alternative_route_tried_once_and_logged(shared):
             rep._handle_orig(pkt)
     rep._handle = only_via_relay
     entries: list = []
-    state = {"status_checked_at": 2e6}
+    state = {"status_checked_at": 2e6, "last_success": 2e6 - 3600}  # heard an hour ago
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT, VIA],
                                  sleep=lambda s: None, now=2e6, alternative_routes=True,
                                  plog=packet_log.PacketLog(entries).for_node(rep.pub.hex(), "G", "guest key"))
@@ -694,3 +694,13 @@ def test_alternative_route_tried_once_and_logged(shared):
     rep2 = FakeRepeater(shared, answer_login=False, answer_status=False, answer_telemetry=False)
     res2 = poller.poll_one_shared(rep2, _neighbour(rep2), shared, {}, routes=[DIRECT, VIA], sleep=lambda s: None)
     assert res2.code == poller.NO_REPLY and "alternative route not tried" in res2.detail
+
+
+
+def test_no_alternative_for_a_repeater_silent_all_day(shared):
+    rep = FakeRepeater(shared, answer_login=False, answer_status=False, answer_telemetry=False)
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, {"last_success": 2e6 - 2 * 86400},
+                                 routes=[DIRECT, VIA], sleep=lambda s: None, now=2e6, alternative_routes=True)
+    assert res.code == poller.NO_REPLY and not res.alternative
+    assert "not heard in the last day" in res.detail
+    assert rep.logins == 2  # blank and hello on the best route only, not doubled

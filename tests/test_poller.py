@@ -210,10 +210,12 @@ def test_one_hop_route_pins_relay_path(fake):
 def test_alternative_routes_go_round_and_the_good_one_is_remembered(fake):
     fake.answer_paths = {bytes.fromhex("2eecdf")}
     fake.telemetry = None
-    state = dict(LOGGED_IN)
+    state = dict(LOGGED_IN, last_success=9_000.0)  # heard recently, so alternatives are tried
     result, state = poll(fake, routes=[DIRECT, VIA_A, VIA_B], alternative_routes=True, state=state, now=10_000.0)
     assert result.code == poller.OK and result.route is VIA_B and result.retried
-    assert [r[2] for r in statuses(fake)] == [b"", b"", bytes.fromhex("4128a6"), bytes.fromhex("2eecdf")]
+    # Direct: status, then a login that goes unanswered (the path is dead), so
+    # the round moves on, skipping the dead route.
+    assert [r[2] for r in statuses(fake)] == [b"", bytes.fromhex("2eecdf")]
     poller.record(state, result, False, 10_000.0)
     assert state["last_route"] == RELAY_B
     fake.requests.clear()
@@ -400,3 +402,15 @@ def test_status_only_every_six_hours_otherwise_telemetry(fake):
     fake.requests.clear()
     r3, state = poll(fake, state=state, now=100_000.0 + 6 * 3600 + 1)
     assert r3.method == "status"
+
+
+
+def test_companion_stays_on_a_route_whose_login_was_answered(fake):
+    # montrave, 26 Oct 15:49: login answered via Bishop Hill but telemetry lost;
+    # trying direct and via Markinch after that only wasted two packets.
+    fake.answer_paths = {bytes.fromhex("2eecdf")}
+    fake.answer_status = False
+    fake.telemetry = None
+    state = {"logged_in_at": 1.0, "last_success": 9_000.0, "status_checked_at": 10_000.0}
+    poll(fake, routes=[VIA_B, DIRECT, VIA_A], alternative_routes=True, state=state, now=10_000.0)
+    assert {r[2] for r in fake.requests} == {bytes.fromhex("2eecdf")}
