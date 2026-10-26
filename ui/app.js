@@ -330,11 +330,20 @@
 
     const chosen = ticked("node", config.targets);
     const hopsOf = (n) => (n.hops == null ? 9 : n.hops);
-    const nodes = (runtime.nodes || []).slice().sort((a, b) => (hopsOf(a) - hopsOf(b)) || ((b.snr ?? -99) - (a.snr ?? -99)));
+    // Polled repeaters first, then the rest; reachable before unreachable,
+    // then nearest and strongest. Ordered by the saved selection, so a row
+    // doesn't jump away while it is being ticked.
+    const saved = new Set(config.targets || []);
+    const nodes = (runtime.nodes || []).slice().sort((a, b) =>
+      (saved.has(b.node_id) - saved.has(a.node_id)) || (reachable(b) - reachable(a))
+      || (hopsOf(a) - hopsOf(b)) || ((b.snr ?? -99) - (a.snr ?? -99)));
+    const firstOther = nodes.findIndex((n) => !saved.has(n.node_id));
     $("selected-count").textContent = `${chosen.size} selected`;
-    $("nodes").innerHTML = nodes.map((n) => {
+    $("nodes").innerHTML = nodes.map((n, i) => {
       const ok = reachable(n);
-      return `<tr class="${ok ? "" : "dim"}">
+      const divider = i === firstOther && i > 0
+        ? '<tr class="group-row"><td colspan="8" class="muted small">Not polled</td></tr>' : "";
+      return `${divider}<tr class="${ok ? "" : "dim"}">
         <td><input type="checkbox" data-node="${esc(n.node_id)}" ${chosen.has(n.node_id) ? "checked" : ""} ${ok ? "" : "disabled"} aria-label="Poll ${esc(n.name)}"></td>
         <td><strong>${esc(n.name)}</strong><div class="muted small mono">${esc(n.node_id.slice(0, 8))}…${n.uptime_secs ? ` · up ${Math.floor(n.uptime_secs / 86400)} d` : ""}${keyBadge(n)}</div></td>
         <td>${routeCell(n)}</td>
