@@ -48,6 +48,7 @@ STATUS_EVERY_SECONDS = 6 * 3600
 # assumed lost (a rebooted repeater forgets guests): the next poll logs in
 # before asking anything.
 FORGET_LOGIN_AFTER = 3
+FORGET_PASSWORD_AFTER = 7 * 24 * 3600
 NO_BATTERY_RECHECK = 24 * 3600
 # A repeater that didn't answer is tried again sooner: every 20 minutes (3 an
 # hour) for its first misses in a row, then at the normal interval. It is
@@ -657,7 +658,11 @@ def record(node_state: dict, result: PollResult, password_set: bool, now: float)
         node_state.setdefault("unheard_since", now)  # start the clock for the daily backoff
         if node_state["no_reply_count"] >= FORGET_LOGIN_AFTER:
             node_state.pop("logged_in_at", None)
-            node_state.pop("shared_password", None)  # re-learn blank/hello next time
+        # A remembered guest password is kept through an outage — a repeater
+        # that is merely out of reach hasn't changed its password. Only after
+        # FORGET_PASSWORD_AFTER of silence is it re-learnt (blank, then hello).
+        if now - float(node_state.get("unheard_since") or now) >= FORGET_PASSWORD_AFTER:
+            node_state.pop("shared_password", None)
     if result.code in (NEEDS_PASSWORD, PASSWORD_REJECTED):
         node_state.pop("logged_in_at", None)
         node_state["login_fails"] = 0

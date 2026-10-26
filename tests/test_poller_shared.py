@@ -430,3 +430,12 @@ def test_admin_drill_over_one_hop(shared):
     res = poller.poll_one_shared(rep, _neighbour(rep, zero_hop=False), shared, {}, routes=[VIA], sleep=lambda s: None)
     assert res.code == poller.ADMIN_STOP and res.admin_removed is True
     assert rep.cli_commands == [f"setperm {shared.public_key.hex()} 0"]
+
+
+
+def test_known_password_survives_an_outage():
+    st = {"shared_password": "hello", "no_reply_count": 5, "unheard_since": 1_000_000.0}
+    poller.record(st, poller.PollResult(poller.NO_REPLY), password_set=False, now=1_000_000.0 + 2 * 86400)
+    assert st["shared_password"] == "hello"
+    poller.record(st, poller.PollResult(poller.NO_REPLY), password_set=False, now=1_000_000.0 + 8 * 86400)
+    assert "shared_password" not in st
