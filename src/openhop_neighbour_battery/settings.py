@@ -9,6 +9,7 @@ from pathlib import Path
 
 KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 INTERVALS = (30, 60, 180, 360)
+STATUS_HOURS = (1, 3, 6, 12, 24)
 
 DEFAULTS = {
     "openhop_api_url": "http://127.0.0.1:8000",
@@ -17,6 +18,7 @@ DEFAULTS = {
     "companion_port": 5003,
     "enabled": False,
     "interval_minutes": 60,
+    "status_every_hours": 6,
     "targets": [],
     "brokers": [],
     "max_age_hours": 24,
@@ -42,7 +44,11 @@ class Settings:
     companion_name: str = DEFAULTS["companion_name"]
     companion_port: int = DEFAULTS["companion_port"]
     enabled: bool = False
-    interval_minutes: int = 60
+    interval_minutes: int = 60  # how often each repeater is polled (telemetry)
+    # How often a poll also asks for the full status (stats for the Repeater
+    # Status charts; about four times the airtime of telemetry). Never through
+    # a relay: one-hop repeaters are asked by telemetry only.
+    status_every_hours: int = 6
     targets: list[str] = field(default_factory=list)
     brokers: list[str] = field(default_factory=list)
     max_age_hours: int = 24
@@ -77,6 +83,11 @@ def parse(raw: dict) -> Settings:
     except (TypeError, ValueError):
         interval = 60
     s.interval_minutes = interval if interval in INTERVALS else max(30, interval)
+    try:
+        hours = int(raw.get("status_every_hours") or 6)
+    except (TypeError, ValueError):
+        hours = 6
+    s.status_every_hours = hours if hours in STATUS_HOURS else 6
     s.targets = sorted({str(k).lower() for k in raw.get("targets") or [] if KEY_RE.match(str(k).lower())})
     s.brokers = [str(b) for b in raw.get("brokers") or [] if isinstance(b, str)]
     try:

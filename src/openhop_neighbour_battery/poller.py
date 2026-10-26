@@ -43,7 +43,8 @@ STATUS_RECHECK = 24 * 3600
 # Battery and chip temperature come from telemetry, whose guest reply is about
 # 12 bytes; a status reply is 60 (RepeaterStats). So every poll asks for
 # telemetry, and the full status (uptime, noise floor, counters for the
-# Repeater Status charts) is asked for only when the last one is this old.
+# Repeater Status charts) is asked for only when the last one is this old
+# (the default for the status_every_hours setting).
 STATUS_EVERY_SECONDS = 6 * 3600
 # After this many polls in a row with no answer at all, the last login is
 # assumed lost (a rebooted repeater forgets guests): the next poll logs in
@@ -133,11 +134,11 @@ def ordered_routes(routes: list[Route], last_key: str | None) -> list[Route]:
     return out
 
 
-def status_is_due(node_state: dict, now: float) -> bool:
+def status_is_due(node_state: dict, now: float, every: float = STATUS_EVERY_SECONDS) -> bool:
     """Whether to ask for the full status this poll (never read yet, or the
-    last ask was STATUS_EVERY_SECONDS ago)."""
+    last ask was ``every`` seconds ago; the status_every_hours setting)."""
     last = node_state.get("status_checked_at")
-    return last is None or now - float(last) >= STATUS_EVERY_SECONDS
+    return last is None or now - float(last) >= every
 
 
 def temperature_due(node_state: dict, now: float) -> bool:
@@ -150,7 +151,8 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
              routes: list[Route], alternative_routes: bool = False, read_temperature: bool = False,
              now: float | None = None, sleep: Callable[[float], None] = time.sleep,
              retry_gap: float = RETRY_GAP_SECONDS, attempts: int = REQUEST_ATTEMPTS,
-             on_step: Callable[[str], None] | None = None) -> PollResult:
+             on_step: Callable[[str], None] | None = None,
+             status_every: float = STATUS_EVERY_SECONDS) -> PollResult:
     """Read one repeater's battery with as few transmissions as will do.
 
     Every request goes direct. A request that gets no answer is followed by
@@ -252,7 +254,7 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
     one_hop = all(r.hops > 0 for r in ordered)
     status_ignored = bool(node_state.get("status_ignored")) and \
         now - float(node_state.get("status_checked_at") or 0) < STATUS_RECHECK
-    status_due = status_is_due(node_state, now)
+    status_due = status_is_due(node_state, now, status_every)
     telemetry_only = one_hop or status_ignored or not status_due
     stats = tel = None
     used = None
@@ -343,7 +345,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                     reply_window: float = SHARED_REPLY_WINDOW,
                     on_step: Callable[[str], None] | None = None,
                     antenna: Callable[[float], list[bytes] | None] | None = None,
-                    personal: bool = False) -> PollResult:
+                    personal: bool = False, status_every: float = STATUS_EVERY_SECONDS) -> PollResult:
     """Poll one repeater under a guest key, as raw packets.
 
     Requests are built and encrypted with the key and replies are read straight
@@ -391,8 +393,8 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         plen = path_len_byte(out_path, route.hash_size)
         one_hop = route.hops > 0
         # Telemetry every poll (battery + chip temperature, small reply);
-        # status only every STATUS_EVERY_SECONDS, and never through a relay.
-        status_due = status_is_due(node_state, now)
+        # status only every status_every seconds, and never through a relay.
+        status_due = status_is_due(node_state, now, status_every)
         kind = "status" if (not one_hop and status_due) else "telemetry"
         client.clear_rx_backlog()  # only frames heard during this poll count
         latency: list[float] = []

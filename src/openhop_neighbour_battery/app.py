@@ -394,12 +394,13 @@ class App:
                         read_temperature=n.node_id in s.temperature_targets,
                         on_step=on_step, antenna=antenna,
                         personal=shared.public_key == self.own_key().public_key,
+                        status_every=s.status_every_hours * 3600,
                     )
                 else:
                     result = poll_one(
                         client, n, pw, st, routes=routes, alternative_routes=s.alternative_routes,
                         read_temperature=n.node_id in s.temperature_targets,
-                        on_step=on_step,
+                        on_step=on_step, status_every=s.status_every_hours * 3600,
                     )
                 record(st, result, bool(pw), time.time())
                 st.pop("password_changed", None)

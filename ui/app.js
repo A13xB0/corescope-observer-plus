@@ -256,6 +256,7 @@
     if (!dirty) {
       $("enabled").checked = !!config.enabled;
       $("interval_minutes").value = String(config.interval_minutes || 60);
+      $("status_every_hours").value = String(config.status_every_hours || 6);
       $("alternative_routes").checked = !!config.alternative_routes;
       const hops = String(config.max_hops ? 1 : 0);
       document.querySelectorAll('input[name="max_hops"]').forEach((el) => { el.checked = el.value === hops; });
@@ -326,6 +327,7 @@
   function collect() {
     config.enabled = $("enabled").checked;
     config.interval_minutes = Number($("interval_minutes").value);
+    config.status_every_hours = Number($("status_every_hours").value);
     config.brokers = [...document.querySelectorAll("[data-broker]")].filter((el) => el.checked).map((el) => el.dataset.broker);
     // Targets with a row take its tick; one just added has no row until saved.
     const boxes = [...document.querySelectorAll("[data-node]")];

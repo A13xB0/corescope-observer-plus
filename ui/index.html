@@ -49,21 +49,29 @@
       <label for="corescope_url" style="display:block;margin-top:12px">CoreScope address</label>
       <input id="corescope_url" type="text" autocomplete="off" placeholder="https://corescope.example" class="mono" style="width:100%;max-width:480px;padding:8px;margin-top:4px;border:1px solid var(--line);border-radius:8px;background:var(--bg);box-sizing:border-box">
       <p class="muted small">Where the plugin fetches the key, looks up repeaters, and checks whether a reading already arrived.</p>
-      <label class="option" style="margin-top:8px"><input id="check_corescope" type="checkbox"> <span><strong>Skip a retry when CoreScope already has it</strong>
-        <span class="muted small">If a shared-key repeater doesn't answer but CoreScope already has a fresh reading from another observer, don't retry.</span></span></label>
+      <label class="option" style="margin-top:8px"><input id="check_corescope" type="checkbox"> <span><strong>Use CoreScope's observers as a wider antenna</strong>
+        <span class="muted small">When a guest-key reply isn't heard here, look for it in the packets CoreScope's observers heard and decrypt it, instead of asking again.</span></span></label>
     </section>
 
     <section class="card" aria-labelledby="poll-h">
       <h2 id="poll-h">Polling</h2>
       <div class="options">
         <label class="option"><input id="enabled" type="checkbox"> <span><strong>Poll selected repeaters</strong>
-          <span class="muted small">Every
-          <select id="interval_minutes" aria-label="Polling interval">
+          <span class="muted small">Battery and temperature (telemetry) every
+          <select id="interval_minutes" aria-label="Telemetry interval">
             <option value="30">30 minutes</option>
             <option value="60">hour</option>
             <option value="180">3 hours</option>
             <option value="360">6 hours</option>
-          </select></span></span></label>
+          </select>; full status every
+          <select id="status_every_hours" aria-label="Status interval">
+            <option value="1">hour</option>
+            <option value="3">3 hours</option>
+            <option value="6">6 hours</option>
+            <option value="12">12 hours</option>
+            <option value="24">24 hours</option>
+          </select>
+          <span class="muted small" style="display:block">Status (uptime, noise floor, packet counts) is about four times the airtime of telemetry, and is never asked through a relay.</span></span></span></label>
         <div class="option"><span></span><span><strong id="reach-label">Reach</strong>
           <span class="segmented" role="radiogroup" aria-labelledby="reach-label">
             <label><input type="radio" name="max_hops" value="0"> Direct only</label>
@@ -73,7 +81,7 @@
         <label class="option"><input id="alternative_routes" type="checkbox"> <span><strong>Try an alternative route</strong>
           <span class="muted small">If the best route gets no answer, the one retry uses the next route heard in adverts.</span></span></label>
       </div>
-      <p class="muted small">Every request and retry is sent direct. Nothing is ever flooded. Each reading also carries the repeater's status stats (uptime, noise floor, airtime, packet counts), which come with every status reply.</p>
+      <p class="muted small">Every packet the plugin sends goes direct; nothing it sends is flooded. A repeater floods its answer only when it has no route back, so the plugin sends it one before asking.</p>
     </section>
 
     <section class="card" aria-labelledby="brokers-h">

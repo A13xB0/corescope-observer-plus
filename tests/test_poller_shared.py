@@ -528,3 +528,16 @@ def test_known_password_survives_an_outage():
     assert st["shared_password"] == "hello"
     poller.record(st, poller.PollResult(poller.NO_REPLY), password_set=False, now=1_000_000.0 + 8 * 86400)
     assert "shared_password" not in st
+
+
+def test_status_interval_is_a_setting(shared):
+    from openhop_neighbour_battery.settings import parse
+    assert parse({}).status_every_hours == 6
+    assert parse({"status_every_hours": 12}).status_every_hours == 12
+    assert parse({"status_every_hours": 7}).status_every_hours == 6  # not an offered choice
+    rep = FakeRepeater(shared, battery_mv=4012)
+    now = 2_000_000.0
+    state = {"status_checked_at": now - 2 * 3600}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                 sleep=lambda s: None, now=now, status_every=3600)
+    assert res.method == "status"  # an hour's setting: status due after two
