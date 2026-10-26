@@ -62,6 +62,11 @@ def registration_message(observer_id: str, public_key_hex: str, timestamp: int) 
 def registration_body(observer: LocalIdentity, key: sk.SharedKey, now: float | None = None) -> dict:
     """The POST /api/guest-keys body: the key, signed by this observer."""
     observer_id = observer.get_public_key().hex()
+    # Never the repeater's (or any identity's) own key: only the separate
+    # polling key made by load_or_create is ever uploaded. The repeater key
+    # only signs, and a signature doesn't reveal it.
+    if key.public_key == observer.get_public_key():
+        raise ValueError("refusing to upload this repeater's own key")
     ts = int(now or time.time())
     msg = registration_message(observer_id, key.public_key.hex(), ts)
     sig = observer.sign(msg)

@@ -461,3 +461,13 @@ def test_repeater_owned_by_another_observer_is_left_to_them(tmp_path, monkeypatc
         assert calls == [1]
     finally:
         fake.close()
+
+
+def test_never_uploads_the_repeaters_own_key():
+    import pytest
+    from openhop_core import LocalIdentity
+    from openhop_neighbour_battery import guest_key, shared_key as sk
+    ident = LocalIdentity()
+    same = sk.SharedKey("x", 1, ident.get_public_key(), ident.get_signing_key_bytes())
+    with pytest.raises(ValueError):
+        guest_key.registration_body(ident, same)

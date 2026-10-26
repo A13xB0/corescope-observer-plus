@@ -40,7 +40,7 @@
         <h2 id="shared-h">Guest key</h2>
         <span id="shared-state" class="pill neutral">Off</span>
       </div>
-      <p class="muted small">A guest identity used to poll a repeater, so any observer that hears the reply can feed CoreScope. This observer makes its own key and registers it with CoreScope, which decodes the replies others overhear and credits them here; on a CoreScope without that, the public shared key is used instead. CoreScope also picks one observer to poll each repeater, so others don't repeat the request. Opt a repeater in from its Details. The key only ever logs in blank or with "hello", never as admin.</p>
+      <p class="muted small">A guest identity used to poll a repeater, so any observer that hears the reply can feed CoreScope. The plugin makes a separate polling key for this (never the repeater's own key, which is never shared) and registers it with CoreScope, which decodes the replies others overhear and credits them here; on a CoreScope without that, the public shared key is used instead. CoreScope also picks one observer to poll each repeater, so others don't repeat the request. Opt a repeater in from its Details. The key only ever logs in blank or with "hello", never as admin.</p>
       <div id="shared-set" class="kv">
         <div><span class="muted">Key</span> <strong id="shared-name">—</strong> <span id="shared-ver" class="muted small"></span> <code id="shared-pub" class="muted">—</code></div>
         <div><span class="muted">From</span> <code id="shared-from">—</code></div>
@@ -168,7 +168,7 @@
         <span class="muted small" style="display:block">The chip temperature arrives with the battery reading (ESP32 and nRF52 boards), so this costs no extra airtime.</span></span></label>
       <div id="shared-block" hidden>
         <label class="check"><input id="shared-this" type="checkbox"> <span><strong>Poll with the guest key</strong>
-          <span class="muted small" style="display:block">Polls this repeater as a guest (this observer's own key, or the shared one), so other observers can feed CoreScope its readings.</span></span></label>
+          <span class="muted small" style="display:block">Polls this repeater as a guest under a separate polling key the plugin made for this purpose, so other observers can feed CoreScope its readings. CoreScope gets that polling key to decrypt them; this repeater's own key is never shared.</span></span></label>
         <ul class="consent muted small">
           <li>Anyone can read its replies. That's the point: other observers feed CoreScope.</li>
           <li>It is only ever used with a <strong>blank</strong> or <strong>hello</strong> password, set above.</li>
