@@ -672,3 +672,25 @@ def test_slot_skips_a_poll_just_after_a_test():
     st = {"code": poller.OK, "last_attempt": base - 600}
     assert not poller.is_due(st, 3600, False, base, 0.0)
     assert poller.is_due(st, 3600, False, base + 3600, 0.0)
+
+
+def test_alternative_route_tried_once_and_logged(shared):
+    from openhop_neighbour_battery import packet_log
+    rep = FakeRepeater(shared, battery_mv=4010)
+    rep._handle_orig = rep._handle
+
+    def only_via_relay(pkt):  # the direct route is dead; through the relay it works
+        if pkt.path_len:
+            rep._handle_orig(pkt)
+    rep._handle = only_via_relay
+    entries: list = []
+    state = {"status_checked_at": 2e6}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT, VIA],
+                                 sleep=lambda s: None, now=2e6, alternative_routes=True,
+                                 plog=packet_log.PacketLog(entries).for_node(rep.pub.hex(), "G", "guest key"))
+    assert res.code == poller.OK and res.alternative and res.route.key == VIA.key
+    assert any("alternative route" in e["detail"] for e in entries)
+    # With the setting off, the result says it wasn't tried.
+    rep2 = FakeRepeater(shared, answer_login=False, answer_status=False, answer_telemetry=False)
+    res2 = poller.poll_one_shared(rep2, _neighbour(rep2), shared, {}, routes=[DIRECT, VIA], sleep=lambda s: None)
+    assert res2.code == poller.NO_REPLY and "alternative route not tried" in res2.detail

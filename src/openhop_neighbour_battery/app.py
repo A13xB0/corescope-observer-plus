@@ -415,6 +415,7 @@ class App:
                         personal=shared.public_key == self.own_key().public_key,
                         status_every=s.status_every_hours * 3600, plog=plog,
                         guest_password=s.guest_passwords.get(n.node_id),
+                        alternative_routes=s.alternative_routes,
                     )
                 else:
                     result = poll_one(
@@ -429,8 +430,9 @@ class App:
                 st["name"] = n.name
                 if result.code == ADMIN_STOP:
                     self._disable_shared_key(n, result)
-                LOG.info("poll %s (%s) %s%s: %s %s%s%s", n.name, n.node_id[:8],
+                LOG.info("poll %s (%s) %s%s%s: %s %s%s%s", n.name, n.node_id[:8],
                          result.route.label if result.route else "-",
+                         " (alternative route: best got no answer)" if result.alternative else "",
                          " [shared]" if result.key_mode == "shared" else "", result.code,
                          f"{result.battery_mv} mV" if result.battery_mv is not None else result.detail,
                          f", {result.temperature_c} °C" if result.temperature_c is not None
