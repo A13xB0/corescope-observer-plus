@@ -298,3 +298,63 @@ def test_corescope_covers_skips_a_fresh_reading(tmp_path, monkeypatch):
         assert a._corescope_covers(NODE, 3600, now) is False
     finally:
         fake.close()
+
+
+def test_test_login_reports_live_steps(tmp_path, monkeypatch):
+    # The Test action records a step for each stage so the dialog shows a
+    # live console of what the poll is doing (login, status…).
+    fake = FakeCompanion()
+    monkeypatch.setattr(app_mod, "CORESCOPE_SETTLE_S", 0)
+    monkeypatch.setattr(app_mod, "corescope_battery_snapshot", lambda *a, **k: None)
+    try:
+        a, _ = make_app(tmp_path, fake, targets=[NODE],
+                        requests=[{"id": "t1", "type": "test_login", "node_id": NODE}])
+        monkeypatch.setattr(a, "refresh", lambda: None)
+        a.ohcfg = load_openhop_config(tmp_path / "config.yaml")
+        a.check = {"companion": {"ok": True}}
+        a.candidates = [Neighbour(NODE, "West Lomond", -5.0, -119, 0, True)]
+        a.run_requests()
+        act = a.actions["test_login"]
+        assert act["running"] is False
+        assert act["steps"], "no live steps recorded"
+        labels = " ".join(s["label"].lower() for s in act["steps"])
+        assert "login" in labels or "status" in labels
+
+
+    finally:
+        fake.close()
+
+
+def test_check_now_stale_scope_skips_fresh(tmp_path, monkeypatch):
+    # scope "stale" polls only targets with no reading in the last hour.
+    import time as _t
+    fake = FakeCompanion()
+    monkeypatch.setattr(app_mod, "CORESCOPE_SETTLE_S", 0)
+    monkeypatch.setattr(app_mod, "corescope_battery_snapshot", lambda *a, **k: None)
+
+    class P:
+        def __init__(self, cfg):
+            pass
+
+        def publish(self, broker, readings):
+            pass
+
+    monkeypatch.setattr(app_mod, "Publisher", P)
+    other = "0aa0" + "cd" * 30
+    try:
+        a, _ = make_app(tmp_path, fake, targets=[NODE, other], brokers=["ScotMesh"],
+                        requests=[{"id": "c1", "type": "check_now", "scope": "stale"}])
+        monkeypatch.setattr(a, "refresh", lambda: None)
+        a.ohcfg = load_openhop_config(tmp_path / "config.yaml")
+        a.check = {"companion": {"ok": True}, "publish": {"ok": True}}
+        a.candidates = [Neighbour(NODE, "West Lomond", -5.0, -119, 0, True),
+                        Neighbour(other, "Bowden", -6.0, -118, 0, True)]
+        # NODE read 2 minutes ago (fresh); `other` never read (stale).
+        a.state.node(NODE)["last_success"] = _t.time() - 120
+        a.run_requests()
+        act = a.actions["check_now"]
+        assert act["scope"] == "stale"
+        polled = [p["node_id"] for p in act["progress"]]
+        assert other in polled and NODE not in polled, polled
+    finally:
+        fake.close()

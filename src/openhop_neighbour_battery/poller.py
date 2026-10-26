@@ -102,7 +102,8 @@ def temperature_due(node_state: dict, now: float) -> bool:
 def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: dict, *,
              routes: list[Route], alternative_routes: bool = False, read_temperature: bool = False,
              now: float | None = None, sleep: Callable[[float], None] = time.sleep,
-             retry_gap: float = RETRY_GAP_SECONDS, attempts: int = REQUEST_ATTEMPTS) -> PollResult:
+             retry_gap: float = RETRY_GAP_SECONDS, attempts: int = REQUEST_ATTEMPTS,
+             on_step: Callable[[str], None] | None = None) -> PollResult:
     """Read one repeater's battery with as few transmissions as will do.
 
     Every request goes direct. A request that gets no answer is followed by
@@ -121,9 +122,11 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
     is asked by telemetry only, and status is tried again once a day.
     """
     now = now or time.time()
+    step = on_step or (lambda *_a: None)
     key = bytes.fromhex(n.node_id)
     ordered = ordered_routes(routes, node_state.get("last_route"))
     if not ordered:
+        step("No route heard")
         return PollResult(NOT_DIRECT, detail="no direct or one-hop route heard")
     attempts = max(1, attempts)
 
@@ -146,6 +149,7 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
         login is flooded by the repeater and can arrive late or not at all
         while the route itself works.
         """
+        step(f"Logging in via {route.label}" + (" (verifying)" if not probe else ""))
         ctx["login_sent"] = True
         node_state["login_attempt_at"] = now
         result = client.login(key, password)
@@ -210,10 +214,12 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
         if not node_state.get("logged_in_at") and pin(ordered[0]):
             login(ordered[0], probe=False)
         if not telemetry_only:
+            step("Requesting status")
             stats, used = ask(lambda: client.status(key))
             node_state["status_checked_at"] = now
         want_temp = read_temperature and temperature_due(node_state, now)
         if stats is None or want_temp:
+            step("Requesting telemetry")
             tel, tel_route = ask(lambda: client.telemetry(key))
             if stats is None:
                 used = tel_route
@@ -260,7 +266,8 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
 def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey, node_state: dict, *,
                     routes: list[Route], read_temperature: bool = False, now: float | None = None,
                     sleep: Callable[[float], None] = time.sleep,
-                    reply_window: float = SHARED_REPLY_WINDOW, attempts: int = SHARED_ATTEMPTS) -> PollResult:
+                    reply_window: float = SHARED_REPLY_WINDOW, attempts: int = SHARED_ATTEMPTS,
+                    on_step: Callable[[str], None] | None = None) -> PollResult:
     """Poll one repeater under the shared guest key, as raw packets.
 
     Sends a blank login then a status request (direct) or telemetry request
@@ -277,12 +284,14 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
     under it.
     """
     now = now or time.time()
+    step = on_step or (lambda *_a: None)
     reply = None
     admin = False
     try:
         key = bytes.fromhex(n.node_id)
         live = ordered_routes([r for r in routes], node_state.get("last_route"))
         if not live:
+            step("No route heard")
             return PollResult(NOT_DIRECT, key_mode="shared", detail="no direct or one-hop route heard")
         route = live[0]
         out_path = route.path
@@ -323,6 +332,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             # Blank login (adds/keeps the key as a guest; never carries a
             # password); teach the return path once so replies come direct, not
             # flooded (firmware ClientACL.putClient leaves a new key pathless).
+            step(f"Shared-key login via {route.label}" + (f" (try {attempt + 1})" if attempt else ""))
             client.send_raw_packet(sk.build_login(shared, key, out_path, plen, "")[0])
             if teach:
                 if one_hop:
@@ -332,6 +342,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                     client.send_raw_packet(sk.build_route_update(shared, key, out_path, plen))
                 teach = False
             sleep(LOGIN_SETTLE_SECONDS)
+            step(f"Requesting {kind}, waiting for a reply")
             body, data_tag = (sk.build_status_request if kind == "status"
                               else sk.build_telemetry_request)(shared, key, out_path, plen)
             client.send_raw_packet(body)

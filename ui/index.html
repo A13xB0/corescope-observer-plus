@@ -117,6 +117,7 @@
       <h3 id="details-title">Repeater</h3>
       <label for="login-password">Login password</label>
       <input id="login-password" type="password" autocomplete="off" placeholder="Blank: guest or ACL">
+      <p id="password-state" class="password-state small"></p>
       <p class="muted small">Blank logs in automatically: as a guest when the repeater has no guest password, or through its ACL if it lists this plugin's key. A password is kept on this observer only and never published. An admin password works but gives full control and makes the repeater write to flash at each login, so prefer a guest password or an ACL entry.</p>
       <label class="check"><input id="remove-password" type="checkbox"> Remove the saved password</label>
       <label class="check"><input id="temp-this" type="checkbox"> <span>Read temperature <span id="temp-last" class="muted small"></span>

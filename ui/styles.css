@@ -101,6 +101,11 @@ h3 { margin: 0 0 8px; }
 .cp-pending .cp-icon, .cp-muted .cp-icon, .cp-pending .cp-status, .cp-muted .cp-status { color: var(--muted); }
 .spin { display: inline-block; width: 12px; height: 12px; vertical-align: -1px; border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.cp-choice { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 2px 6px; }
+.steps { margin: 8px 0 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
+.steps li { list-style: none; display: flex; gap: 8px; align-items: baseline; }
+.step-ok { color: var(--good); font-weight: 700; }
+.password-state.saved { color: var(--good); }
 dialog { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--text); width: min(560px, calc(100vw - 32px)); }
 dialog form { display: grid; gap: 8px; }
 dialog h4 { margin: 8px 0 0; font-size: 14px; }

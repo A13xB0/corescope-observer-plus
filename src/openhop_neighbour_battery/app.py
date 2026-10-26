@@ -231,11 +231,13 @@ class App:
             return False
         return self.shared_key() is not None
 
-    def poll(self, node_ids: list[str], *, force: bool = False, on_node=None) -> list[dict]:
+    def poll(self, node_ids: list[str], *, force: bool = False, on_node=None, on_step=None) -> list[dict]:
         """Poll the given targets that are zero-hop now; return payload readings.
 
         on_node(neighbour, state) is called after each repeater is polled, so a
-        caller (Check now, Test) can stream live progress to the page."""
+        caller (Check now, Test) can stream live progress to the page.
+        on_step(label) is called at each step of a single poll (login, status,
+        telemetry), for the live step view in Test."""
         if not self.check.get("companion", {}).get("ok") or not self.ohcfg:
             return []
         port = companion_port(self.ohcfg, self.settings.companion_name)
@@ -282,11 +284,13 @@ class App:
                     result = poll_one_shared(
                         client, n, shared, st, routes=routes,
                         read_temperature=n.node_id in s.temperature_targets,
+                        on_step=on_step,
                     )
                 else:
                     result = poll_one(
                         client, n, pw, st, routes=routes, alternative_routes=s.alternative_routes,
                         read_temperature=n.node_id in s.temperature_targets,
+                        on_step=on_step,
                     )
                 record(st, result, bool(pw), time.time())
                 st.pop("password_changed", None)
@@ -440,9 +444,18 @@ class App:
                     # Announce "running" before the poll (it can take up to a
                     # minute) so the page shows it working, not stalled.
                     result["running"] = True
+                    result["steps"] = []
                     self.actions[kind] = result
                     self.write_runtime()
-                    readings = self.poll([node_id], force=True)
+
+                    def on_step(label):
+                        # Stream each step (route, login, status…) so the dialog
+                        # shows a live console of what the poll is doing.
+                        result["steps"].append({"label": label, "at": utc_iso()})
+                        self.actions[kind] = result
+                        self.write_runtime()
+
+                    readings = self.poll([node_id], force=True, on_step=on_step)
                     st = self.state.node(node_id)
                     result["code"] = st.get("code")
                     result["role"] = st.get("role", "")
@@ -462,7 +475,16 @@ class App:
                 elif kind == "check_now":
                     started = time.time()
                     self.refresh()
-                    targets = list(self.settings.targets)
+                    # scope "stale": only targets with no successful reading in
+                    # the last hour; "all" (default): every selected target.
+                    scope = str(req.get("scope") or "all")
+                    all_targets = list(self.settings.targets)
+                    if scope == "stale":
+                        targets = [t for t in all_targets
+                                   if started - float(self.state.node(t).get("last_success") or 0) >= 3600]
+                    else:
+                        targets = all_targets
+                    result["scope"] = scope
                     result["total"] = len(targets)
                     result["done"] = 0
                     result["progress"] = []
@@ -499,11 +521,15 @@ class App:
                     codes = [self.state.node(n).get("code") or "?" for n in targets]
                     result["readings"] = len(readings)
                     result["running"] = False
-                    result["message"] = (
-                        f"{len(readings)} of {len(targets)} read"
-                        + (f" ({', '.join(sorted(set(c for c in codes if c not in ('ok', 'no_battery'))))} for the rest)"
-                           if len(readings) < len(targets) else "")
-                    )
+                    if not targets:
+                        result["message"] = ("every repeater had a reading within the hour"
+                                              if scope == "stale" else "no repeaters selected")
+                    else:
+                        result["message"] = (
+                            f"{len(readings)} of {len(targets)} read"
+                            + (f" ({', '.join(sorted(set(c for c in codes if c not in ('ok', 'no_battery'))))} for the rest)"
+                               if len(readings) < len(targets) else "")
+                        )
                 elif kind == "lookup":
                     query = str(req.get("query") or "").strip()
                     if len(query) < 3:

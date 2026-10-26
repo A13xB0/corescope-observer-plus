@@ -67,9 +67,9 @@
     delete config.requests;
   }
 
-  function request(type, nodeId) {
+  function request(type, nodeId, extra) {
     const id = `${type}-${Date.now()}`;
-    return saveConfig({ requests: [{ id, type, node_id: nodeId || "" }] }).then(() => id);
+    return saveConfig({ requests: [{ id, type, node_id: nodeId || "", ...(extra || {}) }] }).then(() => id);
   }
 
   async function waitForAction(type, id, timeoutMs = 90000, onProgress) {
@@ -334,21 +334,34 @@
     const nm = (((runtime.nodes || []).find((x) => x.node_id === nodeId)) || {}).name || nodeId.slice(0, 8);
     const t0 = Date.now();
     const elapsed = () => Math.round((Date.now() - t0) / 1000);
-    const show = (html, kind) => { if (box) { box.hidden = false; box.className = "test-status " + (kind || ""); box.innerHTML = html; } };
-    show(`<span class="spin"></span> Testing <strong>${esc(nm)}</strong>…`, "");
-    const timer = setInterval(() => show(`<span class="spin"></span> Testing <strong>${esc(nm)}</strong>… ${elapsed()}s`, ""), 1000);
+    const set = (html, kind) => { if (box) { box.hidden = false; box.className = "test-status " + (kind || ""); box.innerHTML = html; } };
+    const stepsHtml = (a, running) => {
+      const steps = (a && a.steps) || [];
+      if (!steps.length) return "";
+      return '<ol class="steps">' + steps.map((s, i) => {
+        const last = running && i === steps.length - 1;
+        const mark = last ? '<span class="spin"></span>' : '<span class="step-ok" aria-hidden="true">✓</span>';
+        return `<li>${mark} ${esc(s.label)}</li>`;
+      }).join("") + "</ol>";
+    };
+    const view = (a, running) => {
+      const head = running
+        ? `<span class="spin"></span> Testing <strong>${esc(nm)}</strong>… ${elapsed()}s`
+        : ((a.code === "ok" || a.code === "no_battery") ? `Answered — ${esc(pollText(a))}` : esc(pollText(a)));
+      const cs = running ? "" : corescopeText(a.corescope);
+      set(`<div>${head}</div>` + stepsHtml(a, running) + (cs ? `<div class="muted small">${esc(cs)}</div>` : ""), running ? "" : pollKind(a));
+    };
+    let lastA = { steps: [] };
+    view(lastA, true);
+    const timer = setInterval(() => view(lastA, true), 1000);
     try {
       const id = await request("test_login", nodeId);
-      const a = await waitForAction("test_login", id, 90000, (p) => {
-        if (p.running) show(`<span class="spin"></span> Testing <strong>${esc(nm)}</strong>… ${elapsed()}s`, "");
-      });
+      const a = await waitForAction("test_login", id, 90000, (p) => { lastA = p; if (p.running) view(p, true); });
       clearInterval(timer);
-      const head = (a.code === "ok" || a.code === "no_battery") ? `Answered — ${pollText(a)}` : pollText(a);
-      const cs = corescopeText(a.corescope);
-      show(`<div>${esc(head)}</div>` + (cs ? `<div class="muted small">${esc(cs)}</div>` : ""), pollKind(a));
+      view(a, false);
     } catch (e) {
       clearInterval(timer);
-      show(esc(e.message), "bad");
+      set(esc(e.message), "bad");
     }
   }
 
@@ -360,40 +373,51 @@
       + `<span class="cp-name">${esc(name)}</span><span class="cp-status">${statusHtml}</span></div>`;
   }
 
-  async function checkNow() {
+  // Check now first asks what to poll: just the stale repeaters (no reading in
+  // the last hour) or all of them. runCheck then does the chosen scope.
+  function checkNow() {
     const panel = $("check-progress");
     const panelMsg = (html, kind) => { if (panel) { panel.hidden = false; panel.innerHTML = `<div class="cp-head ${kind || ""}">${html}</div>`; } };
     if (dirty) { panelMsg("Save first, so the check uses your selection.", "warn"); return; }
-    const targets = (config.targets || []).slice();
-    if (!targets.length) { panelMsg("Select at least one repeater first (tick it in the list).", "warn"); return; }
+    if (!(config.targets || []).length) { panelMsg("Select at least one repeater first (tick it in the list).", "warn"); return; }
+    if (!panel) return;
+    panel.hidden = false;
+    panel.innerHTML = '<div class="cp-head"><strong>Check which repeaters?</strong></div>'
+      + '<div class="cp-choice">'
+      + '<button type="button" class="button ghost small" data-check="stale">Only stale <span class="muted small">(no reading in the last hour)</span></button>'
+      + '<button type="button" class="button ghost small" data-check="all">All of them</button>'
+      + '</div>';
+    panel.querySelectorAll("[data-check]").forEach((b) => b.addEventListener("click", () => runCheck(b.dataset.check)));
+  }
+
+  async function runCheck(scope) {
+    const panel = $("check-progress");
+    const panelMsg = (html, kind) => { if (panel) { panel.hidden = false; panel.innerHTML = `<div class="cp-head ${kind || ""}">${html}</div>`; } };
+    const nTargets = (config.targets || []).length;
     const nameOf = (id) => (((runtime.nodes || []).find((x) => x.node_id === id)) || {}).name || id.slice(0, 8);
-    // draw the whole panel from an action snapshot: a row per target, filled
-    // in as each result (and CoreScope confirmation) streams back.
+    // Driven by the action snapshot: a row per repeater actually polled, filled
+    // in (with CoreScope confirmation) as each streams back. Total comes from
+    // the plugin, so "stale" shows only the stale ones.
     const draw = (a) => {
       if (!panel) return;
-      const done = {};
-      ((a && a.progress) || []).forEach((p) => { done[p.node_id] = p; });
+      const prog = (a && a.progress) || [];
       const finished = a && !a.running;
-      const rows = targets.map((id) => {
-        const p = done[id];
-        if (p) {
-          const cs = corescopeText(p.corescope);
-          return progressRow(nameOf(id), esc(pollText(p)) + (cs ? ` <span class="muted small">· ${esc(cs)}</span>` : ""), pollKind(p));
-        }
-        return progressRow(nameOf(id), finished ? "no route — not polled" : "waiting…", finished ? "muted" : "pending");
-      }).join("");
-      const n = (a && a.done) || 0;
+      const total = a && a.total != null ? a.total : prog.length;
+      const rows = prog.map((p) => {
+        const cs = corescopeText(p.corescope);
+        return progressRow(nameOf(p.node_id), esc(pollText(p)) + (cs ? ` <span class="muted small">· ${esc(cs)}</span>` : ""), pollKind(p));
+      }).join("") || (finished ? "" : `<div class="cp-row cp-pending"><span class="cp-icon"></span><span class="cp-status">waiting…</span></div>`);
       const head = finished
         ? `<strong>Done.</strong> <span class="muted small">${esc((a && a.message) || "")}</span>`
-        : `<span class="spin"></span> <strong>Checking ${targets.length} repeater${targets.length === 1 ? "" : "s"}…</strong> <span class="muted small">${n}/${targets.length} · up to a minute each</span>`;
+        : `<span class="spin"></span> <strong>Checking ${total} repeater${total === 1 ? "" : "s"}…</strong> <span class="muted small">${prog.length}/${total} · up to a minute each</span>`;
       panel.hidden = false;
       panel.innerHTML = `<div class="cp-head">${head}</div>` + rows;
     };
     $("check-now").disabled = true;
-    draw({ running: true, progress: [], done: 0 });
+    draw({ running: true, progress: [], done: 0, total: scope === "stale" ? undefined : nTargets });
     try {
-      const id = await request("check_now");
-      await waitForAction("check_now", id, 120000 * targets.length + 20000, draw);
+      const id = await request("check_now", null, { scope });
+      await waitForAction("check_now", id, 120000 * Math.max(1, nTargets) + 20000, draw);
     } catch (e) {
       panelMsg(esc(e.message), "bad");
     } finally {
@@ -424,6 +448,14 @@
     $("remove-password").checked = false;
     const pending = passwordUpdates[nodeId];
     $("remove-password").disabled = !(pending !== undefined ? pending : n.password_set);
+    // Show whether a password is saved: the field is write-only (always blank),
+    // so without this the operator can't tell a save worked. "" pending is a
+    // queued removal; a non-empty string is a queued new password.
+    const pwState = $("password-state");
+    if (pending === "") { pwState.textContent = "Password will be removed on Save."; pwState.className = "password-state small"; }
+    else if (pending) { pwState.textContent = "New password will be saved on Save."; pwState.className = "password-state small saved"; }
+    else if (n.password_set) { pwState.textContent = "✓ A password is saved. Leave blank to keep it, type to replace it, or tick Remove."; pwState.className = "password-state small saved"; }
+    else { pwState.textContent = "No password saved — logs in blank (guest or ACL)."; pwState.className = "password-state small muted"; }
     $("remove-manual").hidden = !n.manual;
     $("temp-this").checked = tempSet().has(nodeId);
     $("temp-last").textContent = n.temperature_c != null ? `Last: ${Number(n.temperature_c).toFixed(1)} °C, ${ago(n.temp_at)}`
