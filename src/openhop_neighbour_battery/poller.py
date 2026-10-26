@@ -346,16 +346,10 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             client.send_raw_packet(body)
             return collect(data_tag)
 
-        def login_and_request() -> tuple[sk.Reply | None, sk.LoginResult | None]:
+        def do_login(pw: str) -> None:
             nonlocal teach
-            # Offer both passwords the shared key may carry — blank and the
-            # public "hello" guest password — in the one window. We don't always
-            # know which a repeater wants; whichever matches adds the key to its
-            # guest ACL, and the other is simply ignored (wrong password → no
-            # reply, no side effect). Cheaper than a separate window per password.
-            for pw in sk.SHARED_PASSWORDS:
-                step(f"Shared-key login ({'blank' if pw == '' else repr(pw)}) {route.label}")
-                client.send_raw_packet(sk.build_login(shared, key, out_path, plen, pw)[0])
+            step(f"Shared-key login ({'blank' if pw == '' else repr(pw)}) {route.label}")
+            client.send_raw_packet(sk.build_login(shared, key, out_path, plen, pw)[0])
             if teach:
                 # teach the return path once so replies come direct, not flooded
                 # (firmware ClientACL.putClient leaves a new key pathless).
@@ -367,7 +361,6 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 teach = False
             node_state["login_checked_at"] = now
             sleep(LOGIN_SETTLE_SECONDS)
-            return send_request()
 
         def check_covered() -> PollResult | None:
             # We didn't hear it ourselves — give an observer's overhear a moment
@@ -401,14 +394,21 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 if c is not None:
                     return c  # another observer got it; no need to log in and retry
 
+        # Once we know which password a repeater takes, send only that — a
+        # known-blank repeater is never sent "hello", and a "hello" one isn't
+        # slowed by a blank try. Only a first, unknown contact tries both (blank
+        # first); sustained silence later forgets it (record) so it re-learns.
+        known = node_state.get("shared_password")
+        passwords = [known] if known in sk.SHARED_PASSWORDS else list(sk.SHARED_PASSWORDS)
         if reply is None and not admin:
-            for attempt in range(max(1, attempts)):
+            for attempt, pw in enumerate(passwords):
                 if attempt:
                     c = check_covered()
                     if c is not None:
                         return c
                     sleep(RETRY_GAP_SECONDS)
-                data, login = login_and_request()
+                do_login(pw)
+                data, login = send_request()
                 tried += 1
                 if login is not None:
                     node_state["logged_in_at"] = now
@@ -416,6 +416,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                         admin = True
                         break
                 if data is not None:
+                    node_state["shared_password"] = pw  # remember what worked
                     reply = data
                     break
                 # No answer at all: teach the route again next attempt (a reboot
@@ -538,6 +539,7 @@ def record(node_state: dict, result: PollResult, password_set: bool, now: float)
         node_state.setdefault("unheard_since", now)  # start the clock for the daily backoff
         if node_state["no_reply_count"] >= FORGET_LOGIN_AFTER:
             node_state.pop("logged_in_at", None)
+            node_state.pop("shared_password", None)  # re-learn blank/hello next time
     if result.code in (NEEDS_PASSWORD, PASSWORD_REJECTED):
         node_state.pop("logged_in_at", None)
         node_state["login_fails"] = 0
