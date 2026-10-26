@@ -34,6 +34,11 @@ MAX_POLLS_PER_CYCLE = 8
 # A short settle before confirming against CoreScope, so a just-published
 # own-key reading has a moment to be ingested.
 CORESCOPE_SETTLE_S = 2.0
+# CoreScope stamps a reading with the request time the repeater echoes; allow
+# this much clock difference when asking "is it from after we started?".
+CORESCOPE_CLOCK_SLACK_S = 5
+# Check now's "stale" scope: repeaters with no reading for at least this long.
+STALE_AFTER_S = 3600
 QUEUE_MAX = 200
 QUEUE_MAX_AGE = 2 * 3600  # CoreScope drops readings older than this
 
@@ -183,8 +188,7 @@ class App:
         """True if CoreScope's newest reading for the node is from after `since`
         — i.e. an observer overheard the reply to a request sent at that time.
         A failed lookup is False, so the plugin falls back to retrying."""
-        ts = corescope_latest_battery_ts(self.settings.corescope_url, node_id)
-        return bool(ts) and _ts(ts) >= since - 5
+        return _fresh(corescope_latest_battery_ts(self.settings.corescope_url, node_id), since)
 
     def _corescope_confirm(self, node_id: str, since: float) -> dict:
         """CoreScope's view of a node's battery for the live "did it land?"
@@ -196,7 +200,7 @@ class App:
             return {"reachable": False}
         ts = snap.get("latest_ts")
         snap["reachable"] = True
-        snap["fresh"] = bool(ts) and _ts(ts) >= since - 5
+        snap["fresh"] = _fresh(ts, since)
         return snap
 
     def shared_key(self, now: float | None = None) -> sk.SharedKey | None:
@@ -259,11 +263,12 @@ class App:
                 continue
             if not (force or is_due(st, interval, self.secrets.has_password(node_id), now)):
                 continue
-            # A shared-key repeater that only answered late (its early retry is
-            # due): skip the retry if CoreScope already has a fresh reading from
-            # any observer — a neighbour's overhear covers it. Only when
-            # CoreScope has the shared-guest feature live, and never on a forced
-            # poll. The lookup fails open, so an unreachable CoreScope retries.
+            # Before sending anything: a shared-key repeater whose last poll
+            # went unanswered is skipped this time if CoreScope already has a
+            # reading from within the interval — another observer has it. (The
+            # poll itself also asks CoreScope, but only about the answer to its
+            # own request, after sending.) Never on a forced poll; the lookup
+            # fails open, so an unreachable CoreScope still polls.
             if (not force and self.settings.check_corescope and st.get("code") == NO_REPLY
                     and self.uses_shared_key(node_id)
                     and self._corescope_covers(node_id, interval, now)):
@@ -288,12 +293,11 @@ class App:
                 pw = self.secrets.password(n.node_id)
                 shared = self.shared_key() if self.uses_shared_key(n.node_id) else None
                 if shared is not None:
-                    # If we don't hear the reply ourselves, let the poll take an
-                    # observer's overhear from CoreScope instead of retrying.
-                    # "Covered" means a reading landed since this poll began —
-                    # i.e. the answer to our own request, overheard.
+                    # If we don't hear the answer ourselves, the poll may take
+                    # another observer's overhear of it from CoreScope instead
+                    # of retrying: "covered" = a reading landed since we began.
                     covered = None
-                    if self.settings.check_corescope:
+                    if self.settings.check_corescope and self.settings.corescope_url:
                         started = time.time()
                         covered = lambda nid=n.node_id, t=started: self._corescope_fresh_since(nid, t)
                     result = poll_one_shared(
@@ -309,8 +313,8 @@ class App:
                     )
                 record(st, result, bool(pw), time.time())
                 st.pop("password_changed", None)
-                if result.code in (OK, NO_BATTERY):
-                    st.pop("covered_at", None)
+                if result.code in (OK, NO_BATTERY) and not result.covered:
+                    st.pop("covered_at", None)  # our own reading supersedes an observer's
                 st["name"] = n.name
                 if result.code == ADMIN_STOP:
                     self._disable_shared_key(n, result)
@@ -453,98 +457,9 @@ class App:
                 if kind == "connect":
                     result["message"] = self.connect()["message"]
                 elif kind in ("test_login", "poll_now"):
-                    node_id = str(req.get("node_id") or "").lower()
-                    started = time.time()
-                    self.refresh()
-                    # Announce "running" before the poll (it can take up to a
-                    # minute) so the page shows it working, not stalled.
-                    result["running"] = True
-                    result["steps"] = []
-                    self.actions[kind] = result
-                    self.write_runtime()
-
-                    def on_step(label):
-                        # Stream each step (route, login, status…) so the dialog
-                        # shows a live console of what the poll is doing.
-                        result["steps"].append({"label": label, "at": utc_iso()})
-                        self.actions[kind] = result
-                        self.write_runtime()
-
-                    readings = self.poll([node_id], force=True, on_step=on_step)
-                    st = self.state.node(node_id)
-                    result["code"] = st.get("code")
-                    result["role"] = st.get("role", "")
-                    result["battery_mv"] = st.get("battery_mv")
-                    result["route"] = st.get("last_route_label") or ""
-                    result["temperature_c"] = st.get("temperature_c") if st.get("temp_code") == "ok" else None
-                    result["message"] = st.get("detail") or st.get("code") or ""
-                    if kind == "poll_now" and readings:
-                        self.queue(readings)
-                        self.flush()
-                    # Confirm against CoreScope: for a shared-key repeater this is
-                    # the real "did it land?", since the reading is never published
-                    # — CoreScope decodes it from an observer's overheard reply.
-                    time.sleep(CORESCOPE_SETTLE_S)
-                    result["corescope"] = self._corescope_confirm(node_id, started)
-                    result["running"] = False
+                    self._run_test(kind, req, result)
                 elif kind == "check_now":
-                    started = time.time()
-                    self.refresh()
-                    # scope "stale": only targets with no successful reading in
-                    # the last hour; "all" (default): every selected target.
-                    scope = str(req.get("scope") or "all")
-                    all_targets = list(self.settings.targets)
-                    if scope == "stale":
-                        targets = [t for t in all_targets
-                                   if started - float(self.state.node(t).get("last_success") or 0) >= 3600]
-                    else:
-                        targets = all_targets
-                    result["scope"] = scope
-                    result["total"] = len(targets)
-                    result["done"] = 0
-                    result["progress"] = []
-                    result["running"] = True
-                    self.actions[kind] = result
-                    self.write_runtime()
-
-                    def on_node(n, st):
-                        # Stream each repeater's result to the page as it lands,
-                        # so Check now shows live progress instead of nothing.
-                        result["progress"].append({
-                            "node_id": n.node_id,
-                            "name": st.get("name") or n.name,
-                            "code": st.get("code"),
-                            "battery_mv": st.get("battery_mv"),
-                            "route": st.get("last_route_label") or "",
-                            "temperature_c": st.get("temperature_c") if st.get("temp_code") == "ok" else None,
-                        })
-                        result["done"] = len(result["progress"])
-                        self.actions[kind] = result
-                        self.write_runtime()
-
-                    readings = self.poll(targets, force=True, on_node=on_node)
-                    if readings:
-                        self.queue(readings)
-                        self.flush()
-                    # Second pass: confirm each polled repeater against CoreScope
-                    # (did the reading land?), streaming each as it is checked.
-                    time.sleep(CORESCOPE_SETTLE_S)
-                    for p in result["progress"]:
-                        p["corescope"] = self._corescope_confirm(p["node_id"], started)
-                        self.actions[kind] = result
-                        self.write_runtime()
-                    codes = [self.state.node(n).get("code") or "?" for n in targets]
-                    result["readings"] = len(readings)
-                    result["running"] = False
-                    if not targets:
-                        result["message"] = ("every repeater had a reading within the hour"
-                                              if scope == "stale" else "no repeaters selected")
-                    else:
-                        result["message"] = (
-                            f"{len(readings)} of {len(targets)} read"
-                            + (f" ({', '.join(sorted(set(c for c in codes if c not in ('ok', 'no_battery'))))} for the rest)"
-                               if len(readings) < len(targets) else "")
-                        )
+                    self._run_check(req, result)
                 elif kind == "lookup":
                     query = str(req.get("query") or "").strip()
                     if len(query) < 3:
@@ -558,9 +473,108 @@ class App:
             except Exception as exc:  # noqa: BLE001
                 result["ok"] = False
                 result["message"] = str(exc)
+            finally:
+                result["running"] = False  # never leave the page waiting on a failed request
             self.actions[kind or "unknown"] = result
         if pending:
             self.state.save()
+
+    # -- live requests (Test, Check now) ---------------------------------------
+
+    def _publish_action(self, kind: str, result: dict) -> None:
+        """Show a request's progress on the page now, mid-request (the plugin
+        is single-threaded, so this is the only way the page sees it live)."""
+        self.actions[kind] = result
+        self.write_runtime()
+
+    def _confirm_wanted(self) -> bool:
+        return bool(self.settings.check_corescope and self.settings.corescope_url)
+
+    def _node_view(self, node_id: str, name: str = "") -> dict:
+        """One repeater's latest outcome, as the live views show it."""
+        st = self.state.node(node_id)
+        return {
+            "node_id": node_id,
+            "name": st.get("name") or name,
+            "code": st.get("code"),
+            "covered": bool(st.get("last_covered")),
+            "role": st.get("role", ""),
+            "battery_mv": st.get("battery_mv"),
+            "route": st.get("last_route_label") or "",
+            "temperature_c": st.get("temperature_c") if st.get("temp_code") == "ok" else None,
+            "message": st.get("detail") or st.get("code") or "",
+        }
+
+    def _run_test(self, kind: str, req: dict, result: dict) -> None:
+        """Test / poll one repeater now, streaming each step to the dialog."""
+        node_id = str(req.get("node_id") or "").lower()
+        started = time.time()
+        self.refresh()
+        # Announce "running" before the poll (it can take up to a minute) so
+        # the page shows it working, not stalled.
+        result["running"] = True
+        result["steps"] = []
+        self._publish_action(kind, result)
+
+        def on_step(label: str) -> None:
+            result["steps"].append({"label": label, "at": utc_iso()})
+            self._publish_action(kind, result)
+
+        readings = self.poll([node_id], force=True, on_step=on_step)
+        result.update(self._node_view(node_id))
+        if kind == "poll_now" and readings:
+            self.queue(readings)
+            self.flush()
+        # Did it reach CoreScope? For a shared-key repeater this is the real
+        # "did it land?" — the reading is never published, CoreScope decodes it
+        # from an overheard reply. Skipped when nothing was sent.
+        if self._confirm_wanted() and result["code"] not in ("not_direct", "not_heard"):
+            time.sleep(CORESCOPE_SETTLE_S)
+            result["corescope"] = self._corescope_confirm(node_id, started)
+
+    def _run_check(self, req: dict, result: dict) -> None:
+        """Poll every selected repeater now ("stale": only those without a
+        reading for STALE_AFTER_S), streaming each result to the page."""
+        started = time.time()
+        self.refresh()
+        scope = "stale" if req.get("scope") == "stale" else "all"
+        targets = list(self.settings.targets)
+        if scope == "stale":
+            def last_heard(t: str) -> float:
+                st = self.state.node(t)
+                return max(float(st.get("last_success") or 0), float(st.get("covered_at") or 0))
+            targets = [t for t in targets if started - last_heard(t) >= STALE_AFTER_S]
+        result.update(scope=scope, total=len(targets), progress=[], running=True)
+        self._publish_action("check_now", result)
+
+        def on_node(n, _st) -> None:
+            result["progress"].append(self._node_view(n.node_id, n.name))
+            self._publish_action("check_now", result)
+
+        readings = self.poll(targets, force=True, on_node=on_node)
+        if readings:
+            self.queue(readings)
+            self.flush()
+        # Confirm each polled repeater against CoreScope, streaming as it goes.
+        # Stop at the first unreachable answer: the rest would fail the same way.
+        if self._confirm_wanted() and result["progress"]:
+            time.sleep(CORESCOPE_SETTLE_S)
+            for row in result["progress"]:
+                row["corescope"] = self._corescope_confirm(row["node_id"], started)
+                self._publish_action("check_now", result)
+                if not row["corescope"].get("reachable"):
+                    break
+        # Count answers from state, not published readings: shared-key readings
+        # are never published (CoreScope decodes them), but they were read.
+        codes = [self.state.node(t).get("code") or "?" for t in targets]
+        answered = sum(c in (OK, NO_BATTERY) for c in codes)
+        result["readings"] = answered
+        if not targets:
+            result["message"] = ("every repeater had a reading within the hour"
+                                 if scope == "stale" else "no repeaters selected")
+            return
+        rest = sorted({c for c in codes if c not in (OK, NO_BATTERY)})
+        result["message"] = f"{answered} of {len(targets)} read" + (f" ({', '.join(rest)} for the rest)" if rest else "")
 
     def tick(self) -> None:
         self.load_settings()
@@ -604,6 +618,7 @@ class App:
                 "shared_admin_removed": st.get("shared_admin_removed"),
                 "shared_admin_at": st.get("shared_admin_at"),
                 "covered_at": st.get("covered_at"),
+                "covered": bool(st.get("last_covered")),
             })
         brokers = []
         for b in (self.ohcfg.brokers if self.ohcfg else []):
@@ -648,3 +663,8 @@ def _ts(iso: str) -> float:
         return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return 0.0
+
+
+def _fresh(ts: str | None, since: float) -> bool:
+    """Whether a CoreScope timestamp is from after `since` (with clock slack)."""
+    return bool(ts) and _ts(ts) >= since - CORESCOPE_CLOCK_SLACK_S

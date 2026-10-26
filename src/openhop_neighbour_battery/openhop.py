@@ -380,6 +380,8 @@ def attach_routes(neighbours: list[Neighbour], packets: list[dict]) -> None:
 
 def search_corescope(base_url: str, query: str, *, timeout: float = 10.0) -> list[dict]:
     """Repeaters and room servers in CoreScope whose name or key matches query."""
+    if not base_url:
+        raise OpenHopError("no CoreScope address set")
     try:
         r = requests.get(f"{base_url}/api/nodes", params={"search": query, "limit": 20}, timeout=timeout)
         r.raise_for_status()
@@ -406,6 +408,8 @@ def fetch_shared_guest_key(base_url: str, *, timeout: float = 5.0) -> dict | Non
     None on any error or an empty response, so the plugin simply has no shared
     key and polls with its own.
     """
+    if not base_url:
+        return None
     try:
         r = requests.get(f"{base_url}/api/shared-guest/key", timeout=timeout)
         if r.status_code != 200:
@@ -425,6 +429,8 @@ def corescope_latest_battery_ts(base_url: str, node_id: str, *, timeout: float =
     skipping. The timestamp is whatever observer reported last, which is the
     point: another observer's reading counts.
     """
+    if not base_url:
+        return None
     try:
         r = requests.get(f"{base_url}/api/nodes/{node_id}/battery", params={"days": 1}, timeout=timeout)
         r.raise_for_status()
@@ -442,6 +448,8 @@ def corescope_battery_snapshot(base_url: str, node_id: str, *, timeout: float = 
     overheard reply). Returns {latest_ts, latest_mv, status, by, key_mode}, or
     None on any error.
     """
+    if not base_url:
+        return None
     try:
         r = requests.get(f"{base_url}/api/nodes/{node_id}/battery", params={"days": 1}, timeout=timeout)
         r.raise_for_status()

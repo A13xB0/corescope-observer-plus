@@ -358,3 +358,21 @@ def test_check_now_stale_scope_skips_fresh(tmp_path, monkeypatch):
         assert other in polled and NODE not in polled, polled
     finally:
         fake.close()
+
+
+def test_failed_request_is_not_left_running(tmp_path, monkeypatch):
+    # An exception mid-Test must still clear "running", or the page waits forever.
+    fake = FakeCompanion()
+    try:
+        a, _ = make_app(tmp_path, fake, targets=[NODE],
+                        requests=[{"id": "t1", "type": "test_login", "node_id": NODE}])
+
+        def boom():
+            raise RuntimeError("companion gone")
+        monkeypatch.setattr(a, "refresh", boom)
+        a.run_requests()
+        act = a.actions["test_login"]
+        assert act["ok"] is False and act["running"] is False
+        assert "companion gone" in act["message"]
+    finally:
+        fake.close()

@@ -105,6 +105,8 @@ def parse(raw: dict) -> Settings:
     url = str(raw.get("corescope_url") or "").strip().rstrip("/")
     if url.startswith(("http://", "https://")):
         s.corescope_url = url
+    elif "corescope_url" in raw and url == "":
+        s.corescope_url = ""  # cleared on purpose: no CoreScope (no shared key, no checks)
     s.shared_key_targets = sorted({str(k).lower() for k in raw.get("shared_key_targets") or []
                                    if KEY_RE.match(str(k).lower())})
     cc = raw.get("check_corescope", True)

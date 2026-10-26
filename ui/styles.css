@@ -77,34 +77,44 @@ h3 { margin: 0 0 8px; }
 /* The page's Save bar is pinned to the bottom of the viewport so it is always
    reachable without scrolling past the repeater list. Bleeds to the shell's
    side padding to read as a footer bar; the solid panel keeps list rows from
-   showing through. Scoped to the page — the dialog's own actions are normal. */
+   showing through. Its status line (Saving… / Saved / why not) sits beside the
+   button, so it's seen even with the page scrolled. */
 .shell > .actions {
   position: sticky; bottom: 0; z-index: 30;
-  margin: 16px -16px 0; padding: 12px 16px;
+  margin: 16px -16px 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
   background: var(--panel); border-top: 1px solid var(--line);
 }
+#save-status { margin-right: auto; }
+#save-status.good { color: var(--good); }
+#save-status.bad { color: var(--bad); }
 
-/* Live Check-now and Test views. */
-.check-progress { margin: 4px 0 12px; display: grid; gap: 4px; }
+/* The dialog's buttons: Apply is first in the markup (so Enter applies) but the
+   row is reversed so it still reads Remove · Close · Test now · Apply. */
+.dialog-actions { flex-direction: row-reverse; justify-content: flex-start; flex-wrap: wrap; }
+
+/* Live Test and Check-now panels (built by liveView / panelNote). */
+.live { display: grid; gap: 6px; }
+.check-progress { margin: 4px 0 12px; }
 .test-status { margin: 4px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
-.cp-head { padding: 6px 2px; font-size: 14px; }
-.cp-head.warn { color: var(--warn); }
-.cp-head.bad { color: var(--bad); }
+.lv-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; }
+.lv-title { flex: 1; min-width: 0; }
+.lv-foot:empty, .lv-body:empty { display: none; }
+.live.warn .lv-title { color: var(--warn); }
+.live.bad .lv-title { color: var(--bad); }
 .cp-row { display: grid; grid-template-columns: 18px minmax(120px, 1fr) 2fr; gap: 8px; align-items: baseline; padding: 6px 8px; border-radius: 8px; background: var(--bg); font-size: 13px; }
 .cp-name { font-weight: 500; }
-.cp-status { color: var(--text); }
 .cp-icon { font-weight: 700; text-align: center; }
 .cp-good .cp-icon { color: var(--good); }
-.cp-bad .cp-icon, .test-status.bad { color: var(--bad); }
-.cp-warn .cp-icon, .test-status.warn { color: var(--warn); }
-.cp-good, .test-status.good { color: var(--text); }
-.cp-pending .cp-icon, .cp-muted .cp-icon, .cp-pending .cp-status, .cp-muted .cp-status { color: var(--muted); }
-.spin { display: inline-block; width: 12px; height: 12px; vertical-align: -1px; border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
+.cp-bad .cp-icon { color: var(--bad); }
+.cp-warn .cp-icon { color: var(--warn); }
+.cp-choice { display: flex; flex-wrap: wrap; gap: 8px; }
+.spin { display: inline-block; flex: none; width: 12px; height: 12px; border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.cp-choice { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 2px 6px; }
-.steps { margin: 8px 0 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration: 3s; } }
+.steps { margin: 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
 .steps li { list-style: none; display: flex; gap: 8px; align-items: baseline; }
 .step-ok { color: var(--good); font-weight: 700; }
+.step-now { color: var(--accent); font-weight: 700; }
 .password-state.saved { color: var(--good); }
 dialog { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--text); width: min(560px, calc(100vw - 32px)); }
 dialog form { display: grid; gap: 8px; }
@@ -126,17 +136,13 @@ dialog .check { display: flex; gap: 8px; align-items: baseline; }
 .add-results { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; }
 .add-results li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; }
 .route b { font-weight: 600; }
-.pill.neutral { background: var(--line); }
 @media (max-width: 640px) {
-  .card .table th:nth-child(4), .card .table td:nth-child(4) { display: none; }
+  .nodes-table th:nth-child(4), .nodes-table td:nth-child(4) { display: none; }  /* "Heard" */
+  select, input[type=text], input[type=password] { font-size: 16px; }  /* stop iOS zooming on focus */
 }
 
 /* Shared guest key */
 .consent { margin: 8px 0 8px 0; padding-left: 20px; }
 .consent li { margin: 2px 0; }
 .notice.small { padding: 8px 12px; font-size: 13px; }
-details#shared-edit { margin-top: 10px; }
-details#shared-edit summary { cursor: pointer; }
-details#shared-edit input { width: 100%; max-width: 480px; padding: 8px; margin: 4px 0 8px;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--bg); box-sizing: border-box; }
-details#shared-edit input[type=number] { width: 100px; }
+

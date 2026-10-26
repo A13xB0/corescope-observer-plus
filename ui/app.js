@@ -12,8 +12,7 @@
   let passwordUpdates = {};
   let tempTargets = null; // pending per-repeater temperature choices (a Set), null = unchanged
   let detailsTarget = null;
-  let abortTest = false;   // set by the Cancel button to stop watching a Test
-  let abortCheck = false;  // set by the Cancel button to stop watching a Check
+  let testRun = 0;  // bumped per Test (and when the dialog closes): stale runs stop updating
   let showKey = false; // the companion key is masked until asked for
 
   // maskKey keeps the first and last four characters, which is enough to
@@ -113,9 +112,9 @@
     const route = x.route ? ` ${x.route}` : "";
     const temp = x.temperature_c != null ? `, ${Number(x.temperature_c).toFixed(1)} °C` : "";
     const role = x.role ? " as " + x.role : "";
-    // A "covered" poll was heard by another observer, not us, so there's no
-    // voltage of our own to show — CoreScope has the reading.
-    if (x.code === "ok" && x.battery_mv == null) return `heard via another observer${route}`;
+    // A "covered" poll: we didn't hear the answer, another observer did and
+    // CoreScope has it — there's no voltage of our own to show.
+    if (x.covered) return `heard via another observer${route}`;
     if (x.code === "ok") return `${(x.battery_mv / 1000).toFixed(2)} V${role}${route}${temp}`;
     if (x.code === "no_battery") return `no battery fitted${role}${route}${temp}`;
     return (CODE_TEXT[x.code] || x.code || "no answer") + (x.message && x.message !== x.code ? ": " + x.message : "");
@@ -194,6 +193,11 @@
   }
 
   function batteryCell(n) {
+    if (n.covered && n.code === "ok") {
+      // Not our reading: another observer overheard the answer to our request.
+      const v = n.battery_mv ? `${(n.battery_mv / 1000).toFixed(2)} V` : "—";
+      return `<span class="muted">${v}</span><div class="muted small">heard via another observer · ${ago(n.covered_at)}</div>`;
+    }
     if (n.code === "ok" && n.battery_mv) {
       const via = n.method === "telemetry" ? ' · <span title="This repeater ignores a guest\'s status request, so the battery comes from telemetry">telemetry</span>' : "";
       return `<strong>${(n.battery_mv / 1000).toFixed(2)} V</strong><div class="muted small">${ago(n.last_success)}${via}</div>`;
@@ -229,7 +233,7 @@
     const allOk = Object.keys(checks).length && Object.values(checks).every((c) => c.ok);
     const gs = $("global-status");
     gs.textContent = !Object.keys(checks).length ? "Starting" : allOk ? (config.enabled ? "Polling" : "Ready") : "Needs attention";
-    gs.className = "pill " + (allOk ? "good" : "warn");
+    gs.className = "pill " + (!Object.keys(checks).length ? "neutral" : allOk ? "good" : "warn");
     const LABELS = { config: "openHop config", api: "openHop API", companion: "Plugin companion", publish: "Publishing key" };
     $("checks").innerHTML = Object.entries(checks).map(([k, c]) =>
       `<li class="${c.ok ? "ok" : "bad"}"><span>${c.ok ? "✓" : "✗"}</span> <strong>${esc(LABELS[k] || k)}</strong> <span class="muted">${esc(c.message)}</span></li>`).join("");
@@ -303,7 +307,7 @@
         <td>${ok || n.role ? loginCell(n) : ""}</td>
         <td>${ok ? batteryCell(n) : ""}</td>
         <td class="temp-col" ${showTemp ? "" : "hidden"}>${ok ? tempCell(n) : ""}</td>
-        <td><button class="button ghost small" type="button" data-details="${esc(n.node_id)}" ${ok ? "" : "disabled"}>Details</button></td></tr>`;
+        <td><button class="button ghost small" type="button" data-details="${esc(n.node_id)}" ${ok ? "" : "disabled"} aria-label="Details for ${esc(n.name)}">Details</button></td></tr>`;
     }).join("") || '<tr><td colspan="8" class="muted">No repeaters heard yet.</td></tr>';
     $("reach-note").textContent = maxHops()
       ? "Repeaters heard direct, or through one relay you hear directly."
@@ -323,7 +327,8 @@
     config.max_hops = maxHops();
     config.temperature_targets = [...tempSet()];
     const url = $("corescope_url").value.trim().replace(/\/+$/, "");
-    if (url) config.corescope_url = url;
+    if (url && !/^https?:\/\//.test(url)) throw new Error("The CoreScope address must start with http:// or https://");
+    config.corescope_url = url;  // empty = no CoreScope
     config.check_corescope = $("check_corescope").checked;
   }
 
@@ -347,106 +352,133 @@
     }
   }
 
+  // liveView builds a live status panel once — a spinner, a title, a "Stop
+  // watching" button, a body and a footer — and afterwards only updates their
+  // contents, so the button is never re-created mid-tap.
+  function liveView(box) {
+    box.hidden = false;
+    box.className = box.dataset.base;
+    box.innerHTML = '<div class="lv-head"><span class="spin" aria-hidden="true"></span>'
+      + '<span class="lv-title" role="status" aria-live="polite"></span>'
+      + '<button type="button" class="button ghost small" data-stop>Stop watching</button></div>'
+      + '<div class="lv-body"></div><div class="lv-foot muted small"></div>';
+    const q = (sel) => box.querySelector(sel);
+    let stopped = false;
+    q("[data-stop]").addEventListener("click", (ev) => {
+      stopped = true;
+      ev.currentTarget.disabled = true;
+      ev.currentTarget.textContent = "Stopping…";
+    });
+    return {
+      get stopped() { return stopped; },
+      title(html) { q(".lv-title").innerHTML = html; },
+      body(html) { q(".lv-body").innerHTML = html; },
+      foot(text) { q(".lv-foot").textContent = text || ""; },
+      finish(kind) {
+        const spin = q(".spin"); if (spin) spin.remove();
+        const stop = q("[data-stop]"); if (stop) stop.remove();
+        if (kind) box.classList.add(kind);
+      },
+    };
+  }
+
+  // A short message in a live panel (no spinner), with a close button.
+  function panelNote(box, html, kind) {
+    box.hidden = false;
+    box.className = `${box.dataset.base} ${kind || ""}`;
+    box.innerHTML = `<div class="lv-head"><span class="lv-title">${html}</span>`
+      + '<button type="button" class="button ghost small" data-dismiss aria-label="Close">×</button></div>';
+  }
+
+  const nodeName = (id) => (((runtime.nodes || []).find((x) => x.node_id === id)) || {}).name || id.slice(0, 8);
+
+  // Test one repeater, live in its dialog (the page's notice bar is hidden by
+  // the modal): each step the plugin takes, then the answer and whether it
+  // reached CoreScope.
   async function test(nodeId) {
-    // Feedback goes in the dialog, not the page's notice bar, which the open
-    // modal hides. An elapsed timer shows it is working through the up-to-a-
-    // minute login, and the result (plus CoreScope's confirmation) lands here.
-    const box = $("test-status");
-    const nm = (((runtime.nodes || []).find((x) => x.node_id === nodeId)) || {}).name || nodeId.slice(0, 8);
+    const run = ++testRun;
+    const current = () => run === testRun;
+    const name = nodeName(nodeId);
+    const v = liveView($("test-status"));
+    const btn = $("test-now");
+    btn.disabled = true;
     const t0 = Date.now();
-    const elapsed = () => Math.round((Date.now() - t0) / 1000);
-    const set = (html, kind) => { if (box) { box.hidden = false; box.className = "test-status " + (kind || ""); box.innerHTML = html; } };
-    const stepsHtml = (a, running) => {
-      const steps = (a && a.steps) || [];
-      if (!steps.length) return "";
-      return '<ol class="steps">' + steps.map((s, i) => {
-        const last = running && i === steps.length - 1;
-        const mark = last ? '<span class="spin"></span>' : '<span class="step-ok" aria-hidden="true">✓</span>';
-        return `<li>${mark} ${esc(s.label)}</li>`;
-      }).join("") + "</ol>";
+    let last = { steps: [] };
+    let finished = false;
+    const draw = () => {
+      if (!current()) return;
+      if (!finished) v.title(`Testing <strong>${esc(name)}</strong>… ${Math.round((Date.now() - t0) / 1000)}s`);
+      const steps = last.steps || [];
+      const now = (i) => !finished && i === steps.length - 1;  // the step still in progress
+      v.body(steps.length ? '<ol class="steps">' + steps.map((st, i) =>
+        `<li><span class="${now(i) ? "step-now" : "step-ok"}" aria-hidden="true">${now(i) ? "›" : "✓"}</span> ${esc(st.label)}</li>`).join("") + "</ol>" : "");
     };
-    const view = (a, running) => {
-      const cancel = running ? ' <button type="button" class="button ghost small" data-cancel="test">Cancel</button>' : "";
-      const head = running
-        ? `<span class="spin"></span> Testing <strong>${esc(nm)}</strong>… ${elapsed()}s${cancel}`
-        : ((a.code === "ok" || a.code === "no_battery") ? `Answered — ${esc(pollText(a))}` : esc(pollText(a)));
-      const cs = running ? "" : corescopeText(a.corescope);
-      set(`<div>${head}</div>` + stepsHtml(a, running) + (cs ? `<div class="muted small">${esc(cs)}</div>` : ""), running ? "" : pollKind(a));
-    };
-    abortTest = false;
-    let lastA = { steps: [] };
-    view(lastA, true);
-    const timer = setInterval(() => view(lastA, true), 1000);
+    draw();
+    const timer = setInterval(draw, 1000);
     try {
       const id = await request("test_login", nodeId);
-      const a = await waitForAction("test_login", id, 90000, (p) => { lastA = p; if (p.running) view(p, true); }, () => abortTest);
-      clearInterval(timer);
-      view(a, false);
+      const a = await waitForAction("test_login", id, 120000, (p) => { last = p; draw(); }, () => v.stopped || !current());
+      if (!current()) return;
+      last = a;
+      finished = true;
+      draw();
+      v.title(((a.code === "ok" || a.code === "no_battery") && !a.covered ? "Answered — " : "") + esc(pollText(a)));
+      v.foot(corescopeText(a.corescope));
+      v.finish(pollKind(a));
     } catch (e) {
+      if (!current()) return;
+      v.title(e.aborted ? `Stopped watching <strong>${esc(name)}</strong>. The poll may still finish in the background.` : esc(e.message));
+      v.finish(e.aborted ? "warn" : "bad");
+    } finally {
       clearInterval(timer);
-      if (e.aborted) set(`Stopped watching <strong>${esc(nm)}</strong>. The poll may still finish in the background.`, "warn");
-      else set(esc(e.message), "bad");
+      if (current()) btn.disabled = false;
     }
   }
 
-  // Poll every selected neighbour now (saved selection), then publish.
-  // One row of the live Check-now / Test panels.
+  // One row of the live Check-now panel.
   function progressRow(name, statusHtml, kind) {
-    const icon = kind === "good" ? "✓" : kind === "bad" ? "✗" : kind === "warn" ? "!" : kind === "muted" ? "–" : "";
+    const icon = { good: "✓", bad: "✗", warn: "!" }[kind] || "";
     return `<div class="cp-row cp-${kind}"><span class="cp-icon" aria-hidden="true">${icon}</span>`
       + `<span class="cp-name">${esc(name)}</span><span class="cp-status">${statusHtml}</span></div>`;
   }
 
   // Check now first asks what to poll: just the stale repeaters (no reading in
-  // the last hour) or all of them. runCheck then does the chosen scope.
+  // the last hour) or all of them; runCheck does the chosen one.
   function checkNow() {
     const panel = $("check-progress");
-    const panelMsg = (html, kind) => { if (panel) { panel.hidden = false; panel.innerHTML = `<div class="cp-head ${kind || ""}">${html}</div>`; } };
-    if (dirty) { panelMsg("Save first, so the check uses your selection.", "warn"); return; }
-    if (!(config.targets || []).length) { panelMsg("Select at least one repeater first (tick it in the list).", "warn"); return; }
-    if (!panel) return;
-    panel.hidden = false;
-    panel.innerHTML = '<div class="cp-head"><strong>Check which repeaters?</strong></div>'
-      + '<div class="cp-choice">'
+    if (dirty) { panelNote(panel, "Save first, so the check uses your selection.", "warn"); return; }
+    if (!(config.targets || []).length) { panelNote(panel, "Tick at least one repeater in the list first.", "warn"); return; }
+    panelNote(panel, "<strong>Check which repeaters?</strong>");
+    panel.insertAdjacentHTML("beforeend", '<div class="cp-choice">'
       + '<button type="button" class="button ghost small" data-check="stale">Only stale <span class="muted small">(no reading in the last hour)</span></button>'
-      + '<button type="button" class="button ghost small" data-check="all">All of them</button>'
-      + '</div>';
-    panel.querySelectorAll("[data-check]").forEach((b) => b.addEventListener("click", () => runCheck(b.dataset.check)));
+      + '<button type="button" class="button ghost small" data-check="all">All of them</button></div>');
   }
 
   async function runCheck(scope) {
-    const panel = $("check-progress");
-    const panelMsg = (html, kind) => { if (panel) { panel.hidden = false; panel.innerHTML = `<div class="cp-head ${kind || ""}">${html}</div>`; } };
     const nTargets = (config.targets || []).length;
-    const nameOf = (id) => (((runtime.nodes || []).find((x) => x.node_id === id)) || {}).name || id.slice(0, 8);
-    // Driven by the action snapshot: a row per repeater actually polled, filled
-    // in (with CoreScope confirmation) as each streams back. Total comes from
-    // the plugin, so "stale" shows only the stale ones.
-    const draw = (a) => {
-      if (!panel) return;
-      const prog = (a && a.progress) || [];
-      const finished = a && !a.running;
-      const total = a && a.total != null ? a.total : prog.length;
-      const rows = prog.map((p) => {
-        const cs = corescopeText(p.corescope);
-        return progressRow(nameOf(p.node_id), esc(pollText(p)) + (cs ? ` <span class="muted small">· ${esc(cs)}</span>` : ""), pollKind(p));
-      }).join("") || (finished ? "" : `<div class="cp-row cp-pending"><span class="cp-icon"></span><span class="cp-status">waiting…</span></div>`);
-      const cancel = finished ? "" : ' <button type="button" class="button ghost small" data-cancel="check">Cancel</button>';
-      const head = finished
-        ? `<strong>Done.</strong> <span class="muted small">${esc((a && a.message) || "")}</span>`
-        : `<span class="spin"></span> <strong>Checking ${total} repeater${total === 1 ? "" : "s"}…</strong> <span class="muted small">${prog.length}/${total} · up to a minute each</span>${cancel}`;
-      panel.hidden = false;
-      panel.innerHTML = `<div class="cp-head">${head}</div>` + rows;
-    };
-    abortCheck = false;
+    const v = liveView($("check-progress"));
     $("check-now").disabled = true;
-    draw({ running: true, progress: [], done: 0, total: scope === "stale" ? undefined : nTargets });
+    // Drawn from the plugin's snapshot: a row per repeater actually polled,
+    // filled in (with CoreScope's confirmation) as each streams back.
+    const draw = (a) => {
+      const prog = a.progress || [];
+      const total = a.total != null ? a.total : (scope === "stale" ? "the stale" : nTargets);
+      v.title(`<strong>Checking ${total} repeater${total === 1 ? "" : "s"}…</strong> <span class="muted small">${prog.length} done · up to a minute each</span>`);
+      v.body(prog.map((p) => {
+        const cs = corescopeText(p.corescope);
+        return progressRow(p.name || nodeName(p.node_id), esc(pollText(p)) + (cs ? ` <span class="muted small">· ${esc(cs)}</span>` : ""), pollKind(p));
+      }).join(""));
+    };
+    draw({ progress: [] });
     try {
       const id = await request("check_now", null, { scope });
-      await waitForAction("check_now", id, 120000 * Math.max(1, nTargets) + 20000, draw, () => abortCheck);
+      const a = await waitForAction("check_now", id, 120000 * Math.max(1, nTargets) + 30000, draw, () => v.stopped);
+      draw(a);
+      v.title(`<strong>Done.</strong> <span class="muted small">${esc(a.message || "")}</span>`);
+      v.finish(a.ok === false ? "bad" : "");
     } catch (e) {
-      if (e.aborted) panelMsg("Stopped watching. The repeaters already queued finish in the background.", "warn");
-      else panelMsg(esc(e.message), "bad");
+      v.title(e.aborted ? "Stopped watching. Repeaters already queued finish in the background." : esc(e.message));
+      v.finish(e.aborted ? "warn" : "bad");
     } finally {
       $("check-now").disabled = false;
     }
@@ -471,6 +503,7 @@
     if (!n) return;
     $("details-title").textContent = n.name;
     $("test-status").hidden = true;  // clear any result from a previous test
+    $("test-now").disabled = false;
     $("login-password").value = "";
     $("remove-password").checked = false;
     const pending = passwordUpdates[nodeId];
@@ -479,8 +512,8 @@
     // so without this the operator can't tell a save worked. "" pending is a
     // queued removal; a non-empty string is a queued new password.
     const pwState = $("password-state");
-    if (pending === "") { pwState.textContent = "Password will be removed on Save."; pwState.className = "password-state small"; }
-    else if (pending) { pwState.textContent = "New password will be saved on Save."; pwState.className = "password-state small saved"; }
+    if (pending === "") { pwState.textContent = "Removing the password didn't save — press Apply to retry."; pwState.className = "password-state small"; }
+    else if (pending) { pwState.textContent = "The new password didn't save — press Apply to retry."; pwState.className = "password-state small"; }
     else if (n.password_set) { pwState.textContent = "✓ A password is saved. Leave blank to keep it, type to replace it, or tick Remove."; pwState.className = "password-state small saved"; }
     else { pwState.textContent = "No password saved — logs in blank (guest or ACL)."; pwState.className = "password-state small muted"; }
     $("remove-manual").hidden = !n.manual;
@@ -515,10 +548,13 @@
   }
 
   $("details-form").addEventListener("submit", (ev) => {
-    const action = ev.submitter && ev.submitter.value;
+    // Enter in the password box submits with the first button, which is Apply.
+    const action = (ev.submitter && ev.submitter.value) || "save";
     if (!detailsTarget || action === "cancel") return;  // dialog closes, nothing saved
     if (action === "test") { ev.preventDefault(); test(detailsTarget); return; }  // stays open for the live test
+    const node = (runtime.nodes || []).find((x) => x.node_id === detailsTarget) || {};
     if (action === "remove") {
+      if (!node.manual) { ev.preventDefault(); return; }  // only repeaters you added can be removed
       const id = detailsTarget;
       config.manual_repeaters = manualList().filter((m) => m.node_id !== id);
       config.targets = (config.targets || []).filter((k) => k !== id);
@@ -537,9 +573,12 @@
       }
     }
     // Save straight away — the repeater's own dialog shouldn't need a second
-    // trip to the page's Save bar. The dialog closes (method="dialog").
-    saveAll().catch((e) => notice(e.message, "bad"));
+    // trip to the page's Save bar. The dialog closes (method="dialog"); a
+    // failure keeps the edits staged (dirty) and says so by the Save bar.
+    saveAll().catch((e) => { dirty = true; saveStatus(`Not saved: ${e.message}`, "bad"); });
   });
+  // Closing the dialog abandons a Test that is still being watched.
+  $("details-dialog").addEventListener("close", () => { testRun++; });
 
   document.addEventListener("click", (ev) => {
     const t = ev.target;
@@ -554,7 +593,8 @@
     }
   });
   function addManual(nodeId, name) {
-    nodeId = nodeId.toLowerCase();
+    nodeId = String(nodeId || "").toLowerCase();
+    if (!KEY_RE.test(nodeId)) { notice("That isn't a 64-character repeater key.", "warn"); return; }
     if (!manualList().some((m) => m.node_id === nodeId)) config.manual_repeaters = [...manualList(), { node_id: nodeId, name: name || nodeId.slice(0, 8) }];
     if (!(config.targets || []).includes(nodeId)) config.targets = [...(config.targets || []), nodeId];
     $("add-results").innerHTML = "";
@@ -589,9 +629,11 @@
 
   $("connect").addEventListener("click", connect);
   $("check-now").addEventListener("click", checkNow);
-  // Cancel buttons in the live views (delegated: the panels are re-rendered).
-  $("check-progress").addEventListener("click", (e) => { if (e.target.closest("[data-cancel]")) abortCheck = true; });
-  $("test-status").addEventListener("click", (e) => { if (e.target.closest("[data-cancel]")) abortTest = true; });
+  $("check-progress").addEventListener("click", (e) => {
+    const choice = e.target.closest("[data-check]");
+    if (choice) runCheck(choice.dataset.check);
+    else if (e.target.closest("[data-dismiss]")) $("check-progress").hidden = true;
+  });
 
   $("show-key").addEventListener("click", () => { showKey = !showKey; render(); });
   $("copy-key").addEventListener("click", async () => {
@@ -606,21 +648,31 @@
       notice("Couldn't copy. Press Show to see the key.", "warn");
     }
   });
+  // A status line beside the Save button: the sticky bar is always on screen,
+  // unlike the notice at the top of the page.
+  function saveStatus(text, kind) {
+    const el = $("save-status");
+    el.textContent = text || "";
+    el.className = "small " + (kind || "");
+  }
+
   // saveAll persists everything pending (page settings + any staged per-repeater
-  // password/temperature/shared changes). Used by the page's Save bar and, so a
-  // repeater's own dialog saves on Apply, by the details dialog.
+  // password/temperature/shared changes). Used by the page's Save bar and by
+  // the details dialog's Apply.
   async function saveAll() {
     collect();
     const extra = Object.keys(passwordUpdates).length ? { password_updates: passwordUpdates } : {};
+    saveStatus("Saving…");
     await saveConfig(extra);
     passwordUpdates = {};
     tempTargets = null;
     dirty = false;
-    notice("Saved.", "good");
+    saveStatus("Saved.", "good");
+    refresh();  // show the saved state (e.g. "password set") straight away
   }
 
   $("save").addEventListener("click", async () => {
-    try { await saveAll(); } catch (e) { notice(e.message, "bad"); }
+    try { await saveAll(); } catch (e) { saveStatus(`Not saved: ${e.message}`, "bad"); }
   });
 
   async function refresh() {

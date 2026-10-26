@@ -252,12 +252,16 @@ def test_covered_takes_the_observers_reading(shared):
     assert res.code == poller.OK
     assert res.covered is True
     assert rep.logins == 0
-    # record() marks it heard so the backoff clock resets and it isn't retried.
-    st = {"unheard_since": now - 5 * 3600, "battery_mv": 3900}
+    # Our request was answered (an observer heard it), so the ACL entry is kept.
+    assert state["logged_in_at"] == now - 60
+    # record(): heard for scheduling (backoff reset), but not our own reading.
+    st = {"unheard_since": now - 5 * 3600, "battery_mv": 3900, "last_success": now - 7200}
     poller.record(st, res, password_set=False, now=now)
-    assert st["last_success"] == now
+    assert st["covered_at"] == now
+    assert st["last_covered"] is True
     assert "unheard_since" not in st
-    assert st["battery_mv"] == 3900  # last known value kept; this one wasn't decoded
+    assert st["last_success"] == now - 7200  # unchanged: we didn't read it
+    assert st["battery_mv"] == 3900
 
 
 def test_admin_recheck_forces_a_login(shared):
@@ -270,3 +274,76 @@ def test_admin_recheck_forces_a_login(shared):
                                  sleep=lambda s: None, now=now)
     assert res.code == poller.ADMIN_STOP
     assert rep.logins >= 1
+
+
+def test_blank_success_is_not_remembered(shared):
+    # A blank login can work only because another observer's "hello" login put
+    # the shared key in the ACL, so it proves nothing: don't remember blank.
+    rep = FakeRepeater(shared, battery_mv=4012)
+    state: dict = {}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None)
+    assert res.code == poller.OK
+    assert "shared_password" not in state
+
+
+def test_known_hello_is_sent_alone(shared, monkeypatch):
+    sent = []
+    real = poller.sk.build_login
+    monkeypatch.setattr(poller.sk, "build_login", lambda *a, **k: (sent.append(a[4]), real(*a, **k))[1])
+    rep = FakeRepeater(shared, battery_mv=4012)
+    state = {"shared_password": "hello"}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None)
+    assert res.code == poller.OK
+    assert sent == ["hello"]  # never a blank try for a repeater known to want hello
+
+
+def test_hello_tried_after_blank_unanswered(shared, monkeypatch):
+    # Unknown repeater whose guest password is "hello": the blank login gets no
+    # answer, so "hello" goes next — and is remembered.
+    sent = []
+    real = poller.sk.build_login
+    monkeypatch.setattr(poller.sk, "build_login", lambda *a, **k: (sent.append(a[4]), real(*a, **k))[1])
+    rep = FakeRepeater(shared, battery_mv=4012, require_login=True)
+    first = {"done": False}
+    orig = rep._handle
+
+    def guarded(pkt):  # ignore the first (blank) login entirely, like the firmware
+        if pkt.get_payload_type() == PAYLOAD_TYPE_ANON_REQ and not first["done"]:
+            first["done"] = True
+            return
+        orig(pkt)
+    rep._handle = guarded
+    state: dict = {}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None)
+    assert res.code == poller.OK
+    assert sent == ["", "hello"]
+    assert state["shared_password"] == "hello"
+
+
+def test_admin_recheck_not_marked_done_without_a_login_answer(shared):
+    # Data came back but the login answer was lost: the role wasn't seen, so the
+    # admin re-check must stay due.
+    rep = FakeRepeater(shared, battery_mv=4012, answer_login=False)
+    state: dict = {}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None)
+    assert res.code == poller.OK
+    assert "login_checked_at" not in state
+
+
+def test_route_retaught_after_unanswered_fast_path(shared, monkeypatch):
+    taught = []
+    real = poller.sk.build_route_update
+    monkeypatch.setattr(poller.sk, "build_route_update", lambda *a, **k: (taught.append(1), real(*a, **k))[1])
+    rep = FakeRepeater(shared, battery_mv=4012, require_login=True)  # bare request ignored
+    now = 2_000_000.0
+    state = {"logged_in_at": now - 60, "login_checked_at": now - 60}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                 sleep=lambda s: None, now=now)
+    assert res.code == poller.OK
+    assert taught, "the login after a lapsed ACL entry must re-teach the return path"
+
+
+def test_any_answer_stops_the_backoff_clock():
+    st = {"unheard_since": 1.0}
+    poller.record(st, poller.PollResult(poller.NEEDS_PASSWORD), password_set=False, now=100.0)
+    assert "unheard_since" not in st
