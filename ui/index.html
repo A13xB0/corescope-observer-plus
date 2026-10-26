@@ -138,11 +138,22 @@
   <dialog id="details-dialog" aria-labelledby="details-title">
     <form method="dialog" id="details-form">
       <h3 id="details-title">Repeater</h3>
-      <label for="login-password">Login password</label>
+      <div id="guest-pw-block" hidden>
+        <label for="guest-password">Guest password <span class="muted small">(for the guest key)</span></label>
+        <select id="guest-password">
+          <option value="auto">Find out: blank first, then hello</option>
+          <option value="hello">hello</option>
+          <option value="">Blank</option>
+        </select>
+        <p id="guest-pw-state" class="password-state small"></p>
+      </div>
+      <div id="companion-pw-block">
+      <label for="login-password">Login password <span class="muted small">(for this plugin's companion key)</span></label>
       <input id="login-password" type="password" autocomplete="off" placeholder="Blank: guest or ACL">
       <p id="password-state" class="password-state small"></p>
-      <p class="muted small">Blank logs in automatically: as a guest when the repeater has no guest password, or through its ACL if it lists this plugin's key. A password is kept on this observer only and never published. An admin password works but gives full control and makes the repeater write to flash at each login, so prefer a guest password or an ACL entry.</p>
+      <p class="muted small">Blank logs in automatically: as a guest when the repeater has no guest password, or through its ACL if it lists this plugin's key. A password is kept on this observer only and never published. An admin password works but gives full control and makes the repeater write to flash at each login, so prefer a guest password or an ACL entry. Saving one stops the guest key here.</p>
       <label class="check"><input id="remove-password" type="checkbox"> Remove the saved password</label>
+      </div>
       <label class="check"><input id="temp-this" type="checkbox"> <span>Read temperature <span id="temp-last" class="muted small"></span>
         <span class="muted small" style="display:block">The chip temperature arrives with the battery reading (ESP32 and nRF52 boards), so this costs no extra airtime.</span></span></label>
       <div id="shared-block" hidden>
@@ -150,7 +161,7 @@
           <span class="muted small" style="display:block">Polls this repeater as a guest (this observer's own key, or the shared one), so other observers can feed CoreScope its readings.</span></span></label>
         <ul class="consent muted small">
           <li>Anyone can read its replies. That's the point: other observers feed CoreScope.</li>
-          <li>It is only ever used with a <strong>blank password</strong>.</li>
+          <li>It is only ever used with a <strong>blank</strong> or <strong>hello</strong> password, set above.</li>
           <li><strong>Never give this key admin on any repeater.</strong> If it ever answers as admin, the plugin stops, removes the key's access and tells you.</li>
         </ul>
         <p id="shared-admin-warn" class="notice bad small" hidden></p>

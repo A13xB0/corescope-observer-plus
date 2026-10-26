@@ -263,8 +263,14 @@
     const checks = runtime.self_check || {};
     const allOk = Object.keys(checks).length && Object.values(checks).every((c) => c.ok);
     const gs = $("global-status");
-    gs.textContent = !Object.keys(checks).length ? "Starting" : allOk ? (config.enabled ? "Polling" : "Ready") : "Needs attention";
-    gs.className = "pill " + (!Object.keys(checks).length ? "neutral" : allOk ? "good" : "warn");
+    // The plugin rewrites runtime.json every few seconds while it runs; a
+    // stale one means it is stopped and nothing saved here is acted on yet.
+    const age = runtime.generated_at ? Date.now() / 1000 - Date.parse(runtime.generated_at) / 1000 : 0;
+    const stopped = age > 20 * 60;
+    gs.textContent = stopped ? `Not running (last seen ${ago(Date.parse(runtime.generated_at) / 1000)})`
+      : !Object.keys(checks).length ? "Starting" : allOk ? (config.enabled ? "Polling" : "Ready") : "Needs attention";
+    gs.className = "pill " + (stopped ? "bad" : !Object.keys(checks).length ? "neutral" : allOk ? "good" : "warn");
+    gs.title = stopped ? "The plugin isn't running. Changes are saved, but nothing is applied or polled until it starts." : "";
     const LABELS = { config: "openHop config", api: "openHop API", companion: "Plugin companion", publish: "Publishing key" };
     $("checks").innerHTML = Object.entries(checks).map(([k, c]) =>
       `<li class="${c.ok ? "ok" : "bad"}"><span>${c.ok ? "✓" : "✗"}</span> <strong>${esc(LABELS[k] || k)}</strong> <span class="muted">${esc(c.message)}</span></li>`).join("");
@@ -574,6 +580,12 @@
     const pwSet = pending !== undefined ? !!pending : n.password_set;
     $("shared-block").hidden = !(runtime.corescope && runtime.corescope.url);
     $("shared-this").checked = sharedTargets().has(nodeId);
+    const gp = (config.guest_passwords || {})[nodeId];
+    $("guest-password").value = gp === undefined ? "auto" : gp;
+    $("guest-pw-state").textContent = n.guest_password === "hello" ? "✓ Last logged in with hello."
+      : n.guest_password === "" ? "✓ Last logged in with a blank password." : "Not logged in under the guest key yet.";
+    $("guest-pw-state").className = "password-state small " + (n.guest_password != null ? "saved" : "muted");
+    showPasswordBlock();
     $("shared-this").disabled = pwSet || n.shared_admin_seen;
     $("shared-pw-warn").hidden = !pwSet;
     const adminWarn = $("shared-admin-warn");
@@ -605,9 +617,19 @@
       config.targets = (config.targets || []).filter((k) => k !== id);
       document.querySelectorAll(`[data-node="${id}"]`).forEach((el) => { el.checked = false; });
     } else {  // Apply: stage this repeater's password / temperature / shared-key choices
-      const pw = $("login-password").value;
-      if ($("remove-password").checked) passwordUpdates[detailsTarget] = "";
-      else if (pw) passwordUpdates[detailsTarget] = pw;
+      const guest = !$("shared-this").disabled && $("shared-this").checked;
+      if (guest) {
+        // Under the guest key the password is the guest one (blank or hello),
+        // a plain setting; the companion password box is hidden and ignored.
+        const gps = { ...(config.guest_passwords || {}) };
+        const v = $("guest-password").value;
+        if (v === "auto") delete gps[detailsTarget]; else gps[detailsTarget] = v;
+        config.guest_passwords = gps;
+      } else {
+        const pw = $("login-password").value;
+        if ($("remove-password").checked) passwordUpdates[detailsTarget] = "";
+        else if (pw) passwordUpdates[detailsTarget] = pw;
+      }
       const temps = new Set(tempSet());
       if ($("temp-this").checked) temps.add(detailsTarget); else temps.delete(detailsTarget);
       tempTargets = temps;
@@ -622,6 +644,14 @@
     // failure keeps the edits staged (dirty) and says so by the Save bar.
     saveAll().catch((e) => { dirty = true; saveStatus(`Not saved: ${e.message}`, "bad"); });
   });
+  // A guest-key repeater uses the guest password (blank or hello); the
+  // companion-key password only matters when the guest key is off.
+  function showPasswordBlock() {
+    const guest = !$("shared-block").hidden && $("shared-this").checked && !$("shared-this").disabled;
+    $("guest-pw-block").hidden = !guest;
+    $("companion-pw-block").hidden = guest;
+  }
+  $("shared-this").addEventListener("change", showPasswordBlock);
   // Closing the dialog abandons a Test that is still being watched.
   $("details-dialog").addEventListener("close", () => { testRun++; });
 

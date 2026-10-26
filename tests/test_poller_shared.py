@@ -570,3 +570,16 @@ def test_packet_log_keeps_the_last_twenty():
     for i in range(30):
         node.sent("login", "direct", str(i))
     assert len(log.entries) == 20 and log.entries[-1]["detail"] == "29"
+
+
+def test_operator_set_guest_password_is_used_alone(shared, monkeypatch):
+    from openhop_neighbour_battery.settings import parse
+    key = "ab" * 32
+    assert parse({"guest_passwords": {key: "hello", "cd" * 32: "secret"}}).guest_passwords == {key: "hello"}
+    sent = []
+    real = poller.sk.build_login
+    monkeypatch.setattr(poller.sk, "build_login", lambda *a, **k: (sent.append(a[4]), real(*a, **k))[1])
+    rep = FakeRepeater(shared, battery_mv=4012)
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, {"shared_password": ""}, routes=[DIRECT],
+                                 sleep=lambda s: None, guest_password="hello", personal=True)
+    assert res.code == poller.OK and sent == ["hello"]

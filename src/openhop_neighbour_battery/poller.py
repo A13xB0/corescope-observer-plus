@@ -337,7 +337,8 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
                       temperature_c=temp, temperature_code=temp_code, method="telemetry")
 
 
-def shared_password_order(node_state: dict, now: float, personal: bool = False) -> list[str]:
+def shared_password_order(node_state: dict, now: float, personal: bool = False,
+                          configured: str | None = None) -> list[str]:
     """The passwords to log in with in one poll, one login each, under a guest key.
 
     A login's answer is flooded whenever the repeater has no route back to the
@@ -355,6 +356,8 @@ def shared_password_order(node_state: dict, now: float, personal: bool = False) 
     ACL (one key, one entry for everyone). With this observer's own key a blank
     success is our own.
     """
+    if configured in sk.SHARED_PASSWORDS:
+        return [configured]  # set by the operator for this repeater
     known = node_state.get("shared_password")
     if known == "hello" or (personal and known == ""):
         return [known]
@@ -370,7 +373,8 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                     on_step: Callable[[str], None] | None = None,
                     antenna: Callable[[float], list[bytes] | None] | None = None,
                     personal: bool = False, status_every: float = STATUS_EVERY_SECONDS,
-                    plog: packet_log.NodeLog | None = None) -> PollResult:
+                    plog: packet_log.NodeLog | None = None,
+                    guest_password: str | None = None) -> PollResult:
     """Poll one repeater under a guest key, as raw packets.
 
     Requests are built and encrypted with the key and replies are read straight
@@ -562,7 +566,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 # Admin re-check of a live entry: route first, so the login
                 # answer comes back direct rather than flooded.
                 teach()
-            for pw in shared_password_order(node_state, now, personal):
+            for pw in shared_password_order(node_state, now, personal, guest_password):
                 if tried:
                     sleep(RETRY_GAP_SECONDS)
                 tried += 1

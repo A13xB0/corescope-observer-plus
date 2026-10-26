@@ -30,6 +30,7 @@ DEFAULTS = {
     "alternative_routes": False,
     "shared_key_targets": [],
     "check_corescope": True,
+    "guest_passwords": {},
 }
 
 # Written by the plugin page, consumed and cleared by the plugin. Secrets go
@@ -66,6 +67,10 @@ class Settings:
     # Before a shared-key repeater's early retry, ask CoreScope whether it
     # already has a fresh reading (from any observer); if so, skip the retry.
     check_corescope: bool = True
+    # The guest password to log in with under the guest key, per repeater:
+    # "hello" or "" (blank). Unset = learn it (blank first, then hello). Not a
+    # secret: the guest key only ever uses these two, both public.
+    guest_passwords: dict = field(default_factory=dict)
 
 
 def parse(raw: dict) -> Settings:
@@ -120,6 +125,9 @@ def parse(raw: dict) -> Settings:
         s.corescope_url = ""  # cleared on purpose: no CoreScope (no shared key, no checks)
     s.shared_key_targets = sorted({str(k).lower() for k in raw.get("shared_key_targets") or []
                                    if KEY_RE.match(str(k).lower())})
+    gp = raw.get("guest_passwords")
+    s.guest_passwords = {str(k).lower(): v for k, v in (gp.items() if isinstance(gp, dict) else [])
+                         if KEY_RE.match(str(k).lower()) and v in ("", "hello")}
     cc = raw.get("check_corescope", True)
     # A JSON false, or the strings "false"/"0"/"no"/"off" from a form, all mean off.
     if isinstance(cc, str):

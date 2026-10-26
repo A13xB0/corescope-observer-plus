@@ -401,6 +401,7 @@ class App:
                         on_step=on_step, antenna=antenna,
                         personal=shared.public_key == self.own_key().public_key,
                         status_every=s.status_every_hours * 3600, plog=plog,
+                        guest_password=s.guest_passwords.get(n.node_id),
                     )
                 else:
                     result = poll_one(
@@ -714,6 +715,8 @@ class App:
                 "manual": n.manual,
                 "selected": n.node_id in selected,
                 "password_set": self.secrets.has_password(n.node_id),
+                # The guest password the guest key last logged in with (learnt).
+                "guest_password": st.get("shared_password"),
                 "code": st.get("code"), "detail": st.get("detail"), "role": st.get("role"),
                 "battery_mv": st.get("battery_mv"), "last_success": st.get("last_success"),
                 "last_attempt": st.get("last_attempt"), "retried": bool(st.get("retried")),
