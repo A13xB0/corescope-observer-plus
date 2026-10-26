@@ -254,11 +254,28 @@ def test_logs_in_when_acl_entry_is_gone(shared):
     # silence and logs in to be re-added, then reads the battery.
     rep = FakeRepeater(shared, require_login=True, battery_mv=4012)
     now = 2_000_000.0
-    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60}
+    # Two polls in a row already went unanswered: this third one logs in.
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60,
+             "no_reply_count": poller.FORGET_LOGIN_AFTER - 1}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
                                  sleep=lambda s: None, now=now)
     assert res.code == poller.OK
     assert rep.logins >= 1
+
+
+def test_a_missed_reply_is_asked_again_not_logged_in(shared):
+    # One poll without an answer: the request goes twice, no login, and the
+    # ACL entry is still trusted for the next poll.
+    rep = FakeRepeater(shared, answer_status=False, answer_telemetry=False)
+    rep._in_acl = True
+    now = 2_000_000.0
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60,
+             "status_checked_at": now}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                 sleep=lambda s: None, now=now)
+    assert res.code == poller.NO_REPLY and rep.logins == 0
+    poller.record(state, res, password_set=False, now=now)
+    assert state.get("logged_in_at")
 
 
 def _antenna(rep: FakeRepeater, asked: list | None = None):
@@ -426,7 +443,8 @@ def test_route_retaught_after_unanswered_fast_path(shared, monkeypatch):
     monkeypatch.setattr(poller.sk, "build_route_update", lambda *a, **k: (taught.append(1), real(*a, **k))[1])
     rep = FakeRepeater(shared, battery_mv=4012, require_login=True)  # bare request ignored
     now = 2_000_000.0
-    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60}
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60,
+             "no_reply_count": poller.FORGET_LOGIN_AFTER - 1}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
                                  sleep=lambda s: None, now=now)
     assert res.code == poller.OK

@@ -50,7 +50,8 @@ STATUS_RECHECK = 24 * 3600
 STATUS_EVERY_SECONDS = 6 * 3600
 # After this many polls in a row with no answer at all, the last login is
 # assumed lost (a rebooted repeater forgets guests): the next poll logs in
-# before asking anything.
+# before asking anything. Until then a poll that gets nothing asks again
+# rather than logging in.
 FORGET_LOGIN_AFTER = 3
 FORGET_PASSWORD_AFTER = 7 * 24 * 3600
 NO_BATTERY_RECHECK = 24 * 3600
@@ -605,19 +606,36 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             route_stale = (force_route or int(node_state.get("flood_replies") or 0) > 0
                            or node_state.get("code") not in (OK, NO_BATTERY)
                            or now - float(node_state.get("route_sent_at") or 0) >= ROUTE_REFRESH_SECONDS)
+            trust_entry = False
             if in_acl and not recheck_due:
                 if route_stale:
                     teach()
                 tried += 1
                 reply = request()
                 if reply is None:
-                    # The entry may have lapsed (32-slot LRU, or a reboot).
-                    in_acl = False
+                    # A lost request or reply is far likelier than a lost ACL
+                    # entry (guests only drop out on a reboot or when 32 newer
+                    # keys push them out), so ask once more rather than log in.
+                    sleep(RETRY_GAP_SECONDS)
+                    tried += 1
+                    step("No reply; asking again before considering a login")
+                    reply = request()
+                if reply is None:
+                    misses = int(node_state.get("no_reply_count") or 0) + 1
+                    if misses < FORGET_LOGIN_AFTER:
+                        # Still trust the entry: no login this poll. After
+                        # FORGET_LOGIN_AFTER polls in a row without an answer
+                        # it is assumed gone and the next poll logs in.
+                        trust_entry = True
+                        step(f"Still no reply; keeping the ACL entry (miss {misses} of {FORGET_LOGIN_AFTER} "
+                             "before logging in again)")
+                    else:
+                        in_acl = False
 
             # 2. Log in, then route and request.
             logged_in = False
             login_answered = False
-            if reply is None:
+            if reply is None and not trust_entry:
                 logged_in = True
                 if in_acl:
                     # Admin re-check of a live entry: route first, so the login
@@ -701,7 +719,8 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         return PollResult(ERROR, key_mode="shared", detail=str(exc))
 
     if reply is None:
-        node_state.pop("logged_in_at", None)
+        # logged_in_at is kept: record() forgets it after FORGET_LOGIN_AFTER
+        # misses in a row, so a single lost reply doesn't cost a login.
         if used_alternative:
             why = f"no answer on the best route or the alternative ({route.label})"
         elif len(live) > 1 and not alternative_routes:
