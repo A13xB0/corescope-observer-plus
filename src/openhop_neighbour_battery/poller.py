@@ -48,18 +48,19 @@ STATUS_RECHECK = 24 * 3600
 # Repeater Status charts) is asked for only when the last one is this old
 # (the default for the status_every_hours setting).
 STATUS_EVERY_SECONDS = 6 * 3600
-# After this many polls in a row with no answer at all, the last login is
-# assumed lost (a rebooted repeater forgets guests): the next poll logs in
-# before asking anything. Until then a poll that gets nothing asks again
-# rather than logging in.
+# Once a repeater has answered this key, polls keep asking with plain requests
+# even when they go unanswered; only every FORGET_LOGIN_AFTER-th unanswered
+# poll in a row logs in again, in case the entry was lost (a rebooted repeater
+# forgets guests).
 FORGET_LOGIN_AFTER = 3
 FORGET_PASSWORD_AFTER = 7 * 24 * 3600
 NO_BATTERY_RECHECK = 24 * 3600
-# A repeater that didn't answer is tried again sooner: every 20 minutes (3 an
-# hour) for its first misses in a row, then at the normal interval. It is
-# never given up on.
+# A repeater that didn't answer is tried again sooner: 20 minutes later, for
+# its first two misses in a row, then at its normal slot. It is never given
+# up on. (Was 9 quick tries: on 26 Oct they mostly failed again and only
+# added load.)
 NO_REPLY_RETRY = 20 * 60
-NO_REPLY_FAST_TRIES = 9
+NO_REPLY_FAST_TRIES = 2
 # A repeater that has answered nothing for this long is checked only this often
 # until it is heard again — no point polling a long-dead one every interval.
 UNHEARD_BACKOFF_AFTER = 24 * 3600
@@ -622,13 +623,15 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                     reply = request()
                 if reply is None:
                     misses = int(node_state.get("no_reply_count") or 0) + 1
-                    if misses < FORGET_LOGIN_AFTER:
-                        # Still trust the entry: no login this poll. After
-                        # FORGET_LOGIN_AFTER polls in a row without an answer
-                        # it is assumed gone and the next poll logs in.
+                    if misses % FORGET_LOGIN_AFTER:
+                        # Still trust the entry: no login this poll. A login is
+                        # ~2.5x a request's airtime and was forwarded by relays
+                        # half as often (26 Oct: 35% vs 68%), so it is only
+                        # sent on every FORGET_LOGIN_AFTER-th miss in a row,
+                        # in case the entry really is gone (a reboot).
                         trust_entry = True
-                        step(f"Still no reply; keeping the ACL entry (miss {misses} of {FORGET_LOGIN_AFTER} "
-                             "before logging in again)")
+                        step(f"Still no reply; keeping the ACL entry (login only on every "
+                             f"{FORGET_LOGIN_AFTER}rd miss in a row; this is miss {misses})")
                     else:
                         in_acl = False
 
@@ -865,8 +868,6 @@ def record(node_state: dict, result: PollResult, password_set: bool, now: float)
     elif result.code == NO_REPLY:
         node_state["no_reply_count"] = int(node_state.get("no_reply_count") or 0) + 1
         node_state.setdefault("unheard_since", now)  # start the clock for the daily backoff
-        if node_state["no_reply_count"] >= FORGET_LOGIN_AFTER:
-            node_state.pop("logged_in_at", None)
         # A remembered guest password is kept through an outage — a repeater
         # that is merely out of reach hasn't changed its password. Only after
         # FORGET_PASSWORD_AFTER of silence is it re-learnt (blank, then hello).

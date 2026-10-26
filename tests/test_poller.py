@@ -157,13 +157,13 @@ def test_each_request_tried_three_times_all_direct(fake):
     assert fake.commands.count(c.CMD_SEND_LOGIN) == 1
 
 
-def test_login_forgotten_after_three_silent_polls(fake):
+def test_login_kept_through_silent_polls(fake):
+    # Missed polls don't forget the login: requests are retried, and the poll
+    # itself decides when a login is worth sending (every 3rd miss in a row).
     st = dict(LOGGED_IN)
-    for t in (1, 2):
+    for t in (1, 2, 3, 4):
         poller.record(st, poller.PollResult(poller.NO_REPLY), False, now=t)
     assert "logged_in_at" in st
-    poller.record(st, poller.PollResult(poller.NO_REPLY), False, now=3)
-    assert "logged_in_at" not in st
 
 
 def test_login_fail_is_not_a_password_problem_until_three_in_a_row(fake):

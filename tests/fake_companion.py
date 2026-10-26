@@ -24,6 +24,7 @@ class FakeCompanion:
         self.status_after_login_only = False  # requests unanswered until a login succeeds
         self.ignore_status = False  # older firmware: a guest's status request is ignored
         self.logged_in = False
+        self.logins = 0  # logins received
         self.telemetry: bytes | None = bytes([1, 116, 0x01, 0x8A, 1, 103, 0x01, 0x3B])  # 3.94 V, 31.5 °C
         self.commands: list[int] = []
         self.requests: list[tuple[int, int, bytes]] = []  # (request type, out_path_len, path) per binary request
@@ -98,6 +99,7 @@ class FakeCompanion:
                       + path.ljust(64, b"\x00"))
         elif cmd == c.CMD_SEND_LOGIN:
             key, pw = data[:32], data[32:].decode()
+            self.logins += 1
             self._sent(conn)
             if not self.answer_login:
                 return
