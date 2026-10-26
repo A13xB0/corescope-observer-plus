@@ -70,6 +70,12 @@ SHARED_REPLY_WINDOW = 20.0
 # Once the data reply is in, how much longer to wait for the login answer
 # (its role check) when a login was sent with the request.
 LOGIN_ANSWER_GRACE = 3.0
+# After a login, listen this long for its answer before transmitting again.
+# The radio is half duplex and the repeater answers 300 ms after it hears the
+# login (SERVER_RESPONSE_DELAY), so sending the route update straight away
+# talked over the answer. A new key's answer is flooded, so allow for relays.
+LOGIN_ANSWER_WAIT_DIRECT = 6.0
+LOGIN_ANSWER_WAIT_RELAY = 10.0
 SHARED_ATTEMPTS = 2
 # The firmware keeps the shared key in its (RAM, 32-entry) guest ACL after a
 # login, so most polls can just send the request and save the login's airtime.
@@ -304,7 +310,8 @@ def shared_password_order(node_state: dict, attempts: int, personal: bool = Fals
     comes first and "hello" only after blank went unanswered, so a blank-guest
     repeater that answers is never sent "hello"; on a first contact the pair is
     tried twice, once the repeater is already failing only once per poll, so a
-    dead repeater doesn't cost four logins every interval. With the public
+    dead repeater doesn't cost four logins every interval (key_login_fails: polls
+    in a row in which this key's login got no answer). With the public
     shared key only "hello" is ever remembered: a blank login can succeed just
     because another observer put the shared key in the ACL (one key, one entry
     for everyone). With this observer's own key a blank success is our own.
@@ -312,7 +319,7 @@ def shared_password_order(node_state: dict, attempts: int, personal: bool = Fals
     known = node_state.get("shared_password")
     if known == "hello" or (personal and known == ""):
         order = [known] * max(2, attempts)
-    elif int(node_state.get("no_reply_count") or 0) > 0:
+    elif int(node_state.get("key_login_fails") or 0) >= 2:
         order = list(sk.SHARED_PASSWORDS)
     else:
         order = list(sk.SHARED_PASSWORDS) * max(1, attempts)
@@ -351,7 +358,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
     # The ACL entry, its route and the password it took all belong to the key:
     # when the key changes (shared → this observer's own), start over.
     if node_state.get("acl_key") != shared.public_key.hex():
-        for k in ("logged_in_at", "login_checked_at", "shared_password"):
+        for k in ("logged_in_at", "login_checked_at", "shared_password", "key_login_fails"):
             node_state.pop(k, None)
         node_state["acl_key"] = shared.public_key.hex()
     try:
@@ -414,10 +421,21 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 node_state["status_checked_at"] = now
             return collect(data_tag, want_login)
 
-        def login(pw: str, teach: bool) -> None:
+        def login(pw: str, teach: bool) -> sk.LoginResult | None:
+            """Send a login and listen (quietly) for its answer; then, if the
+            route needs teaching, teach it. Returns the login answer, if any."""
             step(f"Shared-key login ({'blank' if pw == '' else repr(pw)}) {route.label}")
             send(sk.build_login(shared, key, out_path, plen, pw)[0], "the login")
-            if teach:
+            answer = None
+            for frame in client.collect_rx(LOGIN_ANSWER_WAIT_RELAY if one_hop else LOGIN_ANSWER_WAIT_DIRECT):
+                r = sk.decode_rx(frame, shared, [key])
+                lr = sk.login_result(r) if r is not None else None
+                if lr is not None:
+                    answer = lr
+                    break
+            step("Login answered" + (" (as admin!)" if answer and answer.is_admin else "")
+                 if answer else "No answer to the login")
+            if teach and not (answer and answer.is_admin):
                 # Teach the return path so replies come direct, not flooded
                 # (firmware: a key with no stored route gets flooded replies).
                 if one_hop:
@@ -425,7 +443,8 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                         shared, key, out_path, plen, return_path=out_path, return_path_len=plen), "the route")
                 else:
                     send(sk.build_route_update(shared, key, out_path, plen), "the route")
-            sleep(LOGIN_SETTLE_SECONDS)
+                sleep(LOGIN_SETTLE_SECONDS)
+            return answer
 
         def overheard() -> bool:
             # We didn't hear it ourselves: give an observer's overhear a moment
@@ -461,16 +480,25 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 in_acl = False
 
         # 2. Log in and request again.
+        login_answered = False
+        logged_in = False
         if reply is None and not admin:
+            logged_in = True
             for pw in shared_password_order(node_state, attempts, personal):
                 if tried:
                     sleep(RETRY_GAP_SECONDS)
-                login(pw, teach=not in_acl)
-                data, lr = request(want_login=True)
+                lr = login(pw, teach=not in_acl)
                 tried += 1
+                data = None
+                if not (lr is not None and lr.is_admin):
+                    # Ask anyway when the login went unanswered: it may have been
+                    # accepted and only its answer missed.
+                    data, late = request(want_login=lr is None)
+                    lr = lr or late
                 if lr is not None:
                     # The repeater answered the login, so its role is known:
                     # only now does the admin re-check count as done.
+                    login_answered = True
                     node_state["login_checked_at"] = now
                     in_acl = True
                     if lr.is_admin:
@@ -484,8 +512,19 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 if lr is None:
                     in_acl = False  # nothing back: re-teach the path on the next try
 
+        if logged_in:
+            if login_answered or reply is not None:
+                node_state.pop("key_login_fails", None)
+            else:
+                node_state["key_login_fails"] = int(node_state.get("key_login_fails") or 0) + 1
         if admin:
-            removed = _admin_removal_drill(client, shared, key, out_path, plen, sleep)
+            # Whatever happens to the removal, the admin answer itself must be
+            # recorded, so the key is disabled here and the owner is alerted.
+            try:
+                removed = _admin_removal_drill(client, shared, key, out_path, plen, sleep)
+            except Exception as exc:  # noqa: BLE001 - never let the drill hide the admin answer
+                step(f"Removing the key's admin access failed: {exc}")
+                removed = False
             return PollResult(ADMIN_STOP, role="admin", key_mode="shared", route=route,
                               admin_seen=True, admin_removed=removed,
                               detail="the repeater answered the shared key as admin")

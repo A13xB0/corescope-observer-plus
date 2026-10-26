@@ -258,6 +258,9 @@ def build_admin_removal(shared: SharedKey, repeater_pubkey: bytes, out_path: byt
     """
     contact = _contact(repeater_pubkey, out_path, out_path_len)
     command = f"setperm {shared.public_key.hex()} 0"
+    # The text-message builder validates the route as a list of hop bytes (the
+    # other builders take bytes); with raw bytes it refused every one-hop route.
+    contact.out_path = list(contact.out_path)
     packet, _crc = PacketBuilder.create_text_message(
         contact, shared.identity(), command, message_type="direct", txt_type=TXT_TYPE_CLI_COMMAND
     )

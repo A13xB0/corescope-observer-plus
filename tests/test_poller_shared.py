@@ -403,4 +403,30 @@ def test_own_key_remembers_a_blank_login(shared):
     assert poller.shared_password_order(state, 2, personal=True) == ["", ""]
     # The shared key never trusts a blank success; a first contact tries the pair twice.
     assert poller.shared_password_order(state, 2, personal=False) == ["", "hello", "", "hello"]
-    assert poller.shared_password_order({"no_reply_count": 3}, 2) == ["", "hello"]
+    assert poller.shared_password_order({"key_login_fails": 2}, 2) == ["", "hello"]
+    assert poller.shared_password_order({"no_reply_count": 9}, 2) == ["", "hello", "", "hello"]
+
+
+
+def test_admin_removal_builds_for_a_one_hop_route(shared):
+    # Earl, 26 Oct: the removal command couldn't be built for a relayed route.
+    rep = FakeRepeater(shared)
+    body = sk.build_admin_removal(shared, rep.pub, VIA.path, poller.path_len_byte(VIA.path, VIA.hash_size))
+    assert body[0] == sk.PRIORITY_NORMAL
+
+
+def test_admin_answer_recorded_even_if_removal_fails(shared, monkeypatch):
+    rep = FakeRepeater(shared, admin=True)
+
+    def broken(*a, **k):
+        raise ValueError("boom")
+    monkeypatch.setattr(poller, "_admin_removal_drill", broken)
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, {}, routes=[DIRECT], sleep=lambda s: None)
+    assert res.code == poller.ADMIN_STOP and res.admin_seen is True and res.admin_removed is False
+
+
+def test_admin_drill_over_one_hop(shared):
+    rep = FakeRepeater(shared, admin=True)
+    res = poller.poll_one_shared(rep, _neighbour(rep, zero_hop=False), shared, {}, routes=[VIA], sleep=lambda s: None)
+    assert res.code == poller.ADMIN_STOP and res.admin_removed is True
+    assert rep.cli_commands == [f"setperm {shared.public_key.hex()} 0"]
