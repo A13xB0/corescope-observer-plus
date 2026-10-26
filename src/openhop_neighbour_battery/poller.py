@@ -49,6 +49,10 @@ NO_BATTERY_RECHECK = 24 * 3600
 # never given up on.
 NO_REPLY_RETRY = 20 * 60
 NO_REPLY_FAST_TRIES = 9
+# A repeater that has answered nothing for this long is checked only this often
+# until it is heard again — no point polling a long-dead one every interval.
+UNHEARD_BACKOFF_AFTER = 24 * 3600
+UNHEARD_BACKOFF_INTERVAL = 24 * 3600
 TEMP_MISSES_BEFORE_DAILY = 3
 TEMP_DAILY = 24 * 3600
 
@@ -154,7 +158,7 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
         login is flooded by the repeater and can arrive late or not at all
         while the route itself works.
         """
-        step(f"Logging in via {route.label}" + (" (verifying)" if not probe else ""))
+        step(f"Logging in {route.label}" + (" (verifying)" if not probe else ""))
         ctx["login_sent"] = True
         node_state["login_attempt_at"] = now
         result = client.login(key, password)
@@ -344,7 +348,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             # (most guests) or the throwaway "hello" some owners set as a guest
             # password. A repeater that wants "hello" never answers a blank
             # login, which just looked like a dead link.
-            step(f"Shared-key login ({'blank' if pw == '' else repr(pw)}) via {route.label}")
+            step(f"Shared-key login ({'blank' if pw == '' else repr(pw)}) {route.label}")
             client.send_raw_packet(sk.build_login(shared, key, out_path, plen, pw)[0])
             if teach:
                 # teach the return path once so replies come direct, not flooded
@@ -495,6 +499,7 @@ def record(node_state: dict, result: PollResult, password_set: bool, now: float)
         node_state["role"] = result.role
     if result.code in (OK, NO_BATTERY):
         node_state["last_success"] = now
+        node_state.pop("unheard_since", None)  # heard again: back to the normal interval
         node_state["battery_mv"] = result.battery_mv
         node_state["no_reply_count"] = 0
         node_state["method"] = result.method
@@ -505,6 +510,7 @@ def record(node_state: dict, result: PollResult, password_set: bool, now: float)
             node_state["uptime_secs"] = result.stats["uptime_secs"]
     elif result.code == NO_REPLY:
         node_state["no_reply_count"] = int(node_state.get("no_reply_count") or 0) + 1
+        node_state.setdefault("unheard_since", now)  # start the clock for the daily backoff
         if node_state["no_reply_count"] >= FORGET_LOGIN_AFTER:
             node_state.pop("logged_in_at", None)
     if result.code in (NEEDS_PASSWORD, PASSWORD_REJECTED):
@@ -537,6 +543,10 @@ def is_due(node_state: dict, interval_s: float, password_set: bool, now: float) 
         # Retry only once the credential changed (set, replaced or removed).
         if node_state.get("blocked_password_set") == password_set and not node_state.get("password_changed"):
             return False
+    # Unheard for a day or more: drop to one check per day until it answers.
+    unheard = node_state.get("unheard_since")
+    if unheard is not None and now - float(unheard) >= UNHEARD_BACKOFF_AFTER:
+        return now - last >= UNHEARD_BACKOFF_INTERVAL
     if code == NO_BATTERY:
         return now - last >= max(interval_s, NO_BATTERY_RECHECK)
     if code == NO_REPLY:

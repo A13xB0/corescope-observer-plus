@@ -353,3 +353,32 @@ def test_path_len_byte():
     assert c.path_len_byte(b"\x41\x28\xa6", 3) == 0x81
     with pytest.raises(ValueError):
         c.path_len_byte(b"\x41\x28", 3)
+
+
+def test_unheard_24h_backs_off_to_daily():
+    # A repeater unheard for 24 h is checked only once a day, until it answers.
+    hour = 3600
+    now0 = 1_000_000.0
+    st = {}
+    # 25 h of silence: unheard_since set a day+ ago, last attempt an hour ago.
+    st["code"] = poller.NO_REPLY
+    st["unheard_since"] = now0 - 25 * hour
+    st["last_attempt"] = now0 - hour
+    st["no_reply_count"] = 50
+    assert not poller.is_due(st, hour, False, now=now0)              # not every hour any more
+    assert poller.is_due(st, hour, False, now=now0 + 24 * hour)     # once a day
+    # A success clears the backoff: record() drops unheard_since.
+    poller.record(st, poller.PollResult(poller.OK, battery_mv=4000), password_set=False, now=now0 + 24 * hour)
+    assert "unheard_since" not in st
+    st["last_attempt"] = now0 + 24 * hour
+    assert poller.is_due(st, hour, False, now=now0 + 25 * hour + 1)  # back to hourly
+
+
+def test_recent_failures_do_not_back_off():
+    # Failing for only a couple of hours still retries at the normal cadence,
+    # not once a day.
+    hour = 3600
+    now0 = 1_000_000.0
+    st = {"code": poller.NO_REPLY, "unheard_since": now0 - 2 * hour,
+          "last_attempt": now0 - hour, "no_reply_count": 50}
+    assert poller.is_due(st, hour, False, now=now0)  # 2 h unheard: still hourly
