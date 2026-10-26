@@ -722,3 +722,31 @@ def test_no_alternative_for_a_repeater_silent_all_day(shared):
     assert res.code == poller.NO_REPLY and not res.alternative
     assert "not heard in the last day" in res.detail
     assert rep.logins == 2  # blank and hello on the best route only, not doubled
+
+
+def test_alternative_is_route_plus_one_request_and_rests_after_failing(shared):
+    rep = FakeRepeater(shared, answer_login=False, answer_status=False, answer_telemetry=False)
+    rep._in_acl = True
+    now = 2_000_000.0
+    sent = []
+    real = rep.send_raw_packet
+
+    def spy(body):
+        p = Packet(); p.read_from(body[1:]); sent.append((p.get_payload_type(), p.path_len))
+        return real(body)
+    rep.send_raw_packet = spy
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60,
+             "last_success": now - 3600, "status_checked_at": now}
+    for i in range(poller.ALT_FAILS_BEFORE_REST):
+        sent.clear()
+        res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT, VIA],
+                                     sleep=lambda s: None, now=now + i, alternative_routes=True)
+        assert res.alternative
+        on_alt = [t for t, plen in sent if plen]  # packets carrying the relay path
+        assert on_alt.count(PAYLOAD_TYPE_ANON_REQ) == 0 and on_alt.count(PAYLOAD_TYPE_REQ) == 1
+        poller.record(state, res, password_set=False, now=now + i)
+    # Failed 3 times as an alternative: rested for a day.
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT, VIA],
+                                 sleep=lambda s: None, now=now + 10, alternative_routes=True)
+    assert not res.alternative
+    assert poller.pick_alternative(state, [DIRECT, VIA], DIRECT, now + 25 * 3600) is VIA

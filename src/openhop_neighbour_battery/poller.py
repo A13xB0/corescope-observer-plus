@@ -83,6 +83,25 @@ ROUTE_REFRESH_SECONDS = 24 * 3600
 ALTERNATIVE_IF_HEARD_WITHIN = 24 * 3600
 
 
+ALT_FAILS_BEFORE_REST = 3
+ALT_REST_SECONDS = 24 * 3600
+
+
+def pick_alternative(node_state: dict, live: list[Route], best: Route, now: float) -> Route | None:
+    """The next route to try after the best got nothing, skipping any that has
+    failed ALT_FAILS_BEFORE_REST times in a row as an alternative (given one
+    try a day after that, in case the link came back)."""
+    fails = node_state.get("alt_fails") or {}
+    for r in live:
+        if r.key == best.key:
+            continue
+        count, last = (fails.get(r.key) or [0, 0])[:2]
+        if int(count) >= ALT_FAILS_BEFORE_REST and now - float(last) < ALT_REST_SECONDS:
+            continue
+        return r
+    return None
+
+
 def heard_recently(node_state: dict, now: float) -> bool:
     return now - float(node_state.get("last_success") or 0) < ALTERNATIVE_IF_HEARD_WITHIN
 # Request tags remembered per repeater, so a late reply to an earlier poll's
@@ -674,20 +693,30 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
 
         reply, admin, logged_in, login_answered = attempt(False)
         used_alternative = False
-        if (reply is None and not admin and not login_answered and alternative_routes
-                and heard_recently(node_state, now) and len(live) > 1 and live[1].key != route.key):
-            # Nothing at all came back on the best route: try the next one once.
-            # Its return path differs, so the route packet always goes again.
+        alt = (pick_alternative(node_state, live, route, now)
+               if (reply is None and not admin and not login_answered and alternative_routes
+                   and heard_recently(node_state, now)) else None)
+        if alt is not None:
+            # Nothing at all came back on the best route: try the next one, with
+            # just its route packet (the return path differs) and one request.
+            # The repeater answered this key within the day, so it has us in
+            # its ACL; any login due was already sent on the best route.
             sleep(RETRY_GAP_SECONDS)
-            route = live[1]
+            route = alt
             out_path = route.path
             plen = path_len_byte(out_path, route.hash_size)
             one_hop = route.hops > 0
             kind = "status" if (not one_hop and status_due) else "telemetry"
             used_alternative = used_alt[0] = True
             step(f"No answer on the best route; trying the alternative route {route.label}")
-            reply, admin, logged_in2, login_answered = attempt(True)
-            logged_in = logged_in or logged_in2
+            teach()
+            tried += 1
+            reply = request()
+            fails = node_state.setdefault("alt_fails", {})
+            if reply is None:
+                fails[route.key] = [int((fails.get(route.key) or [0])[0]) + 1, now]
+            else:
+                fails.pop(route.key, None)
 
         if logged_in:
             if login_answered:
