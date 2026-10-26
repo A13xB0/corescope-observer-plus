@@ -7,6 +7,7 @@
   const $ = (id) => document.getElementById(id);
 
   let config = {};
+  let loaded = {};  // settings as last read from or written to the plugin (see mergeLatest)
   let runtime = {};
   let dirty = false;
   let passwordUpdates = {};
@@ -47,6 +48,45 @@
     const body = await call(`${SETTINGS}?id=${encodeURIComponent(PLUGIN_ID)}`);
     const data = body.data || body;
     config = { ...(data.config || {}) };
+    loaded = JSON.parse(JSON.stringify(config));
+  }
+
+  // Every save writes the whole settings object, so a page opened before a
+  // change made elsewhere (another tab, or the plugin itself) would undo it.
+  // Per-repeater settings are therefore merged: only what this page changed
+  // since it last loaded or saved is applied on top of the latest saved copy.
+  const LIST_KEYS = ["targets", "shared_key_targets", "temperature_targets"];
+  const MAP_KEYS = ["guest_passwords", "poll_intervals"];
+  async function mergeLatest() {
+    let latest;
+    try {
+      const body = await call(`${SETTINGS}?id=${encodeURIComponent(PLUGIN_ID)}`);
+      latest = (body.data || body).config || {};
+    } catch (_) {
+      return;  // save what we have
+    }
+    for (const k of LIST_KEYS) {
+      const page = new Set(config[k] || []), base = new Set(loaded[k] || []);
+      const merged = new Set(latest[k] || []);
+      page.forEach((x) => { if (!base.has(x)) merged.add(x); });
+      base.forEach((x) => { if (!page.has(x)) merged.delete(x); });
+      config[k] = [...merged];
+    }
+    for (const k of MAP_KEYS) {
+      const page = config[k] || {}, base = loaded[k] || {};
+      const merged = { ...(latest[k] || {}) };
+      new Set([...Object.keys(page), ...Object.keys(base)]).forEach((id) => {
+        if (JSON.stringify(page[id]) === JSON.stringify(base[id])) return;  // unchanged here
+        if (id in page) merged[id] = page[id]; else delete merged[id];
+      });
+      config[k] = merged;
+    }
+    const byId = (list) => new Map((list || []).map((m) => [m.node_id, m]));
+    const pageM = byId(config.manual_repeaters), baseM = byId(loaded.manual_repeaters);
+    const mergedM = byId(latest.manual_repeaters);
+    pageM.forEach((m, id) => { if (!baseM.has(id)) mergedM.set(id, m); });
+    baseM.forEach((_m, id) => { if (!pageM.has(id)) mergedM.delete(id); });
+    config.manual_repeaters = [...mergedM.values()];
   }
 
   async function loadRuntime() {
@@ -56,6 +96,7 @@
   }
 
   async function saveConfig(extra = {}) {
+    await mergeLatest();
     const out = { ...config, ...extra };
     await call(SETTINGS, {
       method: "POST",
@@ -66,6 +107,7 @@
     delete config.api_token_input;
     delete config.password_updates;
     delete config.requests;
+    loaded = JSON.parse(JSON.stringify(config));
   }
 
   async function request(type, nodeId, extra) {
@@ -477,10 +519,13 @@
     const timer = setInterval(draw, 1000);
     try {
       const id = await request("test_login", nodeId);
-      const a = await waitForAction("test_login", id, 120000, (p) => { last = p; draw(); }, () => v.stopped || !current());
+      // Up to ~5 min: logins wait for their answer, then CoreScope is asked
+      // up to three times before anything else is sent.
+      const a = await waitForAction("test_login", id, 300000, (p) => { last = p; draw(); }, () => v.stopped || !current());
       if (!current()) return;
       last = a;
       finished = true;
+      if (a.ok === false && a.message) { v.title(esc(a.message)); v.finish("warn"); return; }
       draw();
       v.title(((a.code === "ok" || a.code === "no_battery") && !a.covered ? "Answered — " : "") + esc(pollText(a)));
       v.foot(corescopeText(a.corescope));
@@ -643,7 +688,6 @@
         if ($("remove-password").checked) passwordUpdates[detailsTarget] = "";
         else if (pw) passwordUpdates[detailsTarget] = pw;
       }
-      touched.add(detailsTarget);
       const pis = { ...(config.poll_intervals || {}) };
       const iv = $("node-interval").value;
       if (iv === "default") delete pis[detailsTarget]; else pis[detailsTarget] = Number(iv);
@@ -752,28 +796,8 @@
   // saveAll persists everything pending (page settings + any staged per-repeater
   // password/temperature/shared changes). Used by the page's Save bar and by
   // the details dialog's Apply.
-  // Repeaters whose per-repeater settings this page changed since its last save.
-  const touched = new Set();
-  // Per-repeater settings are merged into the latest saved copy, so a page
-  // loaded before someone else's change can't wipe another repeater's entry.
-  async function mergeLatest() {
-    try {
-      const body = await call(`${SETTINGS}?id=${encodeURIComponent(PLUGIN_ID)}`);
-      const latest = (body.data || body).config || {};
-      for (const k of ["guest_passwords", "poll_intervals"]) {
-        const merged = { ...(latest[k] || {}) };
-        for (const id of touched) {
-          if (id in (config[k] || {})) merged[id] = config[k][id]; else delete merged[id];
-        }
-        config[k] = merged;
-      }
-    } catch (_) { /* save what we have */ }
-  }
-
   async function saveAll() {
     collect();
-    await mergeLatest();
-    touched.clear();
     const extra = Object.keys(passwordUpdates).length ? { password_updates: passwordUpdates } : {};
     saveStatus("Saving…");
     await saveConfig(extra);

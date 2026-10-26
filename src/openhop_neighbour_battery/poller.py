@@ -67,6 +67,17 @@ UNHEARD_BACKOFF_INTERVAL = 24 * 3600
 # ask for packets from a little before we sent (clocks differ).
 ANTENNA_SETTLE_SECONDS = 5.0
 ANTENNA_CLOCK_SLACK = 30.0
+# If CoreScope has nothing yet, look again after these gaps (seconds) before
+# anything else goes on air. Ingest usually takes under 10 s, but right after a
+# flood (30+ observers uploading at once) it took over 20 s (Redstone, 26 Oct:
+# three answered logins missed). An HTTP request costs no airtime.
+ANTENNA_RECHECKS = (10.0, 15.0)
+# The route is re-sent before a no-login request only when it may be gone:
+# after a flooded reply, after a failed poll, or once this long since the last.
+ROUTE_REFRESH_SECONDS = 24 * 3600
+# Request tags remembered per repeater, so a late reply to an earlier poll's
+# request is never read as a login answer.
+RECENT_TAGS = 16
 # A repeater whose replies keep coming back flooded (our route isn't taking)
 # is polled only daily, so it can't flood the mesh every interval.
 FLOOD_REPLIES_BEFORE_DAILY = 2
@@ -428,8 +439,11 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         kind = "status" if (not one_hop and status_due) else "telemetry"
         client.clear_rx_backlog()  # only frames heard during this poll count
         latency: list[float] = []
-        sent_tags: set[int] = set()  # our own request/login tags: never a login answer
+        # Our own request/login tags (this poll's and recent polls'): a reply
+        # carrying one is never a login answer.
+        sent_tags: set[int] = set(int(t) for t in node_state.get("recent_tags") or [])
         flooded: list[bool] = []  # one per reply we got, ours or CoreScope's
+        data_flooded: list[bool] = []  # the same, for data replies only (each follows a route)
         wall = time.time
 
         def send(body: bytes, what: str, kind_: str, detail: str = "") -> dict:
@@ -444,6 +458,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         def teach() -> None:
             # Ignored by a repeater that doesn't have the key in its ACL, so
             # only sent when it does (or is believed to).
+            node_state["route_sent_at"] = now
             step(f"Sending our return route {route.label}")
             if one_hop:
                 e = send(sk.build_route_update(
@@ -473,32 +488,41 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 log.unanswered(entry)
                 return None, None
             step("Not heard here; checking what CoreScope's observers heard")
-            sleep(ANTENNA_SETTLE_SECONDS)
-            frames = antenna(since - ANTENNA_CLOCK_SLACK)
-            if frames is None:
-                step("CoreScope couldn't be reached")
-                log.unanswered(entry, "CoreScope unreachable")
-                return None, None
             data = login = None
-            for raw in frames:
-                r = sk.decode_rx(bytes([sk.PUSH_CODE_LOG_RX_DATA, 0, 0]) + raw, shared, [key])
-                if r is None:
+            fl = None
+            reached = False
+            for gap in (ANTENNA_SETTLE_SECONDS, *ANTENNA_RECHECKS):
+                sleep(gap)
+                frames = antenna(since - ANTENNA_CLOCK_SLACK)
+                if frames is None:
                     continue
-                d, lr = sort(r, data_tag)
-                if d is not None and data is None:
-                    data = d
-                    flooded.append(r.flooded)
-                elif lr is not None and login is None:
-                    login = lr
-                    flooded.append(r.flooded)
+                reached = True
+                for raw in frames:
+                    r = sk.decode_rx(bytes([sk.PUSH_CODE_LOG_RX_DATA, 0, 0]) + raw, shared, [key])
+                    if r is None:
+                        continue
+                    d, lr = sort(r, data_tag)
+                    if d is not None and data is None:
+                        data, fl = d, r.flooded
+                    elif lr is not None and login is None and data_tag is None:
+                        login, fl = lr, r.flooded
+                if data is not None or login is not None:
+                    break
             if data is None and login is None:
-                step("No observer heard an answer either")
-                log.unanswered(entry, "not heard here or by CoreScope's observers")
-            else:
-                how = "flooded" if flooded and flooded[-1] else "direct"
-                step(f"An observer heard the {'reply' if data is not None else 'login answer'} ({how})")
-                log.answered(entry, "CoreScope", flooded=flooded[-1],
-                             what=_describe(kind, data.data) if data is not None else _role(login))
+                if not reached:
+                    step("CoreScope couldn't be reached")
+                    log.unanswered(entry, "CoreScope unreachable")
+                else:
+                    step("No observer heard an answer either")
+                    log.unanswered(entry, "not heard here or by CoreScope's observers")
+                return None, None
+            flooded.append(fl)
+            if data is not None:
+                data_flooded.append(fl)
+            step(f"An observer heard the {'reply' if data is not None else 'login answer'} "
+                 f"({'flooded' if fl else 'direct'})")
+            log.answered(entry, "CoreScope", flooded=fl,
+                         what=_describe(kind, data.data) if data is not None else _role(login))
             return data, login
 
         def request() -> sk.Reply | None:
@@ -516,6 +540,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 if r is not None and r.tag == data_tag:
                     latency.append(time.monotonic() - t0)
                     flooded.append(r.flooded)
+                    data_flooded.append(r.flooded)
                     step("Reply received" + (" (flooded: the repeater had no route back)" if r.flooded else ""))
                     log.answered(entry, "radio", flooded=r.flooded, after_s=latency[-1],
                                  what=_describe(kind, r.data))
@@ -548,9 +573,14 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         in_acl = bool(node_state.get("logged_in_at"))
         recheck_due = now - float(node_state.get("login_checked_at") or 0) >= SHARED_ADMIN_RECHECK_SECONDS
 
-        # 1. Still in the guest ACL: route, then the request, no login.
+        # 1. Still in the guest ACL: the request, no login; the route first
+        #    only when it may have been lost (see ROUTE_REFRESH_SECONDS).
+        route_stale = (int(node_state.get("flood_replies") or 0) > 0
+                       or node_state.get("code") not in (OK, NO_BATTERY)
+                       or now - float(node_state.get("route_sent_at") or 0) >= ROUTE_REFRESH_SECONDS)
         if in_acl and not recheck_due:
-            teach()
+            if route_stale:
+                teach()
             tried += 1
             reply = request()
             if reply is None:
@@ -580,8 +610,11 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                     break
                 if pw or personal:
                     node_state["shared_password"] = pw  # see shared_password_order
-                if not in_acl:
-                    if flooded and flooded[-1]:
+                answer_flooded = bool(flooded and flooded[-1])
+                if not in_acl or answer_flooded:
+                    # A flooded answer means the repeater has no route for us
+                    # (a new entry, or a lapsed one on the admin re-check).
+                    if answer_flooded:
                         step("The login answer was flooded; waiting for it to clear before sending our route")
                         sleep(FLOOD_CLEAR_SECONDS)
                     teach()  # now the repeater can read it
@@ -594,11 +627,15 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 node_state.pop("key_login_fails", None)
             else:
                 node_state["key_login_fails"] = int(node_state.get("key_login_fails") or 0) + 1
-        if flooded:
-            if flooded[-1]:
+        # Only a data reply counts: each one follows a route packet, so a
+        # flooded one means the route didn't take. A new key's first login
+        # answer floods whatever we do and isn't held against the repeater.
+        if data_flooded:
+            if data_flooded[-1]:
                 node_state["flood_replies"] = int(node_state.get("flood_replies") or 0) + 1
             else:
                 node_state.pop("flood_replies", None)
+        node_state["recent_tags"] = sorted(sent_tags)[-RECENT_TAGS:]
         if admin:
             # Whatever happens to the removal, the admin answer itself must be
             # recorded, so the key is disabled here and the owner is alerted.
@@ -797,7 +834,11 @@ def is_due(node_state: dict, interval_s: float, password_set: bool, now: float) 
     if code == NO_BATTERY:
         return now - last >= max(interval_s, NO_BATTERY_RECHECK)
     if code == NO_REPLY:
-        fast = int(node_state.get("no_reply_count") or 0) < NO_REPLY_FAST_TRIES
+        # Quick retries only for a repeater that answered within the last day:
+        # one that has been silent longer (or never answered) waits the normal
+        # interval, so a dead link doesn't cost a login every 20 minutes.
+        recent = now - float(node_state.get("last_success") or 0) < 24 * 3600
+        fast = recent and int(node_state.get("no_reply_count") or 0) < NO_REPLY_FAST_TRIES
         return now - last >= (min(interval_s, NO_REPLY_RETRY) if fast else interval_s)
     return now - last >= interval_s
 

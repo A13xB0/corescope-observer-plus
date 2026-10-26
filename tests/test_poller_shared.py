@@ -607,3 +607,47 @@ def test_each_repeater_keeps_its_own_last_twenty():
     e = la.sent("telemetry request", "direct")
     la.answered(e, "radio", flooded=False)
     assert a[-1]["reply"] == "answered" and log.entries[-1]["reply"] == "answered"
+
+
+def test_corescope_is_asked_again_before_giving_up(shared):
+    # The first look finds nothing (ingest still behind); the second has the
+    # login answer, so no second login goes out.
+    rep = FakeRepeater(shared, battery_mv=4010, deaf=True, require_login=True)
+    calls = []
+
+    def antenna(since):
+        calls.append(since)
+        return [] if len(calls) == 1 else list(rep.air)
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, {"status_checked_at": 2e6}, routes=[DIRECT],
+                                 sleep=lambda s: None, now=2e6, antenna=antenna)
+    assert res.code == poller.OK and rep.logins == 1
+
+
+def test_route_not_resent_while_fresh(shared):
+    rep = FakeRepeater(shared, battery_mv=4012)
+    rep._in_acl = rep.route_known = True
+    now = 2_000_000.0
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60,
+             "route_sent_at": now - 3600, "code": poller.OK}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                 sleep=lambda s: None, now=now)
+    assert res.code == poller.OK and rep.paths_taught == 0  # 1 packet, not 2
+    state.update(route_sent_at=now - 25 * 3600)
+    poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None, now=now)
+    assert rep.paths_taught == 1  # refreshed once a day
+
+
+def test_quick_retries_only_for_recently_heard_repeaters():
+    now = 2_000_000.0
+    heard = {"code": poller.NO_REPLY, "no_reply_count": 1, "last_attempt": now - 1500, "last_success": now - 3600}
+    silent = {"code": poller.NO_REPLY, "no_reply_count": 1, "last_attempt": now - 1500}
+    assert poller.is_due(heard, 3600, False, now)
+    assert not poller.is_due(silent, 3600, False, now)
+
+
+def test_first_contact_flood_is_not_held_against_the_repeater(shared):
+    rep = FakeRepeater(shared, battery_mv=4012)  # new entry: the login answer floods
+    state: dict = {}
+    poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None)
+    assert "flood_replies" not in state
+    assert state["recent_tags"]  # this poll's tags are remembered

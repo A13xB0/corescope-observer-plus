@@ -38,7 +38,10 @@ from .storage import Secrets, State
 
 LOG = logging.getLogger("openhop.neighbour_battery")
 
-MAX_POLLS_PER_CYCLE = 8
+MAX_POLLS_PER_CYCLE = 8  # scheduled cycles; a forced Check now polls every target
+# A forced Test of the same repeater within this long is refused: each one can
+# put logins on air, and a burst of them only adds load.
+TEST_COOLDOWN_S = 60
 # A short settle before confirming against CoreScope, so a just-published
 # own-key reading has a moment to be ingested.
 CORESCOPE_SETTLE_S = 2.0
@@ -377,7 +380,7 @@ class App:
             return out
         s = self.settings
         with CompanionClient(self.companion_host, port) as client:
-            for i, n in enumerate(due[:MAX_POLLS_PER_CYCLE]):
+            for i, n in enumerate(due if force else due[:MAX_POLLS_PER_CYCLE]):
                 routes = self.routes_for(n)
                 if i:
                     # A poll through a relay costs the relay two transmissions.
@@ -626,6 +629,12 @@ class App:
         """Test / poll one repeater now, streaming each step to the dialog."""
         node_id = str(req.get("node_id") or "").lower()
         started = time.time()
+        last = float(self.state.node(node_id).get("last_attempt") or 0)
+        if started - last < TEST_COOLDOWN_S:
+            wait = int(TEST_COOLDOWN_S - (started - last)) + 1
+            result.update(self._node_view(node_id), running=False, ok=False,
+                          message=f"Polled {int(started - last)} s ago. Wait {wait} s before testing it again.")
+            return
         self.refresh()
         # Announce "running" before the poll (it can take up to a minute) so
         # the page shows it working, not stalled.
