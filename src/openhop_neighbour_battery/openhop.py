@@ -433,3 +433,28 @@ def corescope_latest_battery_ts(base_url: str, node_id: str, *, timeout: float =
         return None
     ts = body.get("latest_ts") if isinstance(body, dict) else None
     return ts if isinstance(ts, str) and ts else None
+
+
+def corescope_battery_snapshot(base_url: str, node_id: str, *, timeout: float = 5.0) -> dict | None:
+    """CoreScope's current battery view of a node, for live confirmation that a
+    reading landed — the only "did it work" signal for a shared-key poll, whose
+    reading the plugin never publishes (CoreScope decodes it from an observer's
+    overheard reply). Returns {latest_ts, latest_mv, status, by, key_mode}, or
+    None on any error.
+    """
+    try:
+        r = requests.get(f"{base_url}/api/nodes/{node_id}/battery", params={"days": 1}, timeout=timeout)
+        r.raise_for_status()
+        body = r.json()
+    except (requests.RequestException, ValueError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    sel = body.get("selected") if isinstance(body.get("selected"), dict) else {}
+    return {
+        "latest_ts": body.get("latest_ts") or None,
+        "latest_mv": body.get("latest_mv"),
+        "status": body.get("status"),
+        "by": sel.get("observer_name") or "",
+        "key_mode": sel.get("key_mode") or "",
+    }

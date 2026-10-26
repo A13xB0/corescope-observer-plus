@@ -72,15 +72,47 @@
     return saveConfig({ requests: [{ id, type, node_id: nodeId || "" }] }).then(() => id);
   }
 
-  async function waitForAction(type, id, timeoutMs = 90000) {
+  async function waitForAction(type, id, timeoutMs = 90000, onProgress) {
     const end = Date.now() + timeoutMs;
     while (Date.now() < end) {
-      await new Promise((r) => setTimeout(r, 2500));
+      await new Promise((r) => setTimeout(r, 2000));
       await loadRuntime();
       const a = (runtime.actions || {})[type];
-      if (a && a.id === id) { render(); return a; }
+      if (a && a.id === id) {
+        if (onProgress) onProgress(a);
+        // `running` is set while the plugin is still working through the
+        // request; the result isn't final until it clears. Older plugins
+        // don't send it, so an absent flag means done, as before.
+        if (!a.running) { render(); return a; }
+      }
     }
     throw new Error("The plugin did not answer in time. Is it running?");
+  }
+
+  // pollText/pollKind describe one poll outcome (a check-now row, a test, or
+  // a node's recorded state) in the same words everywhere.
+  function pollText(x) {
+    const route = x.route ? ` ${x.route}` : "";
+    const temp = x.temperature_c != null ? `, ${Number(x.temperature_c).toFixed(1)} °C` : "";
+    const role = x.role ? " as " + x.role : "";
+    if (x.code === "ok") return `${(x.battery_mv / 1000).toFixed(2)} V${role}${route}${temp}`;
+    if (x.code === "no_battery") return `no battery fitted${role}${route}${temp}`;
+    return (CODE_TEXT[x.code] || x.code || "no answer") + (x.message && x.message !== x.code ? ": " + x.message : "");
+  }
+  function pollKind(x) {
+    return x.code === "ok" || x.code === "no_battery" ? (x.role === "admin" ? "warn" : "good") : "bad";
+  }
+
+  // corescopeText turns a CoreScope confirmation (action.corescope / a
+  // progress row's .corescope) into a short "did it land?" line.
+  function corescopeText(cs) {
+    if (!cs) return "";
+    if (!cs.reachable) return "CoreScope unreachable";
+    if (!cs.latest_ts) return "CoreScope has nothing for it yet";
+    const by = cs.by ? ` (${cs.by})` : "";
+    return (cs.fresh ? "CoreScope has it" : "CoreScope last saw")
+      + (cs.latest_mv != null ? ` ${(cs.latest_mv / 1000).toFixed(2)} V` : "")
+      + by + " · " + ago(Date.parse(cs.latest_ts) / 1000);
   }
 
   function ago(ts) {
@@ -295,32 +327,75 @@
   }
 
   async function test(nodeId) {
-    notice("Asking for status, logging in if needed. This can take up to a minute…");
+    // Feedback goes in the dialog, not the page's notice bar, which the open
+    // modal hides. An elapsed timer shows it is working through the up-to-a-
+    // minute login, and the result (plus CoreScope's confirmation) lands here.
+    const box = $("test-status");
+    const nm = (((runtime.nodes || []).find((x) => x.node_id === nodeId)) || {}).name || nodeId.slice(0, 8);
+    const t0 = Date.now();
+    const elapsed = () => Math.round((Date.now() - t0) / 1000);
+    const show = (html, kind) => { if (box) { box.hidden = false; box.className = "test-status " + (kind || ""); box.innerHTML = html; } };
+    show(`<span class="spin"></span> Testing <strong>${esc(nm)}</strong>…`, "");
+    const timer = setInterval(() => show(`<span class="spin"></span> Testing <strong>${esc(nm)}</strong>… ${elapsed()}s`, ""), 1000);
     try {
       const id = await request("test_login", nodeId);
-      const a = await waitForAction("test_login", id);
-      const extra = `${a.route ? ` ${a.route}` : ""}${a.temperature_c != null ? `, ${Number(a.temperature_c).toFixed(1)} °C` : ""}`;
-      const text = a.code === "ok" ? `Answered${a.role ? " as " + a.role : ""}${extra}: ${(a.battery_mv / 1000).toFixed(2)} V`
-        : a.code === "no_battery" ? `Answered${a.role ? " as " + a.role : ""}${extra}: no battery fitted (0 mV)`
-        : `${CODE_TEXT[a.code] || a.code || "Failed"}${a.message && a.message !== a.code ? ": " + a.message : ""}`;
-      notice(text, a.code === "ok" || a.code === "no_battery" ? (a.role === "admin" ? "warn" : "good") : "bad");
+      const a = await waitForAction("test_login", id, 90000, (p) => {
+        if (p.running) show(`<span class="spin"></span> Testing <strong>${esc(nm)}</strong>… ${elapsed()}s`, "");
+      });
+      clearInterval(timer);
+      const head = (a.code === "ok" || a.code === "no_battery") ? `Answered — ${pollText(a)}` : pollText(a);
+      const cs = corescopeText(a.corescope);
+      show(`<div>${esc(head)}</div>` + (cs ? `<div class="muted small">${esc(cs)}</div>` : ""), pollKind(a));
     } catch (e) {
-      notice(e.message, "bad");
+      clearInterval(timer);
+      show(esc(e.message), "bad");
     }
   }
 
   // Poll every selected neighbour now (saved selection), then publish.
+  // One row of the live Check-now / Test panels.
+  function progressRow(name, statusHtml, kind) {
+    const icon = kind === "good" ? "✓" : kind === "bad" ? "✗" : kind === "warn" ? "!" : kind === "muted" ? "–" : "";
+    return `<div class="cp-row cp-${kind}"><span class="cp-icon" aria-hidden="true">${icon}</span>`
+      + `<span class="cp-name">${esc(name)}</span><span class="cp-status">${statusHtml}</span></div>`;
+  }
+
   async function checkNow() {
-    if (dirty) { notice("Save first, so the check uses your selection.", "warn"); return; }
-    if (!(config.targets || []).length) { notice("Select at least one neighbour first.", "warn"); return; }
-    notice(`Checking ${config.targets.length} neighbour(s). Each can take up to a minute…`);
+    const panel = $("check-progress");
+    const panelMsg = (html, kind) => { if (panel) { panel.hidden = false; panel.innerHTML = `<div class="cp-head ${kind || ""}">${html}</div>`; } };
+    if (dirty) { panelMsg("Save first, so the check uses your selection.", "warn"); return; }
+    const targets = (config.targets || []).slice();
+    if (!targets.length) { panelMsg("Select at least one repeater first (tick it in the list).", "warn"); return; }
+    const nameOf = (id) => (((runtime.nodes || []).find((x) => x.node_id === id)) || {}).name || id.slice(0, 8);
+    // draw the whole panel from an action snapshot: a row per target, filled
+    // in as each result (and CoreScope confirmation) streams back.
+    const draw = (a) => {
+      if (!panel) return;
+      const done = {};
+      ((a && a.progress) || []).forEach((p) => { done[p.node_id] = p; });
+      const finished = a && !a.running;
+      const rows = targets.map((id) => {
+        const p = done[id];
+        if (p) {
+          const cs = corescopeText(p.corescope);
+          return progressRow(nameOf(id), esc(pollText(p)) + (cs ? ` <span class="muted small">· ${esc(cs)}</span>` : ""), pollKind(p));
+        }
+        return progressRow(nameOf(id), finished ? "no route — not polled" : "waiting…", finished ? "muted" : "pending");
+      }).join("");
+      const n = (a && a.done) || 0;
+      const head = finished
+        ? `<strong>Done.</strong> <span class="muted small">${esc((a && a.message) || "")}</span>`
+        : `<span class="spin"></span> <strong>Checking ${targets.length} repeater${targets.length === 1 ? "" : "s"}…</strong> <span class="muted small">${n}/${targets.length} · up to a minute each</span>`;
+      panel.hidden = false;
+      panel.innerHTML = `<div class="cp-head">${head}</div>` + rows;
+    };
     $("check-now").disabled = true;
+    draw({ running: true, progress: [], done: 0 });
     try {
       const id = await request("check_now");
-      const a = await waitForAction("check_now", id, 120000 * config.targets.length);
-      notice(a.ok ? `Checked: ${a.message}` : a.message, a.ok && a.readings ? "good" : "bad");
+      await waitForAction("check_now", id, 120000 * targets.length + 20000, draw);
     } catch (e) {
-      notice(e.message, "bad");
+      panelMsg(esc(e.message), "bad");
     } finally {
       $("check-now").disabled = false;
     }
@@ -344,6 +419,7 @@
     const n = (runtime.nodes || []).find((x) => x.node_id === nodeId);
     if (!n) return;
     $("details-title").textContent = n.name;
+    $("test-status").hidden = true;  // clear any result from a previous test
     $("login-password").value = "";
     $("remove-password").checked = false;
     const pending = passwordUpdates[nodeId];

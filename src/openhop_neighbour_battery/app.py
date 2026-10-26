@@ -16,6 +16,7 @@ from .openhop import (
     OpenHopError,
     Route,
     companion_port,
+    corescope_battery_snapshot,
     corescope_latest_battery_ts,
     fetch_shared_guest_key,
     load_openhop_config,
@@ -30,6 +31,9 @@ from .storage import Secrets, State
 LOG = logging.getLogger("openhop.neighbour_battery")
 
 MAX_POLLS_PER_CYCLE = 8
+# A short settle before confirming against CoreScope, so a just-published
+# own-key reading has a moment to be ingested.
+CORESCOPE_SETTLE_S = 2.0
 QUEUE_MAX = 200
 QUEUE_MAX_AGE = 2 * 3600  # CoreScope drops readings older than this
 
@@ -175,6 +179,19 @@ class App:
             return False
         return now - _ts(ts) < within_s
 
+    def _corescope_confirm(self, node_id: str, since: float) -> dict:
+        """CoreScope's view of a node's battery for the live "did it land?"
+        line. fresh is True when CoreScope's newest reading is from after the
+        poll started, i.e. this poll (or an observer's overhear of it) reached
+        CoreScope. Always a dict so the UI can show "checked, nothing yet"."""
+        snap = corescope_battery_snapshot(self.settings.corescope_url, node_id)
+        if not snap:
+            return {"reachable": False}
+        ts = snap.get("latest_ts")
+        snap["reachable"] = True
+        snap["fresh"] = bool(ts) and _ts(ts) >= since - 5
+        return snap
+
     def shared_key(self, now: float | None = None) -> sk.SharedKey | None:
         """The shared guest key, fetched from CoreScope and cached.
 
@@ -214,8 +231,11 @@ class App:
             return False
         return self.shared_key() is not None
 
-    def poll(self, node_ids: list[str], *, force: bool = False) -> list[dict]:
-        """Poll the given targets that are zero-hop now; return payload readings."""
+    def poll(self, node_ids: list[str], *, force: bool = False, on_node=None) -> list[dict]:
+        """Poll the given targets that are zero-hop now; return payload readings.
+
+        on_node(neighbour, state) is called after each repeater is polled, so a
+        caller (Check now, Test) can stream live progress to the page."""
         if not self.check.get("companion", {}).get("ok") or not self.ohcfg:
             return []
         port = companion_port(self.ohcfg, self.settings.companion_name)
@@ -289,6 +309,8 @@ class App:
                 if result.code in (OK, NO_BATTERY) and result.key_mode != "shared":
                     out.append(reading(n, result, time.time()))
                 self.state.save()
+                if on_node:
+                    on_node(n, st)
         return out
 
     def _shared_key_runtime(self) -> dict:
@@ -413,7 +435,13 @@ class App:
                     result["message"] = self.connect()["message"]
                 elif kind in ("test_login", "poll_now"):
                     node_id = str(req.get("node_id") or "").lower()
+                    started = time.time()
                     self.refresh()
+                    # Announce "running" before the poll (it can take up to a
+                    # minute) so the page shows it working, not stalled.
+                    result["running"] = True
+                    self.actions[kind] = result
+                    self.write_runtime()
                     readings = self.poll([node_id], force=True)
                     st = self.state.node(node_id)
                     result["code"] = st.get("code")
@@ -425,18 +453,56 @@ class App:
                     if kind == "poll_now" and readings:
                         self.queue(readings)
                         self.flush()
+                    # Confirm against CoreScope: for a shared-key repeater this is
+                    # the real "did it land?", since the reading is never published
+                    # — CoreScope decodes it from an observer's overheard reply.
+                    time.sleep(CORESCOPE_SETTLE_S)
+                    result["corescope"] = self._corescope_confirm(node_id, started)
+                    result["running"] = False
                 elif kind == "check_now":
+                    started = time.time()
                     self.refresh()
-                    readings = self.poll(self.settings.targets, force=True)
+                    targets = list(self.settings.targets)
+                    result["total"] = len(targets)
+                    result["done"] = 0
+                    result["progress"] = []
+                    result["running"] = True
+                    self.actions[kind] = result
+                    self.write_runtime()
+
+                    def on_node(n, st):
+                        # Stream each repeater's result to the page as it lands,
+                        # so Check now shows live progress instead of nothing.
+                        result["progress"].append({
+                            "node_id": n.node_id,
+                            "name": st.get("name") or n.name,
+                            "code": st.get("code"),
+                            "battery_mv": st.get("battery_mv"),
+                            "route": st.get("last_route_label") or "",
+                            "temperature_c": st.get("temperature_c") if st.get("temp_code") == "ok" else None,
+                        })
+                        result["done"] = len(result["progress"])
+                        self.actions[kind] = result
+                        self.write_runtime()
+
+                    readings = self.poll(targets, force=True, on_node=on_node)
                     if readings:
                         self.queue(readings)
                         self.flush()
-                    codes = [self.state.node(n).get("code") or "?" for n in self.settings.targets]
+                    # Second pass: confirm each polled repeater against CoreScope
+                    # (did the reading land?), streaming each as it is checked.
+                    time.sleep(CORESCOPE_SETTLE_S)
+                    for p in result["progress"]:
+                        p["corescope"] = self._corescope_confirm(p["node_id"], started)
+                        self.actions[kind] = result
+                        self.write_runtime()
+                    codes = [self.state.node(n).get("code") or "?" for n in targets]
                     result["readings"] = len(readings)
+                    result["running"] = False
                     result["message"] = (
-                        f"{len(readings)} of {len(self.settings.targets)} read"
+                        f"{len(readings)} of {len(targets)} read"
                         + (f" ({', '.join(sorted(set(c for c in codes if c not in ('ok', 'no_battery'))))} for the rest)"
-                           if len(readings) < len(self.settings.targets) else "")
+                           if len(readings) < len(targets) else "")
                     )
                 elif kind == "lookup":
                     query = str(req.get("query") or "").strip()

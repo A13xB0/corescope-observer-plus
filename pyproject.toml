@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openhop-neighbour-battery-plugin"
-version = "0.5.3"
+version = "0.5.4"
 description = "openHop plugin: battery readings from directly heard repeaters, published as this repeater's observer"
 readme = "README.md"
 requires-python = ">=3.10"

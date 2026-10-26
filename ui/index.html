@@ -89,6 +89,7 @@
         <h2 id="nodes-h">Repeaters <span id="selected-count" class="muted small"></span></h2>
         <button id="check-now" class="button ghost" type="button">Check now</button>
       </div>
+      <div id="check-progress" class="check-progress" hidden></div>
       <div class="table-wrap">
       <table class="table">
         <thead><tr><th scope="col"></th><th scope="col">Repeater</th><th scope="col">Route</th><th scope="col">Heard</th><th scope="col">Login</th><th scope="col">Battery</th><th scope="col" class="temp-col">Temp</th><th scope="col"></th></tr></thead>
@@ -139,6 +140,7 @@
       </table>
       </div>
       <p class="muted small">From adverts heard in the last day. At most 2 routes are tried per poll, and the route that last answered moves to the top.</p>
+      <div id="test-status" class="test-status" hidden></div>
       <div class="actions">
         <button value="remove" id="remove-manual" class="button ghost" type="submit" hidden>Remove repeater</button>
         <button value="test" class="button ghost" type="submit">Test now</button>

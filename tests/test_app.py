@@ -132,6 +132,11 @@ def test_check_now_polls_every_target_and_publishes(tmp_path, monkeypatch):
             published.append(list(readings))
 
     monkeypatch.setattr(app_mod, "Publisher", P)
+    # No network and no delay in the CoreScope confirmation pass.
+    monkeypatch.setattr(app_mod, "CORESCOPE_SETTLE_S", 0)
+    monkeypatch.setattr(app_mod, "corescope_battery_snapshot",
+                        lambda url, nid, **k: {"latest_ts": "2026-10-26T09:00:00Z", "latest_mv": 3240,
+                                               "status": "ok", "by": "West Lomond", "key_mode": ""})
     try:
         a, _ = make_app(tmp_path, fake, targets=[NODE], brokers=["ScotMesh"],
                         requests=[{"id": "c1", "type": "check_now"}])
@@ -143,8 +148,13 @@ def test_check_now_polls_every_target_and_publishes(tmp_path, monkeypatch):
         a.state.node(NODE)["last_attempt"] = 10 ** 12
         a.run_requests()
         assert published and published[0][0]["node_id"] == NODE
-        assert a.actions["check_now"]["readings"] == 1
-        assert a.actions["check_now"]["message"] == "1 of 1 read"
+        act = a.actions["check_now"]
+        assert act["readings"] == 1
+        assert act["message"] == "1 of 1 read"
+        assert act["running"] is False
+        # The live view got a per-node row with its CoreScope confirmation.
+        assert len(act["progress"]) == 1 and act["progress"][0]["node_id"] == NODE
+        assert act["progress"][0]["corescope"]["reachable"] is True
     finally:
         fake.close()
 
