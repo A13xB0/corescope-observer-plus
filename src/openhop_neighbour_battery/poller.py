@@ -296,23 +296,27 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
 def shared_password_order(node_state: dict, attempts: int, personal: bool = False) -> list[str]:
     """The passwords to log in with, one per try, under a guest key.
 
-    A repeater known to take a password is sent only that one; otherwise blank
-    comes first and "hello" only if blank goes unanswered — so a blank-guest
-    repeater that answers is never sent "hello". With the public shared key
-    only "hello" is ever remembered: a blank login can succeed merely because
-    another observer put the shared key in the ACL (one key, one entry for
-    everyone), so it says nothing about the guest password. With this
-    observer's own key a blank success is our own entry, so it counts.
+    Every password gets a retry: a lost login looks exactly like a refused one
+    (the firmware doesn't answer a wrong password), and the login is the
+    longest packet in the exchange, so the likeliest to collide.
+
+    A repeater known to take a password is sent only that one. Otherwise blank
+    comes first and "hello" only after blank went unanswered, so a blank-guest
+    repeater that answers is never sent "hello"; on a first contact the pair is
+    tried twice, once the repeater is already failing only once per poll, so a
+    dead repeater doesn't cost four logins every interval. With the public
+    shared key only "hello" is ever remembered: a blank login can succeed just
+    because another observer put the shared key in the ACL (one key, one entry
+    for everyone). With this observer's own key a blank success is our own.
     """
     known = node_state.get("shared_password")
     if known == "hello" or (personal and known == ""):
-        order = [known]
-    else:
+        order = [known] * max(2, attempts)
+    elif int(node_state.get("no_reply_count") or 0) > 0:
         order = list(sk.SHARED_PASSWORDS)
-    while len(order) < max(1, attempts):
-        order.append(order[-1])
+    else:
+        order = list(sk.SHARED_PASSWORDS) * max(1, attempts)
     return order
-
 
 def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey, node_state: dict, *,
                     routes: list[Route], read_temperature: bool = False, now: float | None = None,

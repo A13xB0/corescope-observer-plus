@@ -278,9 +278,14 @@ class App:
         """(Re)register this observer's polling key with CoreScope, signed by
         the repeater key. A failure keeps an earlier registration until it
         lapses; a CoreScope without the feature (404) means the shared key."""
-        body = guest_key.registration_body(LocalIdentity(self.ohcfg.identity_key), self.own_key(), now)
-        status, resp = register_guest_key(self.settings.corescope_url, body)
         reg["tried_at"] = now
+        try:
+            body = guest_key.registration_body(LocalIdentity(self.ohcfg.identity_key), self.own_key(), now)
+        except ValueError as exc:
+            reg["error"] = str(exc)
+            LOG.warning("can't register the polling key: %s", exc)
+            return
+        status, resp = register_guest_key(self.settings.corescope_url, body)
         if status == 200 and resp.get("ok"):
             reg.update(ok=True, ok_at=now, unsupported=False, error="", expires_at=resp.get("expires_at"))
             LOG.info("own polling key %s registered with CoreScope", self.own_key().hex8)

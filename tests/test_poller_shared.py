@@ -297,7 +297,7 @@ def test_known_hello_is_sent_alone(shared, monkeypatch):
     state = {"acl_key": shared.public_key.hex(), "shared_password": "hello"}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None)
     assert res.code == poller.OK
-    assert sent == ["hello"]  # never a blank try for a repeater known to want hello
+    assert sent == ["hello"]  # never a blank try for a repeater known to want hello (answered first time)
 
 
 def test_hello_tried_after_blank_unanswered(shared, monkeypatch):
@@ -401,4 +401,6 @@ def test_own_key_remembers_a_blank_login(shared):
                                  sleep=lambda s: None, personal=True)
     assert res.code == poller.OK and state["shared_password"] == ""
     assert poller.shared_password_order(state, 2, personal=True) == ["", ""]
-    assert poller.shared_password_order(state, 2, personal=False) == ["", "hello"]
+    # The shared key never trusts a blank success; a first contact tries the pair twice.
+    assert poller.shared_password_order(state, 2, personal=False) == ["", "hello", "", "hello"]
+    assert poller.shared_password_order({"no_reply_count": 3}, 2) == ["", "hello"]

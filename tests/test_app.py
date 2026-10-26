@@ -13,10 +13,21 @@ from openhop_neighbour_battery.settings import parse
 NODE = "02f1" + "ab" * 30
 
 
+def _expanded_key() -> bytes:
+    """A MeshCore-style 64-byte repeater key: SHA-512 of a seed with the scalar
+    clamped, as real repeaters have (random bytes alone don't sign consistently)."""
+    import hashlib
+    k = bytearray(hashlib.sha512(os.urandom(32)).digest())
+    k[0] &= 248
+    k[31] &= 63
+    k[31] |= 64
+    return bytes(k)
+
+
 def write_openhop_config(tmp_path, port):
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump({
-        "repeater": {"node_name": "Cadham Village", "identity_key": os.urandom(64)},
+        "repeater": {"node_name": "Cadham Village", "identity_key": _expanded_key()},
         "mqtt_brokers": {"iata_code": "EDI", "brokers": [
             {"name": "ScotMesh", "host": "mqtt.example", "port": 443, "format": "meshcoretomqtt",
              "use_jwt_auth": True, "audience": "mqtt.example", "enabled": True,

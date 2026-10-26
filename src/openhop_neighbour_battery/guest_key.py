@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 from openhop_core import LocalIdentity
+from openhop_core.protocol.identity import Identity
 
 from . import shared_key as sk
 
@@ -62,6 +63,11 @@ def registration_body(observer: LocalIdentity, key: sk.SharedKey, now: float | N
     """The POST /api/guest-keys body: the key, signed by this observer."""
     observer_id = observer.get_public_key().hex()
     ts = int(now or time.time())
-    sig = observer.sign(registration_message(observer_id, key.public_key.hex(), ts))
+    msg = registration_message(observer_id, key.public_key.hex(), ts)
+    sig = observer.sign(msg)
+    # CoreScope checks this signature against the observer's key; check it
+    # here first so a key that can't sign verifiably says so plainly.
+    if not Identity(observer.get_public_key()).verify(msg, sig):
+        raise ValueError("this repeater's key doesn't produce a verifiable signature")
     return {"observer_id": observer_id, "public_key": key.public_key.hex(),
             "private_key": key.private_key.hex(), "timestamp": ts, "signature": sig.hex()}
