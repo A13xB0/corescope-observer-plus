@@ -65,6 +65,7 @@ _RX_HEADER = 3
 # A login reply's admin_code; only this one value is admin (a room server sends
 # 2 for a plain guest, so bool() would misread it).
 LOGIN_ADMIN_CODE_ADMIN = 1
+RESP_SERVER_LOGIN_OK = 0
 
 class UnsafeSharedPassword(Exception):
     """A password that is not blank or "hello" was offered for the shared key."""
@@ -147,6 +148,8 @@ class Reply:
     repeater_pubkey: bytes
     tag: int  # the request timestamp the reply echoes
     data: bytes
+    # The repeater flooded it: it had no stored route back to the key.
+    flooded: bool = False
 
 
 def _contact(repeater_pubkey: bytes, out_path: bytes, out_path_len: int) -> SimpleNamespace:
@@ -303,7 +306,10 @@ def decode_rx(frame: bytes, shared: SharedKey, repeaters: list[bytes]) -> Reply 
             plaintext = _unwrap_path(plaintext)
             if plaintext is None:
                 return None
-        return _parse_response(pubkey, plaintext)
+        reply = _parse_response(pubkey, plaintext)
+        if reply is not None and packet.is_route_flood():
+            reply = Reply(reply.repeater_pubkey, reply.tag, reply.data, flooded=True)
+        return reply
     return None
 
 
@@ -337,15 +343,17 @@ def login_result(reply: Reply) -> LoginResult | None:
     A login reply carries the repeater's own clock first, not the request tag
     (simple_repeater MyMesh.cpp), so it can't be matched by tag; instead it is
     told apart by shape. After that 4-byte clock it is response_code(1) +
-    keep_alive(1) + admin_code(1) + permissions(1) + random(4). The response
-    code is 0 or 1 and the admin code is 0..3; a stats or telemetry reply's
-    bytes fall outside that, so this returns None for them and no non-login
-    reply is ever read as admin.
+    keep_alive(1) + admin_code(1) + permissions(1) + random(4), and the
+    response code is always RESP_SERVER_LOGIN_OK (0). That 0 is what rules out
+    a telemetry reply: CayenneLPP starts with channel 1, then the voltage type
+    and its high byte, which is 1 for 2.56–5.11 V and so read as "admin" when
+    only codes 0 and 1 were accepted. Callers still skip replies whose tag is
+    one of their own requests'.
     """
     body = reply.data
     if len(body) < 4:
         return None
     response_code, _keep_alive, admin_code, permissions = body[0], body[1], body[2], body[3]
-    if response_code > 1 or admin_code > 3:
+    if response_code != RESP_SERVER_LOGIN_OK or admin_code > 3:
         return None
     return LoginResult(is_admin=admin_code == LOGIN_ADMIN_CODE_ADMIN, permissions=permissions)

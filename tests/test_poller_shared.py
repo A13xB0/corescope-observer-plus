@@ -18,7 +18,7 @@ pytest.importorskip("openhop_core")
 
 from openhop_core.protocol import CryptoUtils
 from openhop_core.protocol.constants import (
-    PAYLOAD_TYPE_ANON_REQ, PAYLOAD_TYPE_REQ, PAYLOAD_TYPE_RESPONSE, PAYLOAD_TYPE_TXT_MSG)
+    PAYLOAD_TYPE_ANON_REQ, PAYLOAD_TYPE_PATH, PAYLOAD_TYPE_REQ, PAYLOAD_TYPE_RESPONSE, PAYLOAD_TYPE_TXT_MSG)
 from openhop_core.protocol.identity import Identity, LocalIdentity
 from openhop_core.protocol.packet import Packet
 from openhop_core.protocol.packet_builder import PacketBuilder
@@ -54,7 +54,8 @@ class FakeRepeater:
     """
 
     def __init__(self, shared: sk.SharedKey, *, admin=False, answer_status=True,
-                 answer_telemetry=True, answer_login=True, battery_mv=4012, require_login=False):
+                 answer_telemetry=True, answer_login=True, battery_mv=4012, require_login=False,
+                 deaf=False):
         self.id = _identity()
         self.pub = self.id.get_public_key()
         self.shared = shared
@@ -71,6 +72,14 @@ class FakeRepeater:
         self._in_acl = False
         self.cli_commands: list[str] = []
         self._outbox: list[bytes] = []
+        # Like the firmware's ClientACL: no route back until a PATH packet
+        # arrives while the key is in the ACL; until then replies flood.
+        self.route_known = False
+        self.paths_taught = 0
+        # deaf: our radio hears nothing, but other observers do — every reply
+        # also lands in ``air`` (raw wire bytes), which is what CoreScope serves.
+        self.deaf = deaf
+        self.air: list[bytes] = []
         self._clk = 1_700_000_000  # the repeater's own clock, distinct from request tags
 
     def _clock(self) -> int:
@@ -99,13 +108,21 @@ class FakeRepeater:
         plaintext = tag.to_bytes(4, "little") + payload_body
         cipher = CryptoUtils.encrypt_then_mac(self.secret[:16], self.secret, plaintext)
         payload = bytes([self.shared.public_key[0], self.pub[0]]) + cipher
-        header = PacketBuilder._create_header(PAYLOAD_TYPE_RESPONSE, "direct")
+        header = PacketBuilder._create_header(PAYLOAD_TYPE_RESPONSE,
+                                              "direct" if self.route_known else "flood")
         pkt = PacketBuilder._create_packet(header, payload)
-        self._outbox.append(bytes([sk.PUSH_CODE_LOG_RX_DATA, 0x40, 0xC0]) + pkt.write_to())
+        self.air.append(pkt.write_to())
+        if not self.deaf:
+            self._outbox.append(bytes([sk.PUSH_CODE_LOG_RX_DATA, 0x40, 0xC0]) + pkt.write_to())
 
     def _handle(self, pkt: Packet) -> None:
         ptype = pkt.get_payload_type()
         payload = pkt.get_payload()
+        if ptype == PAYLOAD_TYPE_PATH:
+            if self._in_acl:  # searchPeersByHash only finds keys in the ACL
+                self.route_known = True
+                self.paths_taught += 1
+            return
         if ptype == PAYLOAD_TYPE_ANON_REQ:
             self.logins += 1
             self._in_acl = True
@@ -244,27 +261,96 @@ def test_logs_in_when_acl_entry_is_gone(shared):
     assert rep.logins >= 1
 
 
-def test_covered_takes_the_observers_reading(shared):
-    # We don't hear it, but another observer did and CoreScope has it: count it
-    # as heard (not a no-reply), and don't log in to retry.
-    rep = FakeRepeater(shared, answer_status=False)
+def _antenna(rep: FakeRepeater, asked: list | None = None):
+    def antenna(since):
+        if asked is not None:
+            asked.append(since)
+        return list(rep.air)
+    return antenna
+
+
+def test_reply_heard_only_by_other_observers_is_taken_from_corescope(shared):
+    # We don't hear the reply, another observer does: the poll decrypts it from
+    # CoreScope's packets and takes the reading — no login, no re-ask.
+    rep = FakeRepeater(shared, battery_mv=4010, deaf=True)
+    rep._in_acl = True
+    now = 2_000_000.0
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60,
+             "status_checked_at": now}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                 sleep=lambda s: None, now=now, antenna=_antenna(rep))
+    assert res.code == poller.OK and res.battery_mv == 4010
+    assert res.via_corescope is True
+    assert rep.logins == 0
+    poller.record(state, res, password_set=False, now=now)
+    assert state["via_corescope"] is True and state["battery_mv"] == 4010
+
+
+def test_login_answer_heard_only_by_other_observers_stops_more_logins(shared, monkeypatch):
+    # The login was answered but only other observers heard it: one login, then
+    # the route and the request — never a second login.
+    rep = FakeRepeater(shared, battery_mv=4012, deaf=True, require_login=True)
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, {"status_checked_at": 2e6}, routes=[DIRECT],
+                                 sleep=lambda s: None, now=2e6, antenna=_antenna(rep))
+    assert res.code == poller.OK
+    assert rep.logins == 1
+    assert rep.paths_taught == 1
+
+
+def test_route_goes_before_a_no_login_request(shared, monkeypatch):
+    # In the ACL: the route goes first, so the reply comes back direct even if
+    # the repeater lost it (a reboot) — and nothing floods.
+    rep = FakeRepeater(shared, battery_mv=4012)
+    rep._in_acl = True
     now = 2_000_000.0
     state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
-                                 sleep=lambda s: None, now=now, covered=lambda: True)
+                                 sleep=lambda s: None, now=now)
+    assert res.code == poller.OK and rep.logins == 0
+    assert rep.paths_taught == 1
+    assert "flood_replies" not in state
+
+
+def test_flooded_login_answer_waits_before_the_route(shared):
+    # A new key's first login answer floods; the route is sent only once that
+    # flood has had time to clear, then the reading comes back direct.
+    rep = FakeRepeater(shared, battery_mv=4012)
+    slept = []
+    state: dict = {}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                 sleep=slept.append)
     assert res.code == poller.OK
-    assert res.covered is True
-    assert rep.logins == 0
-    # Our request was answered (an observer heard it), so the ACL entry is kept.
-    assert state["logged_in_at"] == now - 60
-    # record(): heard for scheduling (backoff reset), but not our own reading.
-    st = {"unheard_since": now - 5 * 3600, "battery_mv": 3900, "last_success": now - 7200}
-    poller.record(st, res, password_set=False, now=now)
-    assert st["covered_at"] == now
-    assert st["last_covered"] is True
-    assert "unheard_since" not in st
-    assert st["last_success"] == now - 7200  # unchanged: we didn't read it
-    assert st["battery_mv"] == 3900
+    assert poller.FLOOD_CLEAR_SECONDS in slept
+    assert rep.route_known and "flood_replies" not in state
+
+
+def test_replies_that_keep_flooding_drop_to_daily(shared):
+    # The route never takes (lost every time): the replies keep flooding, so
+    # after two such polls the repeater is polled only daily.
+    rep = FakeRepeater(shared, battery_mv=4012)
+    rep._handle_orig = rep._handle
+
+    def lose_paths(pkt):
+        if pkt.get_payload_type() != PAYLOAD_TYPE_PATH:
+            rep._handle_orig(pkt)
+    rep._handle = lose_paths
+    state: dict = {}
+    now = 2_000_000.0
+    for i in range(2):
+        res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                     sleep=lambda s: None, now=now + i)
+        poller.record(state, res, password_set=False, now=now + i)
+    assert state["flood_replies"] == 2
+    assert not poller.is_due(state, 3600, False, now + 2 * 3600)
+    assert poller.is_due(state, 3600, False, now + 25 * 3600)
+
+
+def test_telemetry_reply_is_never_read_as_a_login(shared):
+    # CayenneLPP: channel 1, voltage, high byte 1 for 2.56-5.11 V — the shape
+    # of an admin login answer if only codes 0/1 were checked (Earl, 26 Oct).
+    lpp = bytes([1, c.LPP_VOLTAGE]) + struct.pack(">H", 410) + bytes([1, c.LPP_TEMPERATURE, 0, 50])
+    assert sk.login_result(sk.Reply(b"\x00" * 32, 1, lpp)) is None
+    assert sk.login_result(sk.Reply(b"\x00" * 32, 1, bytes([0, 0, 1, 3]) + b"\x00" * 8)).is_admin
 
 
 def test_admin_recheck_forces_a_login(shared):
@@ -272,7 +358,7 @@ def test_admin_recheck_forces_a_login(shared):
     # out, so a key quietly made admin is still caught.
     rep = FakeRepeater(shared, admin=True, battery_mv=4012)
     now = 2_000_000.0
-    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - (7 * 3600)}
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - (25 * 3600)}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
                                  sleep=lambda s: None, now=now)
     assert res.code == poller.ADMIN_STOP
@@ -323,14 +409,15 @@ def test_hello_tried_after_blank_unanswered(shared, monkeypatch):
     assert state["shared_password"] == "hello"
 
 
-def test_admin_recheck_not_marked_done_without_a_login_answer(shared):
-    # Data came back but the login answer was lost: the role wasn't seen, so the
-    # admin re-check must stay due.
-    rep = FakeRepeater(shared, battery_mv=4012, answer_login=False)
+def test_unanswered_login_is_not_followed_by_a_request(shared):
+    # Nobody heard the login answered (not us, not CoreScope): it wasn't
+    # accepted, so no request follows it, and the admin re-check stays due.
+    rep = FakeRepeater(shared, battery_mv=4012, answer_login=False, require_login=True)
     state: dict = {}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None)
-    assert res.code == poller.OK
+    assert res.code == poller.NO_REPLY
     assert "login_checked_at" not in state
+    assert rep.logins == 2  # blank, then hello: one each
 
 
 def test_route_retaught_after_unanswered_fast_path(shared, monkeypatch):
@@ -400,11 +487,13 @@ def test_own_key_remembers_a_blank_login(shared):
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
                                  sleep=lambda s: None, personal=True)
     assert res.code == poller.OK and state["shared_password"] == ""
-    assert poller.shared_password_order(state, 2, personal=True) == ["", ""]
-    # The shared key never trusts a blank success; a first contact tries the pair twice.
-    assert poller.shared_password_order(state, 2, personal=False) == ["", "hello", "", "hello"]
-    assert poller.shared_password_order({"key_login_fails": 2}, 2) == ["", "hello"]
-    assert poller.shared_password_order({"no_reply_count": 9}, 2) == ["", "hello", "", "hello"]
+    assert poller.shared_password_order(state, 0, personal=True) == [""]
+    # The shared key never trusts a blank success; a first contact tries each once.
+    assert poller.shared_password_order(state, 0, personal=False) == ["", "hello"]
+    # Failing: one login per poll, blank and hello on alternate days.
+    assert poller.shared_password_order({"key_login_fails": 2}, 0) == [""]
+    assert poller.shared_password_order({"key_login_fails": 2}, 86400) == ["hello"]
+    assert poller.shared_password_order({"shared_password": "hello"}, 0) == ["hello"]
 
 
 

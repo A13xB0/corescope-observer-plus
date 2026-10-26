@@ -468,6 +468,38 @@ def corescope_battery_snapshot(base_url: str, node_id: str, *, timeout: float = 
     }
 
 
+def corescope_responses(base_url: str, since: str, *, timeout: float = 5.0,
+                        limit: int = 2000) -> list[bytes] | None:
+    """Every RESPONSE packet any CoreScope observer heard since ``since`` (ISO
+    UTC), as raw wire bytes, or None on any error.
+
+    This is the poller's wider antenna: a reply we missed ourselves but another
+    observer heard is in here, still encrypted, and the poller decrypts it with
+    its own key exactly as it would a frame off its own radio. Nothing about
+    the key goes to CoreScope; it is a plain read of public packets.
+    """
+    if not base_url:
+        return None
+    try:
+        r = requests.get(f"{base_url}/api/packets",
+                         params={"type": 1, "since": since, "limit": limit}, timeout=timeout)
+        r.raise_for_status()
+        body = r.json()
+    except (requests.RequestException, ValueError):
+        return None
+    rows = body.get("packets") if isinstance(body, dict) else body
+    if not isinstance(rows, list):
+        return None
+    out = []
+    for row in rows:
+        raw = row.get("raw_hex") if isinstance(row, dict) else None
+        try:
+            out.append(bytes.fromhex(raw))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def register_guest_key(base_url: str, body: dict, *, timeout: float = 10.0) -> tuple[int, dict]:
     """POST this observer's polling key to CoreScope. Returns (HTTP status,
     JSON body); status 0 when CoreScope couldn't be reached. 404 means this

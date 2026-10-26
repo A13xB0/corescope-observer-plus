@@ -20,6 +20,7 @@ from .openhop import (
     Route,
     companion_port,
     corescope_battery_snapshot,
+    corescope_responses,
     corescope_latest_battery_ts,
     corescope_owners,
     fetch_shared_guest_key,
@@ -205,12 +206,6 @@ class App:
             return False
         return now - _ts(ts) < within_s
 
-    def _corescope_fresh_since(self, node_id: str, since: float) -> bool:
-        """True if CoreScope's newest reading for the node is from after `since`
-        — i.e. an observer overheard the reply to a request sent at that time.
-        A failed lookup is False, so the plugin falls back to retrying."""
-        return _fresh(corescope_latest_battery_ts(self.settings.corescope_url, node_id), since)
-
     def _corescope_confirm(self, node_id: str, since: float) -> dict:
         """CoreScope's view of a node's battery for the live "did it land?"
         line. fresh is True when CoreScope's newest reading is from after the
@@ -388,17 +383,16 @@ class App:
                 pw = self.secrets.password(n.node_id)
                 shared = self.polling_key() if self.uses_shared_key(n.node_id) else None
                 if shared is not None:
-                    # If we don't hear the answer ourselves, the poll may take
-                    # another observer's overhear of it from CoreScope instead
-                    # of retrying: "covered" = a reading landed since we began.
-                    covered = None
+                    # Whatever we don't hear ourselves, the poll looks for in
+                    # the packets CoreScope's observers heard, and decrypts.
+                    antenna = None
                     if self.settings.check_corescope and self.settings.corescope_url:
-                        started = time.time()
-                        covered = lambda nid=n.node_id, t=started: self._corescope_fresh_since(nid, t)
+                        url = self.settings.corescope_url
+                        antenna = lambda since, u=url: corescope_responses(u, utc_iso(since))
                     result = poll_one_shared(
                         client, n, shared, st, routes=routes,
                         read_temperature=n.node_id in s.temperature_targets,
-                        on_step=on_step, covered=covered,
+                        on_step=on_step, antenna=antenna,
                         personal=shared.public_key == self.own_key().public_key,
                     )
                 else:
@@ -420,7 +414,8 @@ class App:
                          f"{result.battery_mv} mV" if result.battery_mv is not None else result.detail,
                          f", {result.temperature_c} °C" if result.temperature_c is not None
                          else (f", temperature {result.temperature_code}" if result.temperature_code else ""),
-                         f", reply {result.reply_s:.1f} s" if result.reply_s is not None else "")
+                         f", reply {result.reply_s:.1f} s" if result.reply_s is not None
+                         else (" (heard via CoreScope)" if result.via_corescope else ""))
                 if shared is not None:
                     # Keep the newest request timestamp across restarts (see _seed_tag).
                     self.state.value["last_tag"] = max(int(self.state.value.get("last_tag") or 0),
@@ -606,6 +601,8 @@ class App:
             "name": st.get("name") or name,
             "code": st.get("code"),
             "covered": bool(st.get("last_covered")),
+            "via_corescope": bool(st.get("via_corescope")),
+            "flood_replies": int(st.get("flood_replies") or 0),
             "role": st.get("role", ""),
             "battery_mv": st.get("battery_mv"),
             "route": st.get("last_route_label") or "",
@@ -727,6 +724,8 @@ class App:
                 "shared_admin_at": st.get("shared_admin_at"),
                 "covered_at": st.get("covered_at"),
                 "covered": bool(st.get("last_covered")),
+                "via_corescope": bool(st.get("via_corescope")),
+                "flood_replies": int(st.get("flood_replies") or 0),
                 "polled_by": st.get("polled_by") or "",
             })
         brokers = []

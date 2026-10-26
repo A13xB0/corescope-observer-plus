@@ -115,7 +115,8 @@
     // A "covered" poll: we didn't hear the answer, another observer did and
     // CoreScope has it — there's no voltage of our own to show.
     if (x.covered) return `heard via another observer${route}`;
-    if (x.code === "ok") return `${(x.battery_mv / 1000).toFixed(2)} V${role}${route}${temp}`;
+    const via = x.via_corescope ? " (heard via CoreScope)" : "";
+    if (x.code === "ok") return `${(x.battery_mv / 1000).toFixed(2)} V${role}${route}${temp}${via}`;
     if (x.code === "no_battery") return `no battery fitted${role}${route}${temp}`;
     return (CODE_TEXT[x.code] || x.code || "no answer") + (x.message && x.message !== x.code ? ": " + x.message : "");
   }
@@ -222,6 +223,7 @@
   // stopped because it answered the key as admin.
   function keyBadge(n) {
     if (n.shared_admin_seen) return ' · <span class="pill bad" title="Answered the guest key as admin; guest polling stopped here">admin!</span>';
+    if (n.flood_replies >= 2) return ' · <span class="pill bad" title="Its replies keep coming back flooded (our return route isn\'t taking), so it is polled only once a day until a reply comes back direct">floods · daily</span>';
     if (n.polled_by) return ` · <span class="pill neutral" title="CoreScope has another observer polling this repeater, so this one leaves it to them. Its readings still reach CoreScope.">polled by ${esc(n.polled_by)}</span>`;
     if (n.key_mode === "shared") {
       const own = (runtime.shared_key || {}).kind === "own";

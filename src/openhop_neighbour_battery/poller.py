@@ -2,8 +2,9 @@
 
 Every request and every retry is sent direct: with an empty path to a
 repeater heard at zero hops, or along a one-relay path through a repeater
-heard direct. If the path can't be pinned, nothing is sent. Nothing is ever
-flooded.
+heard direct. If the path can't be pinned, nothing is sent. Nothing we send is
+ever flooded; a repeater's reply is flooded when it has no route back to us,
+which the guest-key flow works to avoid (see poll_one_shared).
 """
 
 from __future__ import annotations
@@ -59,18 +60,25 @@ NO_REPLY_FAST_TRIES = 9
 # until it is heard again — no point polling a long-dead one every interval.
 UNHEARD_BACKOFF_AFTER = 24 * 3600
 UNHEARD_BACKOFF_INTERVAL = 24 * 3600
-# When we don't hear a shared-key reply ourselves, wait this long for another
-# observer's overhear to reach CoreScope before checking whether it landed.
-COVERED_SETTLE_SECONDS = 3.0
+# When we don't hear an answer ourselves, give other observers' copies this
+# long to reach CoreScope (observer -> MQTT -> ingest) before asking it, and
+# ask for packets from a little before we sent (clocks differ).
+ANTENNA_SETTLE_SECONDS = 5.0
+ANTENNA_CLOCK_SLACK = 30.0
+# A repeater whose replies keep coming back flooded (our route isn't taking)
+# is polled only daily, so it can't flood the mesh every interval.
+FLOOD_REPLIES_BEFORE_DAILY = 2
+# A flooded login answer is re-broadcast by every repeater around for several
+# seconds; a route packet sent into that is lost (26 Oct: sent 1-4 s after a
+# flooded answer it never took, 5 of 5; sent in a quiet moment it always did).
+# So after a flooded answer, wait this long before sending the route.
+FLOOD_CLEAR_SECONDS = 15.0
+FLOOD_DAILY = 24 * 3600
 TEMP_MISSES_BEFORE_DAILY = 3
 TEMP_DAILY = 24 * 3600
 
-# Shared-key poll: how long to listen off the air for a reply after each raw
-# send, and how many data requests to try within one poll.
+# Guest-key poll: how long to listen off the air for a reply after each raw send.
 SHARED_REPLY_WINDOW = 20.0
-# Once the data reply is in, how much longer to wait for the login answer
-# (its role check) when a login was sent with the request.
-LOGIN_ANSWER_GRACE = 3.0
 # After a login, listen this long for its answer before transmitting again.
 # The radio is half duplex and the repeater answers 300 ms after it hears the
 # login (SERVER_RESPONSE_DELAY), so sending the route update straight away
@@ -80,12 +88,11 @@ LOGIN_ANSWER_GRACE = 3.0
 # key's login answer is flooded back through relays, each adding a random delay.
 LOGIN_ANSWER_WAIT = 10.0
 LOGIN_ANSWER_WAIT_PER_HOP = 10.0
-SHARED_ATTEMPTS = 2
 # The firmware keeps the shared key in its (RAM, 32-entry) guest ACL after a
 # login, so most polls can just send the request and save the login's airtime.
 # A login reply is the only thing that reveals a key quietly made admin, so one
 # is still forced this often to re-check, even while the ACL entry holds.
-SHARED_ADMIN_RECHECK_SECONDS = 6 * 3600
+SHARED_ADMIN_RECHECK_SECONDS = 24 * 3600
 # Admin removal drill: after an admin answer, how long to let the setperm take
 # before the verifying login, and how many verify logins to try.
 ADMIN_REMOVE_SETTLE = 10.0
@@ -108,6 +115,7 @@ class PollResult:
     admin_seen: bool = False  # the shared key was answered as admin
     admin_removed: bool | None = None  # removal drill result: True ok, False failed, None not run
     covered: bool = False  # we didn't hear it, but CoreScope did (another observer overheard)
+    via_corescope: bool = False  # our reply, decrypted from another observer's copy via CoreScope
     reply_s: float | None = None  # seconds from the request going out to its reply (for tuning windows)
 
 
@@ -303,66 +311,73 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
                       temperature_c=temp, temperature_code=temp_code, method="telemetry")
 
 
-def shared_password_order(node_state: dict, attempts: int, personal: bool = False) -> list[str]:
-    """The passwords to log in with, one per try, under a guest key.
+def shared_password_order(node_state: dict, now: float, personal: bool = False) -> list[str]:
+    """The passwords to log in with in one poll, one login each, under a guest key.
 
-    Every password gets a retry: a lost login looks exactly like a refused one
-    (the firmware doesn't answer a wrong password), and the login is the
-    longest packet in the exchange, so the likeliest to collide.
+    A login's answer is flooded whenever the repeater has no route back to the
+    key (MeshCore 1.18; older firmware floods every login answer), so logins
+    are kept to the fewest that can work: CoreScope's observers catch an answer
+    we miss ourselves, which makes a blind retry of the same password pointless.
 
-    A repeater known to take a password is sent only that one. Otherwise blank
-    comes first and "hello" only after blank went unanswered, so a blank-guest
-    repeater that answers is never sent "hello"; on a first contact the pair is
-    tried twice, once the repeater is already failing only once per poll, so a
-    dead repeater doesn't cost four logins every interval (key_login_fails: polls
-    in a row in which this key's login got no answer). With the public
-    shared key only "hello" is ever remembered: a blank login can succeed just
-    because another observer put the shared key in the ACL (one key, one entry
-    for everyone). With this observer's own key a blank success is our own.
+    A repeater known to take a password is sent only that one. On a first
+    contact blank comes first and "hello" only after blank went unanswered, so
+    a blank-guest repeater that answers is never sent "hello". Once the key's
+    logins are failing (key_login_fails: polls in a row with no answer, seen by
+    us or CoreScope) it is one login per poll, blank and "hello" on alternate
+    days. With the public shared key only "hello" is ever remembered: a blank
+    login can succeed just because another observer put the shared key in the
+    ACL (one key, one entry for everyone). With this observer's own key a blank
+    success is our own.
     """
     known = node_state.get("shared_password")
     if known == "hello" or (personal and known == ""):
-        order = [known] * max(2, attempts)
-    elif int(node_state.get("key_login_fails") or 0) >= 2:
-        order = list(sk.SHARED_PASSWORDS)
-    else:
-        order = list(sk.SHARED_PASSWORDS) * max(1, attempts)
-    return order
+        return [known]
+    if int(node_state.get("key_login_fails") or 0) >= 2:
+        return [sk.SHARED_PASSWORDS[int(now // 86400) % len(sk.SHARED_PASSWORDS)]]
+    return list(sk.SHARED_PASSWORDS)
+
 
 def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey, node_state: dict, *,
                     routes: list[Route], read_temperature: bool = False, now: float | None = None,
                     sleep: Callable[[float], None] = time.sleep,
-                    reply_window: float = SHARED_REPLY_WINDOW, attempts: int = SHARED_ATTEMPTS,
+                    reply_window: float = SHARED_REPLY_WINDOW,
                     on_step: Callable[[str], None] | None = None,
-                    covered: Callable[[], bool] | None = None, personal: bool = False) -> PollResult:
-    """Poll one repeater under the shared guest key, as raw packets.
+                    antenna: Callable[[float], list[bytes] | None] | None = None,
+                    personal: bool = False) -> PollResult:
+    """Poll one repeater under a guest key, as raw packets.
 
-    Requests are built and encrypted with the shared key and replies are read
-    straight off the air; the route is carried in the packet, so nothing is
-    pinned in the companion and nothing is ever flooded. Status goes direct;
-    a repeater one hop away is asked by telemetry (less airtime over the relay).
+    Requests are built and encrypted with the key and replies are read straight
+    off the air; the route is carried in the packet, so nothing is pinned in
+    the companion and nothing we send is ever flooded. What the repeater sends
+    back is another matter: with no stored route back to the key it floods its
+    answer across the mesh. So the flow keeps the repeater's route fresh and
+    sends as little as possible:
 
-    The flow, cheapest first:
       1. Still in the repeater's guest ACL (logged in before) and the admin
-         re-check isn't due → just send the request, no login.
-      2. Otherwise, or if that went unanswered → log in (blank, then "hello";
-         see shared_password_order), teaching the return path when needed,
+         re-check isn't due → send our return route, then the request. No
+         login. The route makes the reply come back direct even if the
+         repeater lost it (a reboot), and costs one short direct packet.
+      2. Otherwise, or if that went unanswered → log in (see
+         shared_password_order), and once the login is answered send the route
          and request again.
-      3. Nothing heard → if ``covered()`` says another observer's overhear of
-         our reply already reached CoreScope, take that rather than retrying.
+
+    After anything we don't hear answered ourselves, ``antenna(since)`` is
+    asked for every reply CoreScope's observers heard since we sent; those are
+    decrypted here like our own radio's frames, so a reply someone else heard
+    is never re-asked for. Replies that came back flooded are counted
+    (flood_replies) so a repeater that keeps flooding is polled only daily.
 
     Safety: ``build_login`` refuses any password but blank or "hello", and a
     login answered as admin stops the poll, runs the removal drill and returns
-    ADMIN_STOP so the caller disables the shared key there and alerts. A login
-    is forced every SHARED_ADMIN_RECHECK_SECONDS because only a login reply
-    reveals a key quietly made admin.
+    ADMIN_STOP so the caller disables the key there and alerts.
     """
     now = now or time.time()
     step = on_step or (lambda *_a: None)
     # The ACL entry, its route and the password it took all belong to the key:
     # when the key changes (shared → this observer's own), start over.
     if node_state.get("acl_key") != shared.public_key.hex():
-        for k in ("logged_in_at", "login_checked_at", "shared_password", "key_login_fails"):
+        for k in ("logged_in_at", "login_checked_at", "shared_password", "key_login_fails",
+                  "flood_replies"):
             node_state.pop(k, None)
         node_state["acl_key"] = shared.public_key.hex()
     try:
@@ -381,6 +396,9 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         kind = "status" if (not one_hop and status_due) else "telemetry"
         client.clear_rx_backlog()  # only frames heard during this poll count
         latency: list[float] = []
+        sent_tags: set[int] = set()  # our own request/login tags: never a login answer
+        flooded: list[bool] = []  # one per reply we got, ours or CoreScope's
+        wall = time.time
 
         def send(body: bytes, what: str) -> None:
             # openHop confirms a raw send only after transmitting; a long wait
@@ -388,139 +406,150 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             if not client.send_raw_packet(body):
                 step(f"openHop was busy; {what} sent without confirmation")
 
-        def collect(data_tag: int, want_login: bool) -> tuple[sk.Reply | None, sk.LoginResult | None]:
-            """One window: the data reply (matched by our tag) and, if a login
-            went with the request, the login answer (told by shape — its tag is
-            the repeater's clock, not ours). Stops as soon as what is expected
-            is in hand (allowing the login answer a short grace after the data),
-            or at once on an admin answer — not at the end of the window."""
+        def teach() -> None:
+            # Ignored by a repeater that doesn't have the key in its ACL, so
+            # only sent when it does (or is believed to).
+            step(f"Sending our return route {route.label}")
+            if one_hop:
+                send(sk.build_route_update(
+                    shared, key, out_path, plen, return_path=out_path, return_path_len=plen), "the route")
+            else:
+                send(sk.build_route_update(shared, key, out_path, plen), "the route")
+            sleep(LOGIN_SETTLE_SECONDS)
+
+        def sort(r: sk.Reply, data_tag: int | None) -> tuple[sk.Reply | None, sk.LoginResult | None]:
+            """A decoded reply as (data, None), (None, login answer) or neither.
+            Data is matched by our tag; a login answer carries the repeater's
+            clock instead, so it is told by shape, and never if its tag is one
+            of ours (a late telemetry reply is not a login)."""
+            if data_tag is not None and r.tag == data_tag:
+                return r, None
+            if r.tag in sent_tags:
+                return None, None
+            return None, sk.login_result(r)
+
+        def wider(since: float, data_tag: int | None) -> tuple[sk.Reply | None, sk.LoginResult | None]:
+            """Ask CoreScope for what its observers heard since we sent."""
+            if antenna is None:
+                return None, None
+            step("Not heard here; checking what CoreScope's observers heard")
+            sleep(ANTENNA_SETTLE_SECONDS)
+            frames = antenna(since - ANTENNA_CLOCK_SLACK)
+            if frames is None:
+                step("CoreScope couldn't be reached")
+                return None, None
             data = login = None
-            t0 = time.monotonic()
-            until = [float("inf")]
-            for frame in client.collect_rx(reply_window, until=lambda: until[0]):
-                r = sk.decode_rx(frame, shared, [key])
+            for raw in frames:
+                r = sk.decode_rx(bytes([sk.PUSH_CODE_LOG_RX_DATA, 0, 0]) + raw, shared, [key])
                 if r is None:
                     continue
-                if r.tag == data_tag and data is None:
-                    data = r
-                    latency.append(time.monotonic() - t0)
-                    if want_login and login is None:
-                        until[0] = time.monotonic() + LOGIN_ANSWER_GRACE
-                elif login is None:
-                    lr = sk.login_result(r)
-                    if lr is not None:
-                        login = lr
-                        if lr.is_admin:
-                            break
-                if data is not None and (login is not None or not want_login):
-                    break
+                d, lr = sort(r, data_tag)
+                if d is not None and data is None:
+                    data = d
+                    flooded.append(r.flooded)
+                elif lr is not None and login is None:
+                    login = lr
+                    flooded.append(r.flooded)
+            if data is None and login is None:
+                step("No observer heard an answer either")
+            else:
+                how = "flooded" if flooded and flooded[-1] else "direct"
+                step(f"An observer heard the {'reply' if data is not None else 'login answer'} ({how})")
             return data, login
 
-        def request(want_login: bool = False) -> tuple[sk.Reply | None, sk.LoginResult | None]:
+        def request() -> sk.Reply | None:
             step(f"Requesting {kind}, waiting for a reply")
             body, data_tag = (sk.build_status_request if kind == "status"
                               else sk.build_telemetry_request)(shared, key, out_path, plen)
+            sent_tags.add(data_tag)
+            since = wall()
             send(body, "the request")
             if kind == "status":
                 node_state["status_checked_at"] = now
-            return collect(data_tag, want_login)
+            t0 = time.monotonic()
+            for frame in client.collect_rx(reply_window):
+                r = sk.decode_rx(frame, shared, [key])
+                if r is not None and r.tag == data_tag:
+                    latency.append(time.monotonic() - t0)
+                    flooded.append(r.flooded)
+                    step("Reply received" + (" (flooded: the repeater had no route back)" if r.flooded else ""))
+                    return r
+            return wider(since, data_tag)[0]
 
-        def login(pw: str, teach: bool) -> sk.LoginResult | None:
-            """Send a login and listen (quietly) for its answer; then, if the
-            route needs teaching, teach it. Returns the login answer, if any."""
-            step(f"Shared-key login ({'blank' if pw == '' else repr(pw)}) {route.label}")
-            send(sk.build_login(shared, key, out_path, plen, pw)[0], "the login")
-            answer = None
+        def login(pw: str) -> sk.LoginResult | None:
+            """Send a login and listen (quietly) for its answer: off our radio,
+            then from CoreScope's observers."""
+            step(f"Login ({'blank' if pw == '' else repr(pw)}) {route.label}")
+            body, tag = sk.build_login(shared, key, out_path, plen, pw)
+            sent_tags.add(tag)
+            since = wall()
+            send(body, "the login")
             for frame in client.collect_rx(LOGIN_ANSWER_WAIT + LOGIN_ANSWER_WAIT_PER_HOP * route.hops):
                 r = sk.decode_rx(frame, shared, [key])
-                lr = sk.login_result(r) if r is not None else None
+                lr = sort(r, None)[1] if r is not None else None
                 if lr is not None:
-                    answer = lr
-                    break
-            step("Login answered" + (" (as admin!)" if answer and answer.is_admin else "")
-                 if answer else "No answer to the login")
-            if teach and not (answer and answer.is_admin):
-                # Teach the return path so replies come direct, not flooded
-                # (firmware: a key with no stored route gets flooded replies).
-                if one_hop:
-                    send(sk.build_route_update(
-                        shared, key, out_path, plen, return_path=out_path, return_path_len=plen), "the route")
-                else:
-                    send(sk.build_route_update(shared, key, out_path, plen), "the route")
-                sleep(LOGIN_SETTLE_SECONDS)
-            return answer
-
-        def overheard() -> bool:
-            # We didn't hear it ourselves: give an observer's overhear a moment
-            # to reach CoreScope, then ask whether it landed.
-            if covered is None:
-                return False
-            sleep(COVERED_SETTLE_SECONDS)
-            return covered()
+                    flooded.append(r.flooded)
+                    step("Login answered" + (" (as admin!)" if lr.is_admin else ""))
+                    return lr
+            return wider(since, None)[1]
 
         reply = None
         admin = False
         tried = 0
-        checked_cover = False
         in_acl = bool(node_state.get("logged_in_at"))
         recheck_due = now - float(node_state.get("login_checked_at") or 0) >= SHARED_ADMIN_RECHECK_SECONDS
 
-        # 1. Still in the guest ACL: request without logging in.
+        # 1. Still in the guest ACL: route, then the request, no login.
         if in_acl and not recheck_due:
-            step(f"Requesting {kind} (still in the guest ACL, no login)")
-            data, lr = request()
+            teach()
             tried += 1
-            if lr is not None and lr.is_admin:
-                admin = True  # only a stray login answer could say so here; treat it the same
-            elif data is not None:
-                reply = data
-            else:
-                # Unanswered: the entry may have lapsed (32-slot LRU, or a
-                # reboot, which also drops the return path). Before logging in
-                # again, see whether another observer heard the answer.
-                checked_cover = True
-                if overheard():
-                    return _covered(route, step)
+            reply = request()
+            if reply is None:
+                # The entry may have lapsed (32-slot LRU, or a reboot).
                 in_acl = False
 
-        # 2. Log in and request again.
-        login_answered = False
+        # 2. Log in, then route and request.
         logged_in = False
-        if reply is None and not admin:
+        login_answered = False
+        if reply is None:
             logged_in = True
-            for pw in shared_password_order(node_state, attempts, personal):
+            if in_acl:
+                # Admin re-check of a live entry: route first, so the login
+                # answer comes back direct rather than flooded.
+                teach()
+            for pw in shared_password_order(node_state, now, personal):
                 if tried:
                     sleep(RETRY_GAP_SECONDS)
-                lr = login(pw, teach=not in_acl)
                 tried += 1
-                data = None
-                if not (lr is not None and lr.is_admin):
-                    # Ask anyway when the login went unanswered: it may have been
-                    # accepted and only its answer missed.
-                    data, late = request(want_login=lr is None)
-                    lr = lr or late
-                if lr is not None:
-                    # The repeater answered the login, so its role is known:
-                    # only now does the admin re-check count as done.
-                    login_answered = True
-                    node_state["login_checked_at"] = now
-                    in_acl = True
-                    if lr.is_admin:
-                        admin = True
-                        break
-                if data is not None:
-                    if pw or personal:
-                        node_state["shared_password"] = pw  # see shared_password_order
-                    reply = data
-                    break
+                lr = login(pw)
                 if lr is None:
-                    in_acl = False  # nothing back: re-teach the path on the next try
+                    continue  # no answer heard by us or any observer: not accepted
+                login_answered = True
+                node_state["login_checked_at"] = now
+                if lr.is_admin:
+                    admin = True
+                    break
+                if pw or personal:
+                    node_state["shared_password"] = pw  # see shared_password_order
+                if not in_acl:
+                    if flooded and flooded[-1]:
+                        step("The login answer was flooded; waiting for it to clear before sending our route")
+                        sleep(FLOOD_CLEAR_SECONDS)
+                    teach()  # now the repeater can read it
+                    in_acl = True
+                reply = request()
+                break
 
         if logged_in:
-            if login_answered or reply is not None:
+            if login_answered:
                 node_state.pop("key_login_fails", None)
             else:
                 node_state["key_login_fails"] = int(node_state.get("key_login_fails") or 0) + 1
+        if flooded:
+            if flooded[-1]:
+                node_state["flood_replies"] = int(node_state.get("flood_replies") or 0) + 1
+            else:
+                node_state.pop("flood_replies", None)
         if admin:
             # Whatever happens to the removal, the admin answer itself must be
             # recorded, so the key is disabled here and the owner is alerted.
@@ -540,13 +569,11 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         return PollResult(ERROR, key_mode="shared", detail=str(exc))
 
     if reply is None:
-        # 3. Last chance (once per poll): did an observer's overhear reach CoreScope?
-        if (not checked_cover or tried > 1) and overheard():
-            return _covered(route, step)
         node_state.pop("logged_in_at", None)
         return PollResult(NO_REPLY, key_mode="shared", route=route, retried=tried > 1,
                           detail="no answer to the shared-key request")
     node_state["logged_in_at"] = node_state.get("logged_in_at") or now
+    via = not latency  # the reply came from CoreScope, not our radio
     if kind == "status":
         try:
             stats = parse_stats(reply.data)
@@ -554,7 +581,8 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             return PollResult(NO_REPLY, key_mode="shared", route=route, detail="unreadable status reply")
         mv = int(stats.get("battery_mv") or 0)
         return PollResult(OK if mv > 0 else NO_BATTERY, battery_mv=mv, stats=stats, route=route,
-                          key_mode="shared", method="status", reply_s=latency[-1] if latency else None)
+                          key_mode="shared", method="status", via_corescope=via,
+                          reply_s=latency[-1] if latency else None)
     temp = lpp_temperature(reply.data) if read_temperature else None
     temp_code = ("ok" if temp is not None else "none") if read_temperature else ""
     mv = lpp_voltage_mv(reply.data)
@@ -564,16 +592,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                           temperature_c=temp, temperature_code=temp_code)
     return PollResult(OK if mv > 0 else NO_BATTERY, battery_mv=mv, route=route, key_mode="shared",
                       method="telemetry", temperature_c=temp, temperature_code=temp_code,
-                      reply_s=latency[-1] if latency else None)
-
-
-def _covered(route: Route, step: Callable[[str], None]) -> PollResult:
-    """We didn't hear the answer but another observer did and CoreScope has it.
-    Our request was answered, so the ACL entry is live: logged_in_at is left
-    as it was."""
-    step("Heard via another observer — CoreScope already has the reply")
-    return PollResult(OK, key_mode="shared", route=route, covered=True,
-                      detail="reading obtained via another observer")
+                      via_corescope=via, reply_s=latency[-1] if latency else None)
 
 
 def _admin_removal_drill(client: CompanionClient, shared: sk.SharedKey, key: bytes,
@@ -648,6 +667,7 @@ def record(node_state: dict, result: PollResult, password_set: bool, now: float)
         node_state["battery_mv"] = result.battery_mv
         node_state["no_reply_count"] = 0
         node_state["method"] = result.method
+        node_state["via_corescope"] = result.via_corescope
         if result.route is not None:
             node_state["last_route"] = result.route.key
             node_state["last_route_label"] = result.route.label
@@ -697,6 +717,9 @@ def is_due(node_state: dict, interval_s: float, password_set: bool, now: float) 
     unheard = node_state.get("unheard_since")
     if unheard is not None and now - float(unheard) >= UNHEARD_BACKOFF_AFTER:
         return now - last >= UNHEARD_BACKOFF_INTERVAL
+    if int(node_state.get("flood_replies") or 0) >= FLOOD_REPLIES_BEFORE_DAILY:
+        # Its replies keep flooding: daily until one comes back direct.
+        return now - last >= max(interval_s, FLOOD_DAILY)
     if code == NO_BATTERY:
         return now - last >= max(interval_s, NO_BATTERY_RECHECK)
     if code == NO_REPLY:
