@@ -29,6 +29,7 @@ from .openhop import (
     search_corescope,
 )
 from . import guest_key
+from . import packet_log
 from . import shared_key as sk
 from .poller import ADMIN_STOP, NO_BATTERY, NO_REPLY, OK, is_due, poll_one, poll_one_shared, reading, record, utc_iso
 from .publisher import Publisher
@@ -64,6 +65,8 @@ class App:
         self.openhop_brokers: dict[str, dict] = {}
         self.companion_key = ""
         self.actions: dict[str, dict] = self.state.value.setdefault("actions", {})
+        # The last packets sent and what answered them (packet_log.py).
+        self.packets = packet_log.PacketLog(self.state.value.setdefault("packet_log", []))
         self._last_refresh = 0.0
         self._shared_cache: dict = {}  # the shared key fetched from CoreScope, cached by URL
         self._own_key: sk.SharedKey | None = None  # this observer's polling key (guest_key.py)
@@ -382,6 +385,9 @@ class App:
                 st = self.state.node(n.node_id)
                 pw = self.secrets.password(n.node_id)
                 shared = self.polling_key() if self.uses_shared_key(n.node_id) else None
+                plog = self.packets.for_node(
+                    n.node_id, n.name, "companion" if shared is None
+                    else ("guest key" if shared.public_key == self.own_key().public_key else "shared key"))
                 if shared is not None:
                     # Whatever we don't hear ourselves, the poll looks for in
                     # the packets CoreScope's observers heard, and decrypts.
@@ -394,13 +400,13 @@ class App:
                         read_temperature=n.node_id in s.temperature_targets,
                         on_step=on_step, antenna=antenna,
                         personal=shared.public_key == self.own_key().public_key,
-                        status_every=s.status_every_hours * 3600,
+                        status_every=s.status_every_hours * 3600, plog=plog,
                     )
                 else:
                     result = poll_one(
                         client, n, pw, st, routes=routes, alternative_routes=s.alternative_routes,
                         read_temperature=n.node_id in s.temperature_targets,
-                        on_step=on_step, status_every=s.status_every_hours * 3600,
+                        on_step=on_step, status_every=s.status_every_hours * 3600, plog=plog,
                     )
                 record(st, result, bool(pw), time.time())
                 st.pop("password_changed", None)
@@ -752,6 +758,7 @@ class App:
             "nodes": nodes,
             "brokers": brokers,
             "actions": self.actions,
+            "packet_log": self.packets.entries,
             "shared_key": self._shared_key_runtime(),
             "corescope": {
                 "url": self.settings.corescope_url,

@@ -233,7 +233,32 @@
     return "";
   }
 
+  // The packet log: what was sent, and what answered it (packet_log.py).
+  function packetAnswer(e) {
+    if (e.reply === "none expected") return '<span class="muted">none expected</span>';
+    if (e.reply === "waiting") return '<span class="pill warn">waiting</span>';
+    if (e.reply === "refused") return `<span class="pill bad">refused</span>`;
+    if (e.reply !== "answered") return `<span class="pill bad">no answer</span>${e.what ? ` <span class="muted small">${esc(e.what)}</span>` : ""}`;
+    const how = e.flooded === true ? ' <span class="pill bad" title="The repeater had no route back, so it flooded the answer across the mesh">flooded</span>'
+      : e.flooded === false ? ' <span class="pill good">direct</span>' : "";
+    const via = e.via === "CoreScope" ? "via CoreScope" : "heard here";
+    const after = e.after_s != null ? ` · ${Number(e.after_s).toFixed(1)} s` : "";
+    return `<span class="pill good">answered</span>${how}<div class="muted small">${esc(via)}${after}${e.what ? " · " + esc(e.what) : ""}</div>`;
+  }
+  function renderPackets() {
+    const log = (runtime.packet_log || []).slice().reverse();
+    $("packets").innerHTML = log.length ? log.map((e) => `<tr>
+      <td class="small">${new Date(e.at * 1000).toLocaleTimeString()}<div class="muted small">${ago(e.at)}</div></td>
+      <td>${esc(e.name || String(e.node_id || "").slice(0, 8))}</td>
+      <td><strong>${esc(e.kind)}</strong>${e.detail ? `<div class="muted small">${esc(e.detail)}</div>` : ""}${e.unconfirmed ? '<div class="muted small">openHop busy: sent unconfirmed</div>' : ""}</td>
+      <td class="small">${esc(e.route || "")}</td>
+      <td class="small">${esc(e.key || "")}</td>
+      <td>${packetAnswer(e)}</td></tr>`).join("")
+      : '<tr><td colspan="6" class="muted">Nothing sent yet.</td></tr>';
+  }
+
   function render() {
+    renderPackets();
     $("version").textContent = runtime.plugin_version ? `v${runtime.plugin_version}` : "";
     const checks = runtime.self_check || {};
     const allOk = Object.keys(checks).length && Object.values(checks).every((c) => c.ok);

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
+from . import packet_log
 from . import shared_key as sk
 from .companion import (CompanionClient, CompanionError, FloodSent, parse_stats, path_len_byte,
                         lpp_temperature, lpp_voltage_mv)
@@ -152,7 +153,8 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
              now: float | None = None, sleep: Callable[[float], None] = time.sleep,
              retry_gap: float = RETRY_GAP_SECONDS, attempts: int = REQUEST_ATTEMPTS,
              on_step: Callable[[str], None] | None = None,
-             status_every: float = STATUS_EVERY_SECONDS) -> PollResult:
+             status_every: float = STATUS_EVERY_SECONDS,
+             plog: packet_log.NodeLog | None = None) -> PollResult:
     """Read one repeater's battery with as few transmissions as will do.
 
     Every request goes direct. A request that gets no answer is followed by
@@ -172,6 +174,7 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
     """
     now = now or time.time()
     step = on_step or (lambda *_a: None)
+    log = plog or packet_log.NULL
     key = bytes.fromhex(n.node_id)
     ordered = ordered_routes(routes, node_state.get("last_route"))
     if not ordered:
@@ -201,7 +204,15 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
         step(f"Logging in {route.label}" + (" (verifying)" if not probe else ""))
         ctx["login_sent"] = True
         node_state["login_attempt_at"] = now
+        entry = log.sent("login", route.label, "saved password" if password else "blank password")
+        t0 = time.monotonic()
         result = client.login(key, password)
+        if result.ok:
+            log.answered(entry, "radio", after_s=time.monotonic() - t0, what=f"logged in as {result.role or 'guest'}")
+        elif result.timed_out:
+            log.unanswered(entry)
+        else:
+            log.refused(entry, "login refused")
         if result.ok:
             node_state["logged_in_at"] = now
             node_state["login_fails"] = 0
@@ -219,6 +230,19 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
         ctx["refused"] = f"login refused ({fails} of {LOGIN_FAILS_BEFORE_BLOCK})"
         return "refused"
 
+    def logged(request: Callable[[], object], kind: str, route: Route):
+        entry = log.sent(f"{kind} request", route.label)
+        t0 = time.monotonic()
+        answer = request()
+        if answer is None:
+            log.unanswered(entry)
+        elif kind == "status":
+            log.answered(entry, "radio", after_s=time.monotonic() - t0,
+                         what=f"status, {int(answer.get('battery_mv') or 0)} mV")
+        else:
+            log.answered(entry, "radio", after_s=time.monotonic() - t0, what=_describe(kind, answer))
+        return answer
+
     def next_route(i: int) -> Route | None:
         """The route for try i: the best live one, or round the live ones."""
         live = [r for r in ordered if r.key not in ctx["dead"]]
@@ -226,7 +250,7 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
             return None
         return live[i % len(live)] if alternative_routes else live[0]
 
-    def ask(request: Callable[[], object]):
+    def ask(request: Callable[[], object], kind: str):
         """Up to `attempts` sends; the answer and the route it came by, or (None, None)."""
         sends = 0
         while sends < attempts and not ctx["blocked"]:
@@ -240,11 +264,11 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
                 continue
             ctx["tries"] = max(ctx["tries"], sends)
             sends += 1
-            answer = request()
+            answer = logged(request, kind, route)
             if answer is not None:
                 return answer, route
             if not ctx["login_sent"] and login(route) == "ok":
-                answer = request()
+                answer = logged(request, kind, route)
                 if answer is not None:
                     return answer, route
         return None, None
@@ -265,12 +289,12 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
             login(ordered[0], probe=False)
         if not telemetry_only:
             step("Requesting status")
-            stats, used = ask(lambda: client.status(key))
+            stats, used = ask(lambda: client.status(key), "status")
             node_state["status_checked_at"] = now
         want_temp = read_temperature and temperature_due(node_state, now)
         if stats is None or want_temp:
             step("Requesting telemetry")
-            tel, tel_route = ask(lambda: client.telemetry(key))
+            tel, tel_route = ask(lambda: client.telemetry(key), "telemetry")
             if stats is None:
                 used = tel_route
     except FloodSent as exc:
@@ -345,7 +369,8 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                     reply_window: float = SHARED_REPLY_WINDOW,
                     on_step: Callable[[str], None] | None = None,
                     antenna: Callable[[float], list[bytes] | None] | None = None,
-                    personal: bool = False, status_every: float = STATUS_EVERY_SECONDS) -> PollResult:
+                    personal: bool = False, status_every: float = STATUS_EVERY_SECONDS,
+                    plog: packet_log.NodeLog | None = None) -> PollResult:
     """Poll one repeater under a guest key, as raw packets.
 
     Requests are built and encrypted with the key and replies are read straight
@@ -375,6 +400,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
     """
     now = now or time.time()
     step = on_step or (lambda *_a: None)
+    log = plog or packet_log.NULL
     # The ACL entry, its route and the password it took all belong to the key:
     # when the key changes (shared → this observer's own), start over.
     if node_state.get("acl_key") != shared.public_key.hex():
@@ -402,21 +428,27 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         flooded: list[bool] = []  # one per reply we got, ours or CoreScope's
         wall = time.time
 
-        def send(body: bytes, what: str) -> None:
+        def send(body: bytes, what: str, kind_: str, detail: str = "") -> dict:
+            entry = log.sent(kind_, route.label, detail)
             # openHop confirms a raw send only after transmitting; a long wait
             # means it was busy, not that the packet was refused.
             if not client.send_raw_packet(body):
+                log.unconfirmed(entry)
                 step(f"openHop was busy; {what} sent without confirmation")
+            return entry
 
         def teach() -> None:
             # Ignored by a repeater that doesn't have the key in its ACL, so
             # only sent when it does (or is believed to).
             step(f"Sending our return route {route.label}")
             if one_hop:
-                send(sk.build_route_update(
-                    shared, key, out_path, plen, return_path=out_path, return_path_len=plen), "the route")
+                e = send(sk.build_route_update(
+                    shared, key, out_path, plen, return_path=out_path, return_path_len=plen),
+                    "the route", "route", f"return path via {route.relay_name or route.relay_id[:6]}")
             else:
-                send(sk.build_route_update(shared, key, out_path, plen), "the route")
+                e = send(sk.build_route_update(shared, key, out_path, plen), "the route", "route",
+                         "return path: direct")
+            log.none_expected(e)
             sleep(LOGIN_SETTLE_SECONDS)
 
         def sort(r: sk.Reply, data_tag: int | None) -> tuple[sk.Reply | None, sk.LoginResult | None]:
@@ -430,15 +462,18 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 return None, None
             return None, sk.login_result(r)
 
-        def wider(since: float, data_tag: int | None) -> tuple[sk.Reply | None, sk.LoginResult | None]:
+        def wider(since: float, data_tag: int | None,
+                  entry: dict) -> tuple[sk.Reply | None, sk.LoginResult | None]:
             """Ask CoreScope for what its observers heard since we sent."""
             if antenna is None:
+                log.unanswered(entry)
                 return None, None
             step("Not heard here; checking what CoreScope's observers heard")
             sleep(ANTENNA_SETTLE_SECONDS)
             frames = antenna(since - ANTENNA_CLOCK_SLACK)
             if frames is None:
                 step("CoreScope couldn't be reached")
+                log.unanswered(entry, "CoreScope unreachable")
                 return None, None
             data = login = None
             for raw in frames:
@@ -454,9 +489,12 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                     flooded.append(r.flooded)
             if data is None and login is None:
                 step("No observer heard an answer either")
+                log.unanswered(entry, "not heard here or by CoreScope's observers")
             else:
                 how = "flooded" if flooded and flooded[-1] else "direct"
                 step(f"An observer heard the {'reply' if data is not None else 'login answer'} ({how})")
+                log.answered(entry, "CoreScope", flooded=flooded[-1],
+                             what=_describe(kind, data.data) if data is not None else _role(login))
             return data, login
 
         def request() -> sk.Reply | None:
@@ -465,7 +503,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                               else sk.build_telemetry_request)(shared, key, out_path, plen)
             sent_tags.add(data_tag)
             since = wall()
-            send(body, "the request")
+            entry = send(body, "the request", f"{kind} request")
             if kind == "status":
                 node_state["status_checked_at"] = now
             t0 = time.monotonic()
@@ -475,8 +513,10 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                     latency.append(time.monotonic() - t0)
                     flooded.append(r.flooded)
                     step("Reply received" + (" (flooded: the repeater had no route back)" if r.flooded else ""))
+                    log.answered(entry, "radio", flooded=r.flooded, after_s=latency[-1],
+                                 what=_describe(kind, r.data))
                     return r
-            return wider(since, data_tag)[0]
+            return wider(since, data_tag, entry)[0]
 
         def login(pw: str) -> sk.LoginResult | None:
             """Send a login and listen (quietly) for its answer: off our radio,
@@ -485,15 +525,18 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             body, tag = sk.build_login(shared, key, out_path, plen, pw)
             sent_tags.add(tag)
             since = wall()
-            send(body, "the login")
+            entry = send(body, "the login", "login", "blank password" if pw == "" else f"password {pw!r}")
+            t0 = time.monotonic()
             for frame in client.collect_rx(LOGIN_ANSWER_WAIT + LOGIN_ANSWER_WAIT_PER_HOP * route.hops):
                 r = sk.decode_rx(frame, shared, [key])
                 lr = sort(r, None)[1] if r is not None else None
                 if lr is not None:
                     flooded.append(r.flooded)
                     step("Login answered" + (" (as admin!)" if lr.is_admin else ""))
+                    log.answered(entry, "radio", flooded=r.flooded, after_s=time.monotonic() - t0,
+                                 what=_role(lr))
                     return lr
-            return wider(since, None)[1]
+            return wider(since, None, entry)[1]
 
         reply = None
         admin = False
@@ -556,7 +599,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             # Whatever happens to the removal, the admin answer itself must be
             # recorded, so the key is disabled here and the owner is alerted.
             try:
-                removed = _admin_removal_drill(client, shared, key, out_path, plen, sleep)
+                removed = _admin_removal_drill(client, shared, key, out_path, plen, sleep, log, route.label)
             except Exception as exc:  # noqa: BLE001 - never let the drill hide the admin answer
                 step(f"Removing the key's admin access failed: {exc}")
                 removed = False
@@ -597,8 +640,26 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                       via_corescope=via, reply_s=latency[-1] if latency else None)
 
 
+def _describe(kind: str, data: bytes) -> str:
+    """A reply's content in a few words, for the packet log."""
+    try:
+        if kind == "status":
+            return f"status, {int(parse_stats(data).get('battery_mv') or 0)} mV"
+        mv = lpp_voltage_mv(data)
+        temp = lpp_temperature(data)
+        return "telemetry" + (f", {mv} mV" if mv is not None else ", no voltage") + \
+            (f", {temp} °C" if temp is not None else "")
+    except (CompanionError, ValueError, IndexError):
+        return f"{len(data)} bytes"
+
+
+def _role(lr: sk.LoginResult | None) -> str:
+    return "" if lr is None else ("logged in as ADMIN" if lr.is_admin else "logged in as guest")
+
+
 def _admin_removal_drill(client: CompanionClient, shared: sk.SharedKey, key: bytes,
-                         out_path: bytes, plen: int, sleep: Callable[[float], None]) -> bool:
+                         out_path: bytes, plen: int, sleep: Callable[[float], None],
+                         log: packet_log.NodeLog = packet_log.NULL, route_label: str = "") -> bool:
     """Undo an admin grant on the shared key, then confirm it is gone.
 
     Sends ``setperm <shared key> 0`` — which deletes the key's ACL entry and is
@@ -608,7 +669,9 @@ def _admin_removal_drill(client: CompanionClient, shared: sk.SharedKey, key: byt
     verifying login comes back non-admin, False if none does within the tries.
     """
     try:
+        e = log.sent("admin removal", route_label, "setperm <key> 0")
         client.send_raw_packet(sk.build_admin_removal(shared, key, out_path, plen))
+        log.none_expected(e)
     except (CompanionError, OSError, sk.SharedKeyError):
         return False
     sleep(ADMIN_REMOVE_SETTLE)
@@ -619,9 +682,11 @@ def _admin_removal_drill(client: CompanionClient, shared: sk.SharedKey, key: byt
         if attempt:
             sleep(RETRY_GAP_SECONDS)
         try:
+            e = log.sent("login", route_label, "blank password (verifying the removal)")
             client.send_raw_packet(sk.build_login(shared, key, out_path, plen, "")[0])
             # setperm 0 deleted the ACL entry and its return path, so teach the
             # route again or the verifying reply floods and we miss it.
+            log.none_expected(log.sent("route", route_label, "after the removal"))
             client.send_raw_packet(sk.build_route_update(shared, key, out_path, plen,
                                                          return_path=rp, return_path_len=rlen))
         except (CompanionError, OSError, sk.SharedKeyError, sk.UnsafeSharedPassword):
@@ -633,8 +698,11 @@ def _admin_removal_drill(client: CompanionClient, shared: sk.SharedKey, key: byt
             # The login answer is told by shape, not tag (it carries the
             # repeater's clock); a non-admin answer confirms the key is demoted.
             result = sk.login_result(reply)
+            if result is not None:
+                log.answered(e, "radio", flooded=reply.flooded, what=_role(result))
             if result is not None and not result.is_admin:
                 return True
+        log.unanswered(e)
     return False
 
 

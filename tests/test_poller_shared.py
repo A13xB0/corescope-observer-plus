@@ -541,3 +541,32 @@ def test_status_interval_is_a_setting(shared):
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
                                  sleep=lambda s: None, now=now, status_every=3600)
     assert res.method == "status"  # an hour's setting: status due after two
+
+
+def test_packet_log_records_each_send_and_its_answer(shared):
+    from openhop_neighbour_battery import packet_log
+    entries: list = []
+    log = packet_log.PacketLog(entries)
+    rep = FakeRepeater(shared, battery_mv=4010, deaf=True, require_login=True)
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, {"status_checked_at": 2e6}, routes=[DIRECT],
+                                 sleep=lambda s: None, now=2e6, antenna=_antenna(rep),
+                                 plog=log.for_node(rep.pub.hex(), "West Lomond", "guest key"))
+    assert res.code == poller.OK
+    kinds = [(e["kind"], e["reply"], e.get("via"), e.get("flooded")) for e in entries]
+    assert kinds == [
+        ("login", "answered", "CoreScope", True),   # a new entry's answer floods
+        ("route", "none expected", None, None),
+        ("telemetry request", "answered", "CoreScope", False),  # direct once the route took
+    ]
+    assert entries[2]["what"] == "telemetry, 4010 mV, 15.5 °C"
+    assert entries[0]["name"] == "West Lomond" and entries[0]["key"] == "guest key"
+
+
+def test_packet_log_keeps_the_last_twenty():
+    from openhop_neighbour_battery import packet_log
+    log = packet_log.PacketLog([{"kind": "old"}] * 25)
+    assert len(log.entries) == 20
+    node = log.for_node("ab" * 32, "X", "guest key")
+    for i in range(30):
+        node.sent("login", "direct", str(i))
+    assert len(log.entries) == 20 and log.entries[-1]["detail"] == "29"

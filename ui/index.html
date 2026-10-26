@@ -118,6 +118,17 @@
       </form>
     </section>
 
+    <section class="card" aria-labelledby="packets-h">
+      <h2 id="packets-h">Packet log <span class="muted small">last 20 sent, newest first</span></h2>
+      <div class="table-wrap">
+      <table class="table packets-table">
+        <thead><tr><th scope="col">When</th><th scope="col">Repeater</th><th scope="col">Sent</th><th scope="col">Route</th><th scope="col">Key</th><th scope="col">Answer</th></tr></thead>
+        <tbody id="packets"></tbody>
+      </table>
+      </div>
+      <p class="muted small">Every packet the plugin sends, and what came back: heard on this node's radio, or found in the packets CoreScope's observers heard. A flooded answer means the repeater had no route back to us.</p>
+    </section>
+
     <div class="actions">
       <span id="save-status" class="small" role="status" aria-live="polite"></span>
       <button id="save" class="button" type="button">Save</button>
