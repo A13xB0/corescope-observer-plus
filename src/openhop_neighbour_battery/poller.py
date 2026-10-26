@@ -74,8 +74,11 @@ LOGIN_ANSWER_GRACE = 3.0
 # The radio is half duplex and the repeater answers 300 ms after it hears the
 # login (SERVER_RESPONSE_DELAY), so sending the route update straight away
 # talked over the answer. A new key's answer is flooded, so allow for relays.
-LOGIN_ANSWER_WAIT_DIRECT = 6.0
-LOGIN_ANSWER_WAIT_RELAY = 10.0
+# Generous because listening costs no airtime (it stops as soon as the answer
+# arrives): a direct status reply was measured at 6.3 s on 26 Oct, and a new
+# key's login answer is flooded back through relays, each adding a random delay.
+LOGIN_ANSWER_WAIT_DIRECT = 10.0
+LOGIN_ANSWER_WAIT_RELAY = 15.0
 SHARED_ATTEMPTS = 2
 # The firmware keeps the shared key in its (RAM, 32-entry) guest ACL after a
 # login, so most polls can just send the request and save the login's airtime.
