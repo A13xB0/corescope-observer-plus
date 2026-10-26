@@ -31,14 +31,18 @@ from .openhop import (
 from . import guest_key
 from . import packet_log
 from . import shared_key as sk
-from .poller import ADMIN_STOP, NO_BATTERY, NO_REPLY, OK, is_due, poll_one, poll_one_shared, reading, record, utc_iso
+from .poller import (ADMIN_STOP, NO_BATTERY, NO_REPLY, OK, is_due, poll_one, poll_one_shared, reading, record,
+                     spread_phases, utc_iso)
 from .publisher import Publisher
 from .settings import TRANSIENT_KEYS, Settings, parse, read_raw, write_raw
 from .storage import Secrets, State
 
 LOG = logging.getLogger("openhop.neighbour_battery")
 
-MAX_POLLS_PER_CYCLE = 8  # scheduled cycles; a forced Check now polls every target
+# Scheduled polls go out one at a time, at least this far apart, so a backlog
+# (after a restart, or slots missed while busy) drains gently instead of in a
+# burst. A forced Check now polls every target, spaced by spacing_seconds.
+SCHEDULED_GAP_S = 60
 # A forced Test of the same repeater within this long is refused: each one can
 # put logins on air, and a burst of them only adds load.
 TEST_COOLDOWN_S = 60
@@ -74,6 +78,7 @@ class App:
         self._shared_cache: dict = {}  # the shared key fetched from CoreScope, cached by URL
         self._own_key: sk.SharedKey | None = None  # this observer's polling key (guest_key.py)
         self._owners: dict = {"at": 0.0, "ok_at": 0.0, "nodes": {}}  # who polls which repeater (CoreScope)
+        self._last_scheduled = 0.0  # when the last scheduled poll finished (SCHEDULED_GAP_S)
 
     # -- settings ---------------------------------------------------------
 
@@ -339,6 +344,9 @@ class App:
         port = companion_port(self.ohcfg, self.settings.companion_name)
         now = time.time()
         due = []
+        # Each target polls in a slot of its own within its interval, so the
+        # scheduled polls are spread out rather than sent in bursts.
+        phases = spread_phases(self.settings.targets, lambda k: self.settings.interval_for(k) * 60)
         for node_id in node_ids:
             interval = self.settings.interval_for(node_id) * 60
             n = self._neighbour(node_id)
@@ -346,7 +354,8 @@ class App:
             if n is None or not self.routes_for(n):
                 st["code"] = "not_direct" if n else "not_heard"
                 continue
-            if not (force or is_due(st, interval, self.secrets.has_password(node_id), now)):
+            if not (force or is_due(st, interval, self.secrets.has_password(node_id), now,
+                                    phases.get(node_id))):
                 continue
             # One poller per repeater: if CoreScope has another observer polling
             # this one, leave it to them (its reading still reaches CoreScope).
@@ -376,11 +385,11 @@ class App:
             due.append(n)
         due.sort(key=lambda n: float(self.state.node(n.node_id).get("last_attempt") or 0))
         out = []
-        if not due:
+        if not due or (not force and time.time() - self._last_scheduled < SCHEDULED_GAP_S):
             return out
         s = self.settings
         with CompanionClient(self.companion_host, port) as client:
-            for i, n in enumerate(due if force else due[:MAX_POLLS_PER_CYCLE]):
+            for i, n in enumerate(due if force else due[:1]):
                 routes = self.routes_for(n)
                 if i:
                     # A poll through a relay costs the relay two transmissions.
@@ -445,6 +454,8 @@ class App:
                 self.write_runtime()
                 if on_node:
                     on_node(n, st)
+        if not force:
+            self._last_scheduled = time.time()
         return out
 
     def _shared_key_runtime(self) -> dict:

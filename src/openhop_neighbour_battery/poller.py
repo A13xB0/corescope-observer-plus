@@ -9,6 +9,7 @@ which the guest-key flow works to avoid (see poll_one_shared).
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -817,7 +818,30 @@ def record(node_state: dict, result: PollResult, password_set: bool, now: float)
             node_state["temp_misses"] = int(node_state.get("temp_misses") or 0) + 1
 
 
-def is_due(node_state: dict, interval_s: float, password_set: bool, now: float) -> bool:
+def _slot_due(last: float, now: float, every: float, phase: float | None) -> bool:
+    """Due once per ``every`` seconds. With a ``phase`` the poll falls at that
+    offset into each period (a slot of its own), so repeaters on the same
+    interval are spread across it instead of all coming due together. Without
+    one, simply ``every`` after the last attempt."""
+    if phase is None:
+        return now - last >= every
+    slot = math.floor((now - phase) / every) * every + phase  # latest slot start at or before now
+    # Half a period's gap at least, so a Test just before the slot isn't
+    # followed straight away by the scheduled poll.
+    return last < slot and now - last >= every / 2
+
+
+def spread_phases(node_ids: list[str], interval_for: Callable[[str], float]) -> dict[str, float]:
+    """An even offset per repeater within its own interval: the repeaters
+    sharing an interval are spaced equally across it (stable order by key)."""
+    groups: dict[float, list[str]] = {}
+    for node_id in sorted(set(node_ids)):
+        groups.setdefault(float(interval_for(node_id)), []).append(node_id)
+    return {nid: every * i / len(ids) for every, ids in groups.items() for i, nid in enumerate(ids)}
+
+
+def is_due(node_state: dict, interval_s: float, password_set: bool, now: float,
+           phase: float | None = None) -> bool:
     code = node_state.get("code")
     last = float(node_state.get("last_attempt") or 0)
     if code in (NEEDS_PASSWORD, PASSWORD_REJECTED):
@@ -827,20 +851,28 @@ def is_due(node_state: dict, interval_s: float, password_set: bool, now: float) 
     # Unheard for a day or more: drop to one check per day until it answers.
     unheard = node_state.get("unheard_since")
     if unheard is not None and now - float(unheard) >= UNHEARD_BACKOFF_AFTER:
-        return now - last >= UNHEARD_BACKOFF_INTERVAL
+        return _slot_due(last, now, UNHEARD_BACKOFF_INTERVAL, _scaled(phase, interval_s, UNHEARD_BACKOFF_INTERVAL))
     if int(node_state.get("flood_replies") or 0) >= FLOOD_REPLIES_BEFORE_DAILY:
         # Its replies keep flooding: daily until one comes back direct.
-        return now - last >= max(interval_s, FLOOD_DAILY)
+        every = max(interval_s, FLOOD_DAILY)
+        return _slot_due(last, now, every, _scaled(phase, interval_s, every))
     if code == NO_BATTERY:
-        return now - last >= max(interval_s, NO_BATTERY_RECHECK)
+        every = max(interval_s, NO_BATTERY_RECHECK)
+        return _slot_due(last, now, every, _scaled(phase, interval_s, every))
     if code == NO_REPLY:
         # Quick retries only for a repeater that answered within the last day:
         # one that has been silent longer (or never answered) waits the normal
         # interval, so a dead link doesn't cost a login every 20 minutes.
         recent = now - float(node_state.get("last_success") or 0) < 24 * 3600
         fast = recent and int(node_state.get("no_reply_count") or 0) < NO_REPLY_FAST_TRIES
-        return now - last >= (min(interval_s, NO_REPLY_RETRY) if fast else interval_s)
-    return now - last >= interval_s
+        if fast:
+            return now - last >= min(interval_s, NO_REPLY_RETRY)
+    return _slot_due(last, now, interval_s, phase)
+
+
+def _scaled(phase: float | None, interval_s: float, every: float) -> float | None:
+    """The same relative slot in a longer period."""
+    return None if phase is None or interval_s <= 0 else phase / interval_s * every
 
 
 # Stats published with a reading: everything in the status reply but the

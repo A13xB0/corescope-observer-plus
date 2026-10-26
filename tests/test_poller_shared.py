@@ -651,3 +651,24 @@ def test_first_contact_flood_is_not_held_against_the_repeater(shared):
     poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None)
     assert "flood_replies" not in state
     assert state["recent_tags"]  # this poll's tags are remembered
+
+
+def test_polls_are_spread_across_the_interval():
+    ids = [f"{i:02x}" * 32 for i in range(4)]
+    phases = poller.spread_phases(ids, lambda k: 7200)
+    assert sorted(phases.values()) == [0, 1800, 3600, 5400]  # 2 h shared by 4: every 30 min
+    # Each repeater comes due only at its own slot, not all at once.
+    base = 1_000_000 * 7200.0
+    # Each last polled at its own slot in the previous period.
+    due_at = {nid: next(t for t in range(0, 7200, 60)
+                        if poller.is_due({"code": poller.OK, "last_attempt": base - 7200 + phases[nid]},
+                                         7200, False, base + t, phases[nid])) for nid in ids}
+    assert sorted(due_at.values()) == [0, 1800, 3600, 5400]
+
+
+def test_slot_skips_a_poll_just_after_a_test():
+    # Tested 10 min before its slot: the scheduled poll waits for the next one.
+    base = 1_000_000 * 3600.0
+    st = {"code": poller.OK, "last_attempt": base - 600}
+    assert not poller.is_due(st, 3600, False, base, 0.0)
+    assert poller.is_due(st, 3600, False, base + 3600, 0.0)

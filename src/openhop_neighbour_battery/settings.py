@@ -10,7 +10,7 @@ from pathlib import Path
 KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 INTERVALS = (30, 60, 180, 360)
 STATUS_HOURS = (1, 3, 6, 12, 24)
-NODE_INTERVALS = (30, 60, 180, 360, 720, 1440)
+NODE_INTERVALS = (30, 60, 120, 180, 360, 720, 1440)
 
 DEFAULTS = {
     "openhop_api_url": "http://127.0.0.1:8000",
