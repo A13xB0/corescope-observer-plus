@@ -54,7 +54,7 @@ class FakeRepeater:
     """
 
     def __init__(self, shared: sk.SharedKey, *, admin=False, answer_status=True,
-                 answer_telemetry=True, answer_login=True, battery_mv=4012):
+                 answer_telemetry=True, answer_login=True, battery_mv=4012, require_login=False):
         self.id = _identity()
         self.pub = self.id.get_public_key()
         self.shared = shared
@@ -64,6 +64,11 @@ class FakeRepeater:
         self.answer_telemetry = answer_telemetry
         self.answer_login = answer_login
         self.battery_mv = battery_mv
+        # require_login models the firmware ACL: a data request is only answered
+        # once a login has added the key to the guest ACL. logins counts them.
+        self.require_login = require_login
+        self.logins = 0
+        self._in_acl = False
         self.cli_commands: list[str] = []
         self._outbox: list[bytes] = []
         self._clk = 1_700_000_000  # the repeater's own clock, distinct from request tags
@@ -99,6 +104,8 @@ class FakeRepeater:
         ptype = pkt.get_payload_type()
         payload = pkt.get_payload()
         if ptype == PAYLOAD_TYPE_ANON_REQ:
+            self.logins += 1
+            self._in_acl = True
             if self.answer_login:
                 admin_code = 1 if self.admin else 0
                 # Real firmware puts the repeater's OWN clock first in a login
@@ -110,6 +117,8 @@ class FakeRepeater:
         if ptype == PAYLOAD_TYPE_REQ:
             plaintext = CryptoUtils.mac_then_decrypt(self.secret[:16], self.secret, payload[2:])
             tag, code = int.from_bytes(plaintext[:4], "little"), plaintext[4]
+            if self.require_login and not self._in_acl:
+                return  # not in the ACL yet: a bare request is ignored
             if code == c.REQ_TYPE_GET_STATUS and self.answer_status:
                 self._reply(tag, _stats_bytes(self.battery_mv))
             elif code == sk.REQ_TYPE_GET_TELEMETRY_DATA and self.answer_telemetry:
@@ -206,3 +215,52 @@ def test_reading_marks_shared_key(shared):
     payload = poller.reading(n, res, 1000.0)
     assert payload["key"] == "shared"
     assert payload["battery_mv"] == 4012
+
+
+def test_skips_login_when_already_in_acl(shared):
+    # Believed in the ACL and the admin re-check isn't due: poll with a bare
+    # request, no login — saving the login's airtime.
+    rep = FakeRepeater(shared, battery_mv=4012)
+    now = 2_000_000.0
+    state = {"logged_in_at": now - 60, "login_checked_at": now - 60}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                 sleep=lambda s: None, now=now)
+    assert res.code == poller.OK
+    assert rep.logins == 0
+
+
+def test_logs_in_when_acl_entry_is_gone(shared):
+    # The ACL entry has lapsed (a bare request is ignored): the poll notices the
+    # silence and logs in to be re-added, then reads the battery.
+    rep = FakeRepeater(shared, require_login=True, battery_mv=4012)
+    now = 2_000_000.0
+    state = {"logged_in_at": now - 60, "login_checked_at": now - 60}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                 sleep=lambda s: None, now=now)
+    assert res.code == poller.OK
+    assert rep.logins >= 1
+
+
+def test_covered_skips_retry_and_login(shared):
+    # No answer, but CoreScope already has a fresh reading from another observer:
+    # don't log in to retry.
+    rep = FakeRepeater(shared, answer_status=False)
+    now = 2_000_000.0
+    state = {"logged_in_at": now - 60, "login_checked_at": now - 60}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                 sleep=lambda s: None, now=now, covered=lambda: True)
+    assert res.code == poller.NO_REPLY
+    assert "covered" in res.detail
+    assert rep.logins == 0
+
+
+def test_admin_recheck_forces_a_login(shared):
+    # In the ACL, but the periodic admin re-check is overdue: a login still goes
+    # out, so a key quietly made admin is still caught.
+    rep = FakeRepeater(shared, admin=True, battery_mv=4012)
+    now = 2_000_000.0
+    state = {"logged_in_at": now - 60, "login_checked_at": now - (7 * 3600)}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                 sleep=lambda s: None, now=now)
+    assert res.code == poller.ADMIN_STOP
+    assert rep.logins >= 1

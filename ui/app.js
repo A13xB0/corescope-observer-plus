@@ -12,6 +12,8 @@
   let passwordUpdates = {};
   let tempTargets = null; // pending per-repeater temperature choices (a Set), null = unchanged
   let detailsTarget = null;
+  let abortTest = false;   // set by the Cancel button to stop watching a Test
+  let abortCheck = false;  // set by the Cancel button to stop watching a Check
   let showKey = false; // the companion key is masked until asked for
 
   // maskKey keeps the first and last four characters, which is enough to
@@ -67,16 +69,32 @@
     delete config.requests;
   }
 
-  function request(type, nodeId, extra) {
+  async function request(type, nodeId, extra) {
     const id = `${type}-${Date.now()}`;
-    return saveConfig({ requests: [{ id, type, node_id: nodeId || "", ...(extra || {}) }] }).then(() => id);
+    const body = { requests: [{ id, type, node_id: nodeId || "", ...(extra || {}) }] };
+    try {
+      await saveConfig(body);
+    } catch (_e) {
+      // The plugin may be momentarily busy serving a poll; one retry.
+      await new Promise((r) => setTimeout(r, 1500));
+      await saveConfig(body);
+    }
+    return id;
   }
 
-  async function waitForAction(type, id, timeoutMs = 90000, onProgress) {
+  async function waitForAction(type, id, timeoutMs = 90000, onProgress, shouldAbort) {
     const end = Date.now() + timeoutMs;
     while (Date.now() < end) {
+      if (shouldAbort && shouldAbort()) { const e = new Error("stopped"); e.aborted = true; throw e; }
       await new Promise((r) => setTimeout(r, 2000));
-      await loadRuntime();
+      // The plugin is single-threaded: while it is busy polling it can't serve
+      // the runtime, so a fetch here can fail transiently. Keep waiting rather
+      // than giving up — the poll is still running.
+      try {
+        await loadRuntime();
+      } catch (_e) {
+        continue;
+      }
       const a = (runtime.actions || {})[type];
       if (a && a.id === id) {
         if (onProgress) onProgress(a);
@@ -345,23 +363,26 @@
       }).join("") + "</ol>";
     };
     const view = (a, running) => {
+      const cancel = running ? ' <button type="button" class="button ghost small" data-cancel="test">Cancel</button>' : "";
       const head = running
-        ? `<span class="spin"></span> Testing <strong>${esc(nm)}</strong>… ${elapsed()}s`
+        ? `<span class="spin"></span> Testing <strong>${esc(nm)}</strong>… ${elapsed()}s${cancel}`
         : ((a.code === "ok" || a.code === "no_battery") ? `Answered — ${esc(pollText(a))}` : esc(pollText(a)));
       const cs = running ? "" : corescopeText(a.corescope);
       set(`<div>${head}</div>` + stepsHtml(a, running) + (cs ? `<div class="muted small">${esc(cs)}</div>` : ""), running ? "" : pollKind(a));
     };
+    abortTest = false;
     let lastA = { steps: [] };
     view(lastA, true);
     const timer = setInterval(() => view(lastA, true), 1000);
     try {
       const id = await request("test_login", nodeId);
-      const a = await waitForAction("test_login", id, 90000, (p) => { lastA = p; if (p.running) view(p, true); });
+      const a = await waitForAction("test_login", id, 90000, (p) => { lastA = p; if (p.running) view(p, true); }, () => abortTest);
       clearInterval(timer);
       view(a, false);
     } catch (e) {
       clearInterval(timer);
-      set(esc(e.message), "bad");
+      if (e.aborted) set(`Stopped watching <strong>${esc(nm)}</strong>. The poll may still finish in the background.`, "warn");
+      else set(esc(e.message), "bad");
     }
   }
 
@@ -407,19 +428,22 @@
         const cs = corescopeText(p.corescope);
         return progressRow(nameOf(p.node_id), esc(pollText(p)) + (cs ? ` <span class="muted small">· ${esc(cs)}</span>` : ""), pollKind(p));
       }).join("") || (finished ? "" : `<div class="cp-row cp-pending"><span class="cp-icon"></span><span class="cp-status">waiting…</span></div>`);
+      const cancel = finished ? "" : ' <button type="button" class="button ghost small" data-cancel="check">Cancel</button>';
       const head = finished
         ? `<strong>Done.</strong> <span class="muted small">${esc((a && a.message) || "")}</span>`
-        : `<span class="spin"></span> <strong>Checking ${total} repeater${total === 1 ? "" : "s"}…</strong> <span class="muted small">${prog.length}/${total} · up to a minute each</span>`;
+        : `<span class="spin"></span> <strong>Checking ${total} repeater${total === 1 ? "" : "s"}…</strong> <span class="muted small">${prog.length}/${total} · up to a minute each</span>${cancel}`;
       panel.hidden = false;
       panel.innerHTML = `<div class="cp-head">${head}</div>` + rows;
     };
+    abortCheck = false;
     $("check-now").disabled = true;
     draw({ running: true, progress: [], done: 0, total: scope === "stale" ? undefined : nTargets });
     try {
       const id = await request("check_now", null, { scope });
-      await waitForAction("check_now", id, 120000 * Math.max(1, nTargets) + 20000, draw);
+      await waitForAction("check_now", id, 120000 * Math.max(1, nTargets) + 20000, draw, () => abortCheck);
     } catch (e) {
-      panelMsg(esc(e.message), "bad");
+      if (e.aborted) panelMsg("Stopped watching. The repeaters already queued finish in the background.", "warn");
+      else panelMsg(esc(e.message), "bad");
     } finally {
       $("check-now").disabled = false;
     }
@@ -489,34 +513,29 @@
 
   $("details-form").addEventListener("submit", (ev) => {
     const action = ev.submitter && ev.submitter.value;
-    if (!detailsTarget || action === "cancel") return;
-    if (action === "test") { test(detailsTarget); return; }
+    if (!detailsTarget || action === "cancel") return;  // dialog closes, nothing saved
+    if (action === "test") { ev.preventDefault(); test(detailsTarget); return; }  // stays open for the live test
     if (action === "remove") {
       const id = detailsTarget;
       config.manual_repeaters = manualList().filter((m) => m.node_id !== id);
       config.targets = (config.targets || []).filter((k) => k !== id);
       document.querySelectorAll(`[data-node="${id}"]`).forEach((el) => { el.checked = false; });
-      dirty = true;
-      render();
-      notice("Save to remove the repeater.");
-      return;
+    } else {  // Apply: stage this repeater's password / temperature / shared-key choices
+      const pw = $("login-password").value;
+      if ($("remove-password").checked) passwordUpdates[detailsTarget] = "";
+      else if (pw) passwordUpdates[detailsTarget] = pw;
+      const temps = new Set(tempSet());
+      if ($("temp-this").checked) temps.add(detailsTarget); else temps.delete(detailsTarget);
+      tempTargets = temps;
+      if (!$("shared-this").disabled) {
+        const targets = sharedTargets();
+        if ($("shared-this").checked) targets.add(detailsTarget); else targets.delete(detailsTarget);
+        config.shared_key_targets = [...targets];
+      }
     }
-    const pw = $("login-password").value;
-    if ($("remove-password").checked) passwordUpdates[detailsTarget] = "";
-    else if (pw) passwordUpdates[detailsTarget] = pw;
-    const temps = new Set(tempSet());
-    if ($("temp-this").checked) temps.add(detailsTarget); else temps.delete(detailsTarget);
-    tempTargets = temps;
-    // Shared-key opt-in. Removing a saved password and opting in at once is
-    // fine: the save sends the password removal too, so the gate clears.
-    if (!$("shared-this").disabled) {
-      const targets = sharedTargets();
-      if ($("shared-this").checked) targets.add(detailsTarget); else targets.delete(detailsTarget);
-      config.shared_key_targets = [...targets];
-    }
-    dirty = true;
-    render();
-    notice("Save to apply the changes.");
+    // Save straight away — the repeater's own dialog shouldn't need a second
+    // trip to the page's Save bar. The dialog closes (method="dialog").
+    saveAll().catch((e) => notice(e.message, "bad"));
   });
 
   document.addEventListener("click", (ev) => {
@@ -567,6 +586,9 @@
 
   $("connect").addEventListener("click", connect);
   $("check-now").addEventListener("click", checkNow);
+  // Cancel buttons in the live views (delegated: the panels are re-rendered).
+  $("check-progress").addEventListener("click", (e) => { if (e.target.closest("[data-cancel]")) abortCheck = true; });
+  $("test-status").addEventListener("click", (e) => { if (e.target.closest("[data-cancel]")) abortTest = true; });
 
   $("show-key").addEventListener("click", () => { showKey = !showKey; render(); });
   $("copy-key").addEventListener("click", async () => {
@@ -581,18 +603,21 @@
       notice("Couldn't copy. Press Show to see the key.", "warn");
     }
   });
+  // saveAll persists everything pending (page settings + any staged per-repeater
+  // password/temperature/shared changes). Used by the page's Save bar and, so a
+  // repeater's own dialog saves on Apply, by the details dialog.
+  async function saveAll() {
+    collect();
+    const extra = Object.keys(passwordUpdates).length ? { password_updates: passwordUpdates } : {};
+    await saveConfig(extra);
+    passwordUpdates = {};
+    tempTargets = null;
+    dirty = false;
+    notice("Saved.", "good");
+  }
+
   $("save").addEventListener("click", async () => {
-    try {
-      collect();
-      const extra = Object.keys(passwordUpdates).length ? { password_updates: passwordUpdates } : {};
-      await saveConfig(extra);
-      passwordUpdates = {};
-      tempTargets = null;
-      dirty = false;
-      notice("Saved.", "good");
-    } catch (e) {
-      notice(e.message, "bad");
-    }
+    try { await saveAll(); } catch (e) { notice(e.message, "bad"); }
   });
 
   async function refresh() {

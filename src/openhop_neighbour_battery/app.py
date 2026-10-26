@@ -281,10 +281,16 @@ class App:
                 pw = self.secrets.password(n.node_id)
                 shared = self.shared_key() if self.uses_shared_key(n.node_id) else None
                 if shared is not None:
+                    # Let the poll skip a retry when CoreScope already has a
+                    # fresh reading from another observer (overheard), to keep
+                    # airtime down — the same coverage test used to skip a poll.
+                    covered = None
+                    if self.settings.check_corescope:
+                        covered = lambda nid=n.node_id: self._corescope_covers(nid, interval, time.time())
                     result = poll_one_shared(
                         client, n, shared, st, routes=routes,
                         read_temperature=n.node_id in s.temperature_targets,
-                        on_step=on_step,
+                        on_step=on_step, covered=covered,
                     )
                 else:
                     result = poll_one(
