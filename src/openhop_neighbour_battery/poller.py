@@ -77,8 +77,8 @@ LOGIN_ANSWER_GRACE = 3.0
 # Generous because listening costs no airtime (it stops as soon as the answer
 # arrives): a direct status reply was measured at 6.3 s on 26 Oct, and a new
 # key's login answer is flooded back through relays, each adding a random delay.
-LOGIN_ANSWER_WAIT_DIRECT = 10.0
-LOGIN_ANSWER_WAIT_RELAY = 15.0
+LOGIN_ANSWER_WAIT = 10.0
+LOGIN_ANSWER_WAIT_PER_HOP = 10.0
 SHARED_ATTEMPTS = 2
 # The firmware keeps the shared key in its (RAM, 32-entry) guest ACL after a
 # login, so most polls can just send the request and save the login's airtime.
@@ -430,7 +430,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             step(f"Shared-key login ({'blank' if pw == '' else repr(pw)}) {route.label}")
             send(sk.build_login(shared, key, out_path, plen, pw)[0], "the login")
             answer = None
-            for frame in client.collect_rx(LOGIN_ANSWER_WAIT_RELAY if one_hop else LOGIN_ANSWER_WAIT_DIRECT):
+            for frame in client.collect_rx(LOGIN_ANSWER_WAIT + LOGIN_ANSWER_WAIT_PER_HOP * route.hops):
                 r = sk.decode_rx(frame, shared, [key])
                 lr = sk.login_result(r) if r is not None else None
                 if lr is not None:
