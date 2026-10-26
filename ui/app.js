@@ -203,9 +203,16 @@
     const sk = runtime.shared_key || {};
     const nTargets = (sk.targets || []).length;
     const skPill = $("shared-state");
-    skPill.textContent = sk.configured ? (nTargets ? `${nTargets} repeater${nTargets === 1 ? "" : "s"}` : "ready") : "No key from CoreScope";
-    skPill.className = "pill " + (sk.configured ? "good" : "warn");
-    $("shared-name").textContent = sk.name || (sk.configured ? "shared guest" : "none served");
+    const corescopeSet = !!(runtime.corescope && runtime.corescope.url);
+    // Pre-opt-in the plugin hasn't fetched the key (by design), so "not
+    // checked" rather than claiming CoreScope serves none; "none served" is
+    // only honest once a repeater is opted in and the fetch came back empty.
+    skPill.textContent = sk.configured ? (nTargets ? `${nTargets} repeater${nTargets === 1 ? "" : "s"}` : "ready")
+      : nTargets ? "No key from CoreScope"
+      : corescopeSet ? "Opt a repeater in to use it"
+      : "No CoreScope set";
+    skPill.className = "pill " + (sk.configured ? "good" : nTargets ? "warn" : "neutral");
+    $("shared-name").textContent = sk.name || (sk.configured ? "shared guest" : nTargets ? "none served" : "not checked yet");
     $("shared-ver").textContent = sk.configured ? `· v${sk.version || 0}` : "";
     $("shared-pub").textContent = sk.public ? maskKey(sk.public.toUpperCase()) : "—";
     $("shared-from").textContent = sk.from || (config.corescope_url || "—");
@@ -346,11 +353,13 @@
     $("temp-last").textContent = n.temperature_c != null ? `Last: ${Number(n.temperature_c).toFixed(1)} °C, ${ago(n.temp_at)}`
       : n.temp_misses >= 3 ? "None reported so far" : "";
 
-    // Shared-key opt-in: only when a key is configured. A saved password blocks
-    // it; an earlier admin answer stops it until the operator clears the flag.
+    // Shared-key opt-in: offered whenever a CoreScope address is set. The key
+    // is only fetched once a repeater is opted in, so this must not wait for a
+    // fetched key — otherwise the first repeater could never be opted in. A
+    // saved password blocks it; an earlier admin answer stops it until cleared.
     const sk = runtime.shared_key || {};
     const pwSet = pending !== undefined ? !!pending : n.password_set;
-    $("shared-block").hidden = !sk.configured;
+    $("shared-block").hidden = !(runtime.corescope && runtime.corescope.url);
     $("shared-this").checked = sharedTargets().has(nodeId);
     $("shared-this").disabled = pwSet || n.shared_admin_seen;
     $("shared-pw-warn").hidden = !pwSet;
