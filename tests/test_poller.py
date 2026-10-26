@@ -217,7 +217,8 @@ def test_alternative_routes_go_round_and_the_good_one_is_remembered(fake):
     poller.record(state, result, False, 10_000.0)
     assert state["last_route"] == RELAY_B
     fake.requests.clear()
-    poll(fake, routes=[DIRECT, VIA_A, VIA_B], alternative_routes=True, state=state, now=20_000.0)
+    # Past STATUS_EVERY_SECONDS, so this poll asks for status again.
+    poll(fake, routes=[DIRECT, VIA_A, VIA_B], alternative_routes=True, state=state, now=10_000.0 + 7 * 3600)
     assert statuses(fake)[0][2] == bytes.fromhex("2eecdf")  # last good route goes first
 
 
@@ -382,3 +383,20 @@ def test_recent_failures_do_not_back_off():
     st = {"code": poller.NO_REPLY, "unheard_since": now0 - 2 * hour,
           "last_attempt": now0 - hour, "no_reply_count": 50}
     assert poller.is_due(st, hour, False, now=now0)  # 2 h unheard: still hourly
+
+
+
+def test_status_only_every_six_hours_otherwise_telemetry(fake):
+    # Telemetry carries battery and temperature in a small reply, so status
+    # (60 bytes) is asked for only when the last one is 6 h old.
+    fake.telemetry = bytes.fromhex("01740197016700a7")
+    state = dict(LOGGED_IN)
+    r1, state = poll(fake, state=state, now=100_000.0)
+    assert r1.method == "status"
+    poller.record(state, r1, False, 100_000.0)
+    fake.requests.clear()
+    r2, state = poll(fake, state=state, now=100_000.0 + 3600)
+    assert r2.code == poller.OK and r2.method == "telemetry" and not statuses(fake)
+    fake.requests.clear()
+    r3, state = poll(fake, state=state, now=100_000.0 + 6 * 3600 + 1)
+    assert r3.method == "status"

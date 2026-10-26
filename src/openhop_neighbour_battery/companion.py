@@ -14,6 +14,7 @@ taken for this one.
 
 from __future__ import annotations
 
+import collections
 import socket
 import struct
 import time
@@ -52,6 +53,10 @@ PATH_SIZE = 64
 NAME_SIZE = 32
 OUT_PATH_UNKNOWN = 0xFF
 MIN_REPLY_WAIT = 15.0
+# How long to wait for openHop to confirm a raw send. It confirms only after
+# transmitting, and a busy repeater can queue a packet behind several seconds
+# of flood forwarding; 5 s gave false "refused" errors on sends that went out.
+RAW_SEND_WAIT = 30.0
 
 
 class CompanionError(Exception):
@@ -203,6 +208,10 @@ class CompanionClient:
         self.host = host
         self.port = port
         self.timeout = timeout
+        # Raw RX frames that arrive while we wait for some other answer (e.g.
+        # openHop's OK to a raw send, which comes only after it transmits).
+        # collect_rx hands them out first, so a fast reply isn't lost.
+        self._rx_backlog: collections.deque[bytes] = collections.deque(maxlen=256)
         self._sock: socket.socket | None = None
         self._buf = b""
         self.public_key: bytes = b""
@@ -277,6 +286,8 @@ class CompanionClient:
                 return None
             if frame and frame[0] in codes and (match is None or match(frame)):
                 return frame
+            if frame and frame[0] == PUSH_CODE_LOG_RX_DATA:
+                self._rx_backlog.append(frame)
 
     def _expect_sent(self) -> tuple[float, bytes]:
         """Wait for RESP_CODE_SENT; refuse a flood. Returns the wait and the tag."""
@@ -363,35 +374,54 @@ class CompanionClient:
 
     # -- shared guest key (raw packets) -------------------------------------
 
-    def send_raw_packet(self, body: bytes) -> bool:
+    def send_raw_packet(self, body: bytes, *, wait: float = RAW_SEND_WAIT) -> bool:
         """Transmit a finished packet built elsewhere (CMD_SEND_RAW_PACKET).
 
         ``body`` is [priority][wire packet], exactly as the shared-key builder
         produces it. openHop sends it verbatim: no contact lookup, no flood, no
-        retries. The command answers OK once queued (it is not a SENT/flood
-        hint like a normal send), so there is nothing to check for a flood here
-        — the packet's own route was fixed when it was built.
+        retries — the packet's own route was fixed when it was built.
+
+        openHop answers only once the packet has actually gone out, which can
+        take a while when it is busy forwarding (listen-before-talk, its TX
+        delay, a long flood ahead in the queue). So this waits up to ``wait``
+        and returns False when no answer came: the packet was most likely
+        sent, just unconfirmed, and the caller keeps listening for the reply.
+        An explicit error from openHop still raises.
         """
         self._send(bytes([CMD_SEND_RAW_PACKET]) + body)
-        frame = self._wait({RESP_CODE_OK, RESP_CODE_ERR}, self.timeout)
-        if frame is None or frame[0] != RESP_CODE_OK:
-            code = frame[1] if frame is not None and len(frame) > 1 else -1
+        frame = self._wait({RESP_CODE_OK, RESP_CODE_ERR}, wait)
+        if frame is None:
+            return False
+        if frame[0] != RESP_CODE_OK:
+            code = frame[1] if len(frame) > 1 else -1
             raise CompanionError(f"raw packet refused (error {code})")
         return True
 
-    def collect_rx(self, window: float):
+    def clear_rx_backlog(self) -> None:
+        """Forget RX frames kept from earlier waits (call at the start of a poll)."""
+        self._rx_backlog.clear()
+
+    def collect_rx(self, window: float, until=None):
         """Yield raw RX log frames (PUSH 0x88) heard within ``window`` seconds.
 
         Replies to a shared-key request arrive as ordinary received packets, so
         the plugin reads them straight off the air here rather than through a
         request/response pairing. The caller decodes and matches each by tag.
+        Frames kept while waiting on an earlier command come first. ``until``,
+        if given, is re-read before each wait and may bring the end forward
+        (a monotonic time), so the caller can stop once it has what it needs.
         """
+        while self._rx_backlog:
+            yield self._rx_backlog.popleft()
         deadline = time.monotonic() + window
         while True:
-            remaining = deadline - time.monotonic()
+            end = deadline if until is None else min(deadline, until())
+            remaining = end - time.monotonic()
             if remaining <= 0:
                 return
             frame = self._wait({PUSH_CODE_LOG_RX_DATA}, remaining)
             if frame is None:
+                if until is not None and until() < deadline and time.monotonic() < deadline:
+                    continue  # the end moved; re-check
                 return
             yield frame

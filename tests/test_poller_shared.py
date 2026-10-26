@@ -86,7 +86,10 @@ class FakeRepeater:
         self._handle(pkt)
         return True
 
-    def collect_rx(self, window: float):
+    def clear_rx_backlog(self) -> None:
+        pass
+
+    def collect_rx(self, window: float, until=None):
         out, self._outbox = self._outbox, []
         yield from out
 
@@ -347,3 +350,33 @@ def test_any_answer_stops_the_backoff_clock():
     st = {"unheard_since": 1.0}
     poller.record(st, poller.PollResult(poller.NEEDS_PASSWORD), password_set=False, now=100.0)
     assert "unheard_since" not in st
+
+
+def test_shared_uses_telemetry_between_status_reads(shared):
+    rep = FakeRepeater(shared, battery_mv=4012)
+    now = 2_000_000.0
+    state = {"status_checked_at": now - 3600}  # status read an hour ago
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT],
+                                 sleep=lambda s: None, now=now)
+    assert res.code == poller.OK and res.method == "telemetry"
+    state2 = {"status_checked_at": now - 7 * 3600}
+    res2 = poller.poll_one_shared(rep, _neighbour(rep), shared, state2, routes=[DIRECT],
+                                  sleep=lambda s: None, now=now)
+    assert res2.method == "status" and state2["status_checked_at"] == now
+
+
+def test_unconfirmed_send_keeps_listening(shared):
+    # openHop didn't confirm the send in time (it was busy), but the packet went
+    # out: the poll carries on and reads the reply instead of failing.
+    rep = FakeRepeater(shared, battery_mv=4012)
+    real = rep.send_raw_packet
+
+    def slow(body):
+        real(body)
+        return False
+    rep.send_raw_packet = slow
+    steps = []
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, {}, routes=[DIRECT],
+                                 sleep=lambda s: None, on_step=steps.append)
+    assert res.code == poller.OK
+    assert any("busy" in s for s in steps)

@@ -39,6 +39,11 @@ REQUEST_ATTEMPTS = 3
 # A repeater that ignores status but answers telemetry is asked by telemetry
 # first; status is tried again after this long.
 STATUS_RECHECK = 24 * 3600
+# Battery and chip temperature come from telemetry, whose guest reply is about
+# 12 bytes; a status reply is 60 (RepeaterStats). So every poll asks for
+# telemetry, and the full status (uptime, noise floor, counters for the
+# Repeater Status charts) is asked for only when the last one is this old.
+STATUS_EVERY_SECONDS = 6 * 3600
 # After this many polls in a row with no answer at all, the last login is
 # assumed lost (a rebooted repeater forgets guests): the next poll logs in
 # before asking anything.
@@ -62,6 +67,9 @@ TEMP_DAILY = 24 * 3600
 # Shared-key poll: how long to listen off the air for a reply after each raw
 # send, and how many data requests to try within one poll.
 SHARED_REPLY_WINDOW = 20.0
+# Once the data reply is in, how much longer to wait for the login answer
+# (its role check) when a login was sent with the request.
+LOGIN_ANSWER_GRACE = 3.0
 SHARED_ATTEMPTS = 2
 # The firmware keeps the shared key in its (RAM, 32-entry) guest ACL after a
 # login, so most polls can just send the request and save the login's airtime.
@@ -90,6 +98,7 @@ class PollResult:
     admin_seen: bool = False  # the shared key was answered as admin
     admin_removed: bool | None = None  # removal drill result: True ok, False failed, None not run
     covered: bool = False  # we didn't hear it, but CoreScope did (another observer overheard)
+    reply_s: float | None = None  # seconds from the request going out to its reply (for tuning windows)
 
 
 def utc_iso(ts: float | None = None) -> str:
@@ -104,6 +113,13 @@ def ordered_routes(routes: list[Route], last_key: str | None) -> list[Route]:
             out.insert(0, out.pop(i))
             break
     return out
+
+
+def status_is_due(node_state: dict, now: float) -> bool:
+    """Whether to ask for the full status this poll (never read yet, or the
+    last ask was STATUS_EVERY_SECONDS ago)."""
+    last = node_state.get("status_checked_at")
+    return last is None or now - float(last) >= STATUS_EVERY_SECONDS
 
 
 def temperature_due(node_state: dict, now: float) -> bool:
@@ -218,7 +234,8 @@ def poll_one(client: CompanionClient, n: Neighbour, password: str, node_state: d
     one_hop = all(r.hops > 0 for r in ordered)
     status_ignored = bool(node_state.get("status_ignored")) and \
         now - float(node_state.get("status_checked_at") or 0) < STATUS_RECHECK
-    telemetry_only = one_hop or status_ignored
+    status_due = status_is_due(node_state, now)
+    telemetry_only = one_hop or status_ignored or not status_due
     stats = tel = None
     used = None
     try:
@@ -335,47 +352,67 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         out_path = route.path
         plen = path_len_byte(out_path, route.hash_size)
         one_hop = route.hops > 0
-        kind = "telemetry" if one_hop else "status"
+        # Telemetry every poll (battery + chip temperature, small reply);
+        # status only every STATUS_EVERY_SECONDS, and never through a relay.
+        status_due = status_is_due(node_state, now)
+        kind = "status" if (not one_hop and status_due) else "telemetry"
+        client.clear_rx_backlog()  # only frames heard during this poll count
+        latency: list[float] = []
 
-        def collect(data_tag: int) -> tuple[sk.Reply | None, sk.LoginResult | None]:
-            """One window: the data reply (matched by our tag) and the login
-            answer (told by shape — its own tag is the repeater's clock, not
-            ours). Stops early on an admin answer or once both are in hand."""
+        def send(body: bytes, what: str) -> None:
+            # openHop confirms a raw send only after transmitting; a long wait
+            # means it was busy, not that the packet was refused.
+            if not client.send_raw_packet(body):
+                step(f"openHop was busy; {what} sent without confirmation")
+
+        def collect(data_tag: int, want_login: bool) -> tuple[sk.Reply | None, sk.LoginResult | None]:
+            """One window: the data reply (matched by our tag) and, if a login
+            went with the request, the login answer (told by shape — its tag is
+            the repeater's clock, not ours). Stops as soon as what is expected
+            is in hand (allowing the login answer a short grace after the data),
+            or at once on an admin answer — not at the end of the window."""
             data = login = None
-            for frame in client.collect_rx(reply_window):
+            t0 = time.monotonic()
+            until = [float("inf")]
+            for frame in client.collect_rx(reply_window, until=lambda: until[0]):
                 r = sk.decode_rx(frame, shared, [key])
                 if r is None:
                     continue
                 if r.tag == data_tag and data is None:
                     data = r
+                    latency.append(time.monotonic() - t0)
+                    if want_login and login is None:
+                        until[0] = time.monotonic() + LOGIN_ANSWER_GRACE
                 elif login is None:
                     lr = sk.login_result(r)
                     if lr is not None:
                         login = lr
                         if lr.is_admin:
                             break
-                if data is not None and login is not None:
+                if data is not None and (login is not None or not want_login):
                     break
             return data, login
 
-        def request() -> tuple[sk.Reply | None, sk.LoginResult | None]:
+        def request(want_login: bool = False) -> tuple[sk.Reply | None, sk.LoginResult | None]:
             step(f"Requesting {kind}, waiting for a reply")
             body, data_tag = (sk.build_status_request if kind == "status"
                               else sk.build_telemetry_request)(shared, key, out_path, plen)
-            client.send_raw_packet(body)
-            return collect(data_tag)
+            send(body, "the request")
+            if kind == "status":
+                node_state["status_checked_at"] = now
+            return collect(data_tag, want_login)
 
         def login(pw: str, teach: bool) -> None:
             step(f"Shared-key login ({'blank' if pw == '' else repr(pw)}) {route.label}")
-            client.send_raw_packet(sk.build_login(shared, key, out_path, plen, pw)[0])
+            send(sk.build_login(shared, key, out_path, plen, pw)[0], "the login")
             if teach:
                 # Teach the return path so replies come direct, not flooded
-                # (firmware ClientACL.putClient leaves a new key pathless).
+                # (firmware: a key with no stored route gets flooded replies).
                 if one_hop:
-                    client.send_raw_packet(sk.build_route_update(
-                        shared, key, out_path, plen, return_path=out_path, return_path_len=plen))
+                    send(sk.build_route_update(
+                        shared, key, out_path, plen, return_path=out_path, return_path_len=plen), "the route")
                 else:
-                    client.send_raw_packet(sk.build_route_update(shared, key, out_path, plen))
+                    send(sk.build_route_update(shared, key, out_path, plen), "the route")
             sleep(LOGIN_SETTLE_SECONDS)
 
         def overheard() -> bool:
@@ -417,7 +454,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 if tried:
                     sleep(RETRY_GAP_SECONDS)
                 login(pw, teach=not in_acl)
-                data, lr = request()
+                data, lr = request(want_login=True)
                 tried += 1
                 if lr is not None:
                     # The repeater answered the login, so its role is known:
@@ -462,7 +499,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             return PollResult(NO_REPLY, key_mode="shared", route=route, detail="unreadable status reply")
         mv = int(stats.get("battery_mv") or 0)
         return PollResult(OK if mv > 0 else NO_BATTERY, battery_mv=mv, stats=stats, route=route,
-                          key_mode="shared", method="status")
+                          key_mode="shared", method="status", reply_s=latency[-1] if latency else None)
     temp = lpp_temperature(reply.data) if read_temperature else None
     temp_code = ("ok" if temp is not None else "none") if read_temperature else ""
     mv = lpp_voltage_mv(reply.data)
@@ -471,7 +508,8 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                           detail="telemetry answered without a voltage",
                           temperature_c=temp, temperature_code=temp_code)
     return PollResult(OK if mv > 0 else NO_BATTERY, battery_mv=mv, route=route, key_mode="shared",
-                      method="telemetry", temperature_c=temp, temperature_code=temp_code)
+                      method="telemetry", temperature_c=temp, temperature_code=temp_code,
+                      reply_s=latency[-1] if latency else None)
 
 
 def _covered(route: Route, step: Callable[[str], None]) -> PollResult:

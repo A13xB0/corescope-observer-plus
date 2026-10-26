@@ -7,6 +7,8 @@ import logging
 import time
 from pathlib import Path
 
+from openhop_core.protocol.packet_builder import PacketBuilder
+
 from . import __version__
 from .companion import CompanionClient
 from .openhop import (
@@ -49,6 +51,7 @@ class App:
         self.companion_host = companion_host
         self.secrets = Secrets(data_dir)
         self.state = State(data_dir)
+        self._seed_tag()
         self.settings = Settings()
         self.ohcfg: OpenHopConfig | None = None
         self.check: dict[str, dict] = {}
@@ -60,6 +63,18 @@ class App:
         self._shared_cache: dict = {}  # the shared key fetched from CoreScope, cached by URL
 
     # -- settings ---------------------------------------------------------
+
+    def _seed_tag(self) -> None:
+        """Never send a request timestamp lower than one already used.
+
+        A repeater ignores a request whose timestamp isn't above the last one
+        it accepted from that key. openhop_core keeps its timestamps strictly
+        increasing within this process; this carries that across restarts (and
+        a clock that was briefly ahead) by starting from the highest we used.
+        """
+        last = int(self.state.value.get("last_tag") or 0)
+        if last > PacketBuilder._last_unique_timestamp:
+            PacketBuilder._last_unique_timestamp = last
 
     def load_settings(self) -> None:
         raw = read_raw(self.data_dir)
@@ -318,12 +333,17 @@ class App:
                 st["name"] = n.name
                 if result.code == ADMIN_STOP:
                     self._disable_shared_key(n, result)
-                LOG.info("poll %s (%s) %s%s: %s %s%s", n.name, n.node_id[:8],
+                LOG.info("poll %s (%s) %s%s: %s %s%s%s", n.name, n.node_id[:8],
                          result.route.label if result.route else "-",
                          " [shared]" if result.key_mode == "shared" else "", result.code,
                          f"{result.battery_mv} mV" if result.battery_mv is not None else result.detail,
                          f", {result.temperature_c} °C" if result.temperature_c is not None
-                         else (f", temperature {result.temperature_code}" if result.temperature_code else ""))
+                         else (f", temperature {result.temperature_code}" if result.temperature_code else ""),
+                         f", reply {result.reply_s:.1f} s" if result.reply_s is not None else "")
+                if shared is not None:
+                    # Keep the newest request timestamp across restarts (see _seed_tag).
+                    self.state.value["last_tag"] = max(int(self.state.value.get("last_tag") or 0),
+                                                       PacketBuilder._last_unique_timestamp)
                 # A shared-key reading is not published here: CoreScope decodes
                 # it from the raw reply (which this node's openHop uploads like
                 # any observer) and credits it to this poller via the claim, so

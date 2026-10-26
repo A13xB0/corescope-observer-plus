@@ -124,7 +124,7 @@
       <p class="muted small">Blank logs in automatically: as a guest when the repeater has no guest password, or through its ACL if it lists this plugin's key. A password is kept on this observer only and never published. An admin password works but gives full control and makes the repeater write to flash at each login, so prefer a guest password or an ACL entry.</p>
       <label class="check"><input id="remove-password" type="checkbox"> Remove the saved password</label>
       <label class="check"><input id="temp-this" type="checkbox"> <span>Read temperature <span id="temp-last" class="muted small"></span>
-        <span class="muted small" style="display:block">Adds a telemetry request after each status request. Chip temperature, on ESP32 and nRF52 boards.</span></span></label>
+        <span class="muted small" style="display:block">The chip temperature arrives with the battery reading (ESP32 and nRF52 boards), so this costs no extra airtime.</span></span></label>
       <div id="shared-block" hidden>
         <label class="check"><input id="shared-this" type="checkbox"> <span><strong>Use the shared guest key here</strong>
           <span class="muted small" style="display:block">Polls this repeater as the shared guest identity, so other observers can feed CoreScope its readings.</span></span></label>
