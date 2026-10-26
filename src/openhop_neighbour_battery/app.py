@@ -334,10 +334,10 @@ class App:
         if not self.check.get("companion", {}).get("ok") or not self.ohcfg:
             return []
         port = companion_port(self.ohcfg, self.settings.companion_name)
-        interval = self.settings.interval_minutes * 60
         now = time.time()
         due = []
         for node_id in node_ids:
+            interval = self.settings.interval_for(node_id) * 60
             n = self._neighbour(node_id)
             st = self.state.node(node_id)
             if n is None or not self.routes_for(n):
@@ -436,6 +436,9 @@ class App:
                 if result.code in (OK, NO_BATTERY) and result.key_mode != "shared":
                     out.append(reading(n, result, time.time()))
                 self.state.save()
+                # A cycle can take many minutes: keep the page (and its packet
+                # log) current after each repeater, not only at the end.
+                self.write_runtime()
                 if on_node:
                     on_node(n, st)
         return out

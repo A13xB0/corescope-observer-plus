@@ -120,7 +120,7 @@ h3 { margin: 0 0 8px; }
 dialog { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--text); width: min(560px, calc(100vw - 32px)); }
 dialog form { display: grid; gap: 8px; }
 dialog h4 { margin: 8px 0 0; font-size: 14px; }
-dialog input[type=password] { padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+dialog input[type=password], dialog select { padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
 dialog .check { display: flex; gap: 8px; align-items: baseline; }
 .options { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px 20px; margin: 4px 0 8px; }
 .option { display: grid; grid-template-columns: 18px 1fr; gap: 8px; align-items: start; }

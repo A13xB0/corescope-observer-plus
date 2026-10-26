@@ -10,6 +10,7 @@ from pathlib import Path
 KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 INTERVALS = (30, 60, 180, 360)
 STATUS_HOURS = (1, 3, 6, 12, 24)
+NODE_INTERVALS = (30, 60, 180, 360, 720, 1440)
 
 DEFAULTS = {
     "openhop_api_url": "http://127.0.0.1:8000",
@@ -31,6 +32,7 @@ DEFAULTS = {
     "shared_key_targets": [],
     "check_corescope": True,
     "guest_passwords": {},
+    "poll_intervals": {},
 }
 
 # Written by the plugin page, consumed and cleared by the plugin. Secrets go
@@ -71,6 +73,12 @@ class Settings:
     # "hello" or "" (blank). Unset = learn it (blank first, then hello). Not a
     # secret: the guest key only ever uses these two, both public.
     guest_passwords: dict = field(default_factory=dict)
+    # Per-repeater telemetry interval in minutes, overriding interval_minutes.
+    poll_intervals: dict = field(default_factory=dict)
+
+    def interval_for(self, node_id: str) -> int:
+        """Minutes between polls of this repeater."""
+        return int(self.poll_intervals.get(node_id) or self.interval_minutes)
 
 
 def parse(raw: dict) -> Settings:
@@ -128,6 +136,15 @@ def parse(raw: dict) -> Settings:
     gp = raw.get("guest_passwords")
     s.guest_passwords = {str(k).lower(): v for k, v in (gp.items() if isinstance(gp, dict) else [])
                          if KEY_RE.match(str(k).lower()) and v in ("", "hello")}
+    pi = raw.get("poll_intervals")
+    s.poll_intervals = {}
+    for k, v in (pi.items() if isinstance(pi, dict) else []):
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            continue
+        if KEY_RE.match(str(k).lower()) and v in NODE_INTERVALS:
+            s.poll_intervals[str(k).lower()] = v
     cc = raw.get("check_corescope", True)
     # A JSON false, or the strings "false"/"0"/"no"/"off" from a form, all mean off.
     if isinstance(cc, str):

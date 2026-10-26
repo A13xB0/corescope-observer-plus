@@ -233,6 +233,10 @@
     return "";
   }
 
+  function everyText(min) {
+    return min < 60 ? `${min} min` : min === 60 ? "hourly" : `every ${min / 60} h`;
+  }
+
   // The packet log: what was sent, and what answered it (packet_log.py).
   function packetAnswer(e) {
     if (e.reply === "none expected") return '<span class="muted">none expected</span>';
@@ -351,7 +355,7 @@
         ? '<tr class="group-row"><td colspan="8" class="muted small">Not polled</td></tr>' : "";
       return `${divider}<tr class="${ok ? "" : "dim"}">
         <td><input type="checkbox" data-node="${esc(n.node_id)}" ${chosen.has(n.node_id) ? "checked" : ""} ${ok ? "" : "disabled"} aria-label="Poll ${esc(n.name)}"></td>
-        <td><strong>${esc(n.name)}</strong><div class="muted small mono">${esc(n.node_id.slice(0, 8))}…${n.uptime_secs ? ` · up ${Math.floor(n.uptime_secs / 86400)} d` : ""}${keyBadge(n)}</div></td>
+        <td><strong>${esc(n.name)}</strong><div class="muted small mono">${esc(n.node_id.slice(0, 8))}…${n.uptime_secs ? ` · up ${Math.floor(n.uptime_secs / 86400)} d` : ""}${(config.poll_intervals || {})[n.node_id] ? ` · ${everyText(config.poll_intervals[n.node_id])}` : ""}${keyBadge(n)}</div></td>
         <td>${routeCell(n)}</td>
         <td>${ago(n.last_seen)}</td>
         <td>${ok || n.role ? loginCell(n) : ""}</td>
@@ -569,6 +573,9 @@
     else { pwState.textContent = "No password saved — logs in blank (guest or ACL)."; pwState.className = "password-state small muted"; }
     $("remove-manual").hidden = !n.manual;
     $("temp-this").checked = tempSet().has(nodeId);
+    const own = (config.poll_intervals || {})[nodeId];
+    $("node-interval").value = own ? String(own) : "default";
+    $("node-interval").options[0].textContent = `Default (${everyText(config.interval_minutes || 60)})`;
     $("temp-last").textContent = n.temperature_c != null ? `Last: ${Number(n.temperature_c).toFixed(1)} °C, ${ago(n.temp_at)}`
       : n.temp_misses >= 3 ? "None reported so far" : "";
 
@@ -630,6 +637,10 @@
         if ($("remove-password").checked) passwordUpdates[detailsTarget] = "";
         else if (pw) passwordUpdates[detailsTarget] = pw;
       }
+      const pis = { ...(config.poll_intervals || {}) };
+      const iv = $("node-interval").value;
+      if (iv === "default") delete pis[detailsTarget]; else pis[detailsTarget] = Number(iv);
+      config.poll_intervals = pis;
       const temps = new Set(tempSet());
       if ($("temp-this").checked) temps.add(detailsTarget); else temps.delete(detailsTarget);
       tempTargets = temps;

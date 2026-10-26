@@ -583,3 +583,11 @@ def test_operator_set_guest_password_is_used_alone(shared, monkeypatch):
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, {"shared_password": ""}, routes=[DIRECT],
                                  sleep=lambda s: None, guest_password="hello", personal=True)
     assert res.code == poller.OK and sent == ["hello"]
+
+
+def test_per_repeater_poll_interval():
+    from openhop_neighbour_battery.settings import parse
+    k = "ab" * 32
+    s = parse({"interval_minutes": 60, "poll_intervals": {k: 360, "cd" * 32: 7}})
+    assert s.poll_intervals == {k: 360}
+    assert s.interval_for(k) == 360 and s.interval_for("ef" * 32) == 60
