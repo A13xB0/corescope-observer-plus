@@ -655,11 +655,32 @@
     $("node-packets").innerHTML = packetRows(n.packets, false);
     const routes = orderedRoutes(n);
     $("routes").innerHTML = routes.map((r, i) => {
-      const last = r.key === n.last_route ? (n.code === "ok" ? '<span class="pill good">answered</span>' : '<span class="pill bad">no answer</span>')
-        : i === 0 && n.code === "no_reply" ? '<span class="pill bad">no answer</span>' : '<span class="muted small">not tried</span>';
+      const last = routeResult(n, r, i);
       return `<tr><td class="muted">${i + 1}</td><td>${routeName(r)}</td><td>${r.adverts}</td><td>${r.snr == null ? "—" : `${Number(r.snr).toFixed(1)} dB`}</td><td>${last}</td></tr>`;
     }).join("") || '<tr><td colspan="5" class="muted">No usable route.</td></tr>';
     $("details-dialog").showModal();
+  }
+
+  // routeResult: the route's latest outcome and when, or that it is resting
+  // after failing repeatedly as an alternative (and when it is tried again).
+  function routeResult(n, r, i) {
+    const now = Date.now() / 1000;
+    const res = (n.route_results || {})[r.key];
+    const restUntil = (n.alt_rest_until || {})[r.key];
+    let html;
+    if (res) {
+      const ok = res[1] === "answered";
+      html = `<span class="pill ${ok ? "good" : "bad"}">${ok ? "answered" : "no answer"}</span> <span class="muted small">${ago(res[0])}</span>`;
+    } else if (r.key === n.last_route || (i === 0 && n.code === "no_reply")) {
+      // Before route_results existed: what the repeater's own state says.
+      html = n.code === "ok" ? '<span class="pill good">answered</span>' : '<span class="pill bad">no answer</span>';
+    } else {
+      html = '<span class="muted small">not tried</span>';
+    }
+    if (restUntil && restUntil > now) {
+      html += `<div class="muted small">resting after 3 misses; next try after ${new Date(restUntil * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>`;
+    }
+    return html;
   }
 
   $("details-form").addEventListener("submit", (ev) => {

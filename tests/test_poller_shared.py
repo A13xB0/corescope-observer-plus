@@ -750,3 +750,18 @@ def test_alternative_is_route_plus_one_request_and_rests_after_failing(shared):
                                  sleep=lambda s: None, now=now + 10, alternative_routes=True)
     assert not res.alternative
     assert poller.pick_alternative(state, [DIRECT, VIA], DIRECT, now + 25 * 3600) is VIA
+
+
+def test_route_results_record_best_and_alternative():
+    st = {}
+    poller.note_route_result(st, "best", False, 100.0)
+    poller.note_route_result(st, "alt", True, 101.0)
+    assert st["route_results"] == {"best": [100.0, "no answer"], "alt": [101.0, "answered"]}
+    for i in range(poller.ROUTE_RESULTS_KEPT + 3):
+        poller.note_route_result(st, f"r{i}", True, 200.0 + i)
+    assert len(st["route_results"]) == poller.ROUTE_RESULTS_KEPT
+    assert "best" not in st["route_results"]
+
+
+def test_alternative_rest_is_six_hours():
+    assert poller.ALT_REST_SECONDS == 6 * 3600

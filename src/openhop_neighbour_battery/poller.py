@@ -84,7 +84,22 @@ ALTERNATIVE_IF_HEARD_WITHIN = 24 * 3600
 
 
 ALT_FAILS_BEFORE_REST = 3
-ALT_REST_SECONDS = 24 * 3600
+# A day was too long: Lucklaw Hill's alternative via West Lomond was rested
+# for 24 h while its best route (via Montrave) was down too, leaving it with
+# no route being tried at all. A try every 6 h costs one route packet and one
+# request.
+ALT_REST_SECONDS = 6 * 3600
+# How many routes' last outcomes to remember per repeater (route_results).
+ROUTE_RESULTS_KEPT = 8
+
+
+def note_route_result(node_state: dict, route_key: str, answered: bool, now: float) -> None:
+    """Remember a route's latest outcome, for the routes table on the page."""
+    res = node_state.setdefault("route_results", {})
+    res.pop(route_key, None)
+    res[route_key] = [now, "answered" if answered else "no answer"]
+    for k in list(res)[:-ROUTE_RESULTS_KEPT]:
+        del res[k]
 
 
 def pick_alternative(node_state: dict, live: list[Route], best: Route, now: float) -> Route | None:
@@ -708,6 +723,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             one_hop = route.hops > 0
             kind = "status" if (not one_hop and status_due) else "telemetry"
             used_alternative = used_alt[0] = True
+            note_route_result(node_state, live[0].key if live else route.key, False, now)
             step(f"No answer on the best route; trying the alternative route {route.label}")
             teach()
             tried += 1
@@ -883,6 +899,8 @@ def record(node_state: dict, result: PollResult, password_set: bool, now: float)
         # Any answer at all (a reading, a password refusal, an admin answer)
         # proves the repeater is alive: stop the daily-backoff clock.
         node_state.pop("unheard_since", None)
+    if result.route is not None and result.code in (OK, NO_BATTERY, NO_REPLY):
+        note_route_result(node_state, result.route.key, result.code != NO_REPLY, now)
     if result.code in (OK, NO_BATTERY):
         node_state["last_success"] = now
         node_state["battery_mv"] = result.battery_mv

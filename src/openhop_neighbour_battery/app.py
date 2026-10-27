@@ -31,7 +31,7 @@ from .openhop import (
 from . import guest_key
 from . import packet_log
 from . import shared_key as sk
-from .poller import (ADMIN_STOP, NO_BATTERY, NO_REPLY, OK, is_due, poll_one, poll_one_shared, reading, record,
+from .poller import (ADMIN_STOP, ALT_FAILS_BEFORE_REST, ALT_REST_SECONDS, NO_BATTERY, NO_REPLY, OK, is_due, poll_one, poll_one_shared, reading, record,
                      spread_phases, utc_iso)
 from .publisher import Publisher
 from .settings import TRANSIENT_KEYS, Settings, parse, read_raw, write_raw
@@ -749,6 +749,12 @@ class App:
                 "last_attempt": st.get("last_attempt"), "retried": bool(st.get("retried")),
                 "no_reply_count": st.get("no_reply_count") or 0,
                 "last_route": st.get("last_route"), "last_route_label": st.get("last_route_label"),
+                # Each route's latest outcome, and alternatives resting after
+                # repeated failures (poller.pick_alternative), for the routes table.
+                "route_results": st.get("route_results") or {},
+                "alt_rest_until": {k: float(v[1]) + ALT_REST_SECONDS
+                                   for k, v in (st.get("alt_fails") or {}).items()
+                                   if int(v[0]) >= ALT_FAILS_BEFORE_REST},
                 "temperature_c": st.get("temperature_c"), "temp_at": st.get("temp_at"),
                 "temp_code": st.get("temp_code"), "temp_misses": st.get("temp_misses") or 0,
                 "read_temperature": n.node_id in self.settings.temperature_targets,
