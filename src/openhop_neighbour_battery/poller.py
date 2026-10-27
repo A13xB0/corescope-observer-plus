@@ -83,12 +83,6 @@ ROUTE_REFRESH_SECONDS = 24 * 3600
 ALTERNATIVE_IF_HEARD_WITHIN = 24 * 3600
 
 
-ALT_FAILS_BEFORE_REST = 3
-# A day was too long: Lucklaw Hill's alternative via West Lomond was rested
-# for 24 h while its best route (via Montrave) was down too, leaving it with
-# no route being tried at all. A try every 6 h costs one route packet and one
-# request.
-ALT_REST_SECONDS = 6 * 3600
 # How many routes' last outcomes to remember per repeater (route_results).
 ROUTE_RESULTS_KEPT = 8
 
@@ -103,17 +97,10 @@ def note_route_result(node_state: dict, route_key: str, answered: bool, now: flo
 
 
 def pick_alternative(node_state: dict, live: list[Route], best: Route, now: float) -> Route | None:
-    """The next route to try after the best got nothing, skipping any that has
-    failed ALT_FAILS_BEFORE_REST times in a row as an alternative (given one
-    try a day after that, in case the link came back)."""
-    fails = node_state.get("alt_fails") or {}
+    """The next route after the best, for the poll's last retry."""
     for r in live:
-        if r.key == best.key:
-            continue
-        count, last = (fails.get(r.key) or [0, 0])[:2]
-        if int(count) >= ALT_FAILS_BEFORE_REST and now - float(last) < ALT_REST_SECONDS:
-            continue
-        return r
+        if r.key != best.key:
+            return r
     return None
 
 
@@ -630,7 +617,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
 
         def attempt(force_route: bool) -> tuple[sk.Reply | None, bool, bool, bool]:
             """Steps 1-2 on the current route: (reply, admin, logged_in, login_answered)."""
-            nonlocal tried
+            nonlocal tried, route, out_path, plen, one_hop, kind
             reply = None
             admin = False
             in_acl = bool(node_state.get("logged_in_at"))
@@ -650,11 +637,27 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                 if reply is None:
                     # A lost request or reply is far likelier than a lost ACL
                     # entry (guests only drop out on a reboot or when 32 newer
-                    # keys push them out), so ask once more rather than log in.
+                    # keys push them out), so ask once more on the same route
+                    # rather than log in, and then once by the next route.
                     sleep(RETRY_GAP_SECONDS)
                     tried += 1
-                    step("No reply; asking again before considering a login")
+                    step("No reply; asking again on the same route")
                     reply = request()
+                    alt = (pick_alternative(node_state, live, route, now)
+                           if reply is None and alternative_routes else None)
+                    if alt is not None:
+                        sleep(RETRY_GAP_SECONDS)
+                        tried += 1
+                        note_route_result(node_state, route.key, False, now)
+                        route = alt
+                        out_path = route.path
+                        plen = path_len_byte(out_path, route.hash_size)
+                        one_hop = route.hops > 0
+                        kind = "status" if (not one_hop and status_due) else "telemetry"
+                        used_alt[0] = True
+                        step(f"Still no reply; asking by the alternative route {route.label}")
+                        teach()  # the return path differs
+                        reply = request()
                 if reply is None:
                     misses = int(node_state.get("no_reply_count") or 0) + 1
                     if misses % FORGET_LOGIN_AFTER:
@@ -707,32 +710,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
             return reply, admin, logged_in, login_answered
 
         reply, admin, logged_in, login_answered = attempt(False)
-        used_alternative = False
-        alt = (pick_alternative(node_state, live, route, now)
-               if (reply is None and not admin and not login_answered and alternative_routes
-                   and heard_recently(node_state, now)) else None)
-        if alt is not None:
-            # Nothing at all came back on the best route: try the next one, with
-            # just its route packet (the return path differs) and one request.
-            # The repeater answered this key within the day, so it has us in
-            # its ACL; any login due was already sent on the best route.
-            sleep(RETRY_GAP_SECONDS)
-            route = alt
-            out_path = route.path
-            plen = path_len_byte(out_path, route.hash_size)
-            one_hop = route.hops > 0
-            kind = "status" if (not one_hop and status_due) else "telemetry"
-            used_alternative = used_alt[0] = True
-            note_route_result(node_state, live[0].key if live else route.key, False, now)
-            step(f"No answer on the best route; trying the alternative route {route.label}")
-            teach()
-            tried += 1
-            reply = request()
-            fails = node_state.setdefault("alt_fails", {})
-            if reply is None:
-                fails[route.key] = [int((fails.get(route.key) or [0])[0]) + 1, now]
-            else:
-                fails.pop(route.key, None)
+        used_alternative = used_alt[0]
 
         if logged_in:
             if login_answered:
@@ -770,13 +748,13 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         # logged_in_at is kept: record() forgets it after FORGET_LOGIN_AFTER
         # misses in a row, so a single lost reply doesn't cost a login.
         if used_alternative:
-            why = f"no answer on the best route or the alternative ({route.label})"
+            why = f"no answer on the best route, nor on the retry by the alternative ({route.label})"
         elif len(live) > 1 and not alternative_routes:
             why = "no answer; alternative route not tried (setting off)"
-        elif len(live) > 1 and not login_answered and not heard_recently(node_state, now):
-            why = "no answer; alternative route not tried (not heard in the last day)"
         elif len(live) > 1 and login_answered:
             why = "no answer to the request after the login was answered; alternative not needed"
+        elif len(live) > 1 and logged_in:
+            why = "no answer to the login; the alternative is tried on the next poll's retry"
         elif len(live) > 1:
             why = "no answer"
         else:

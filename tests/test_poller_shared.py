@@ -692,9 +692,10 @@ def test_slot_skips_a_poll_just_after_a_test():
     assert poller.is_due(st, 3600, False, base + 3600, 0.0)
 
 
-def test_alternative_route_tried_once_and_logged(shared):
+def test_retry_goes_by_the_alternative_route_and_is_logged(shared):
     from openhop_neighbour_battery import packet_log
     rep = FakeRepeater(shared, battery_mv=4010)
+    rep._in_acl = True
     rep._handle_orig = rep._handle
 
     def only_via_relay(pkt):  # the direct route is dead; through the relay it works
@@ -702,29 +703,23 @@ def test_alternative_route_tried_once_and_logged(shared):
             rep._handle_orig(pkt)
     rep._handle = only_via_relay
     entries: list = []
-    state = {"status_checked_at": 2e6, "last_success": 2e6 - 3600}  # heard an hour ago
+    now = 2e6
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60,
+             "last_success": now - 3600, "status_checked_at": now}
     res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT, VIA],
-                                 sleep=lambda s: None, now=2e6, alternative_routes=True,
+                                 sleep=lambda s: None, now=now, alternative_routes=True,
                                  plog=packet_log.PacketLog(entries).for_node(rep.pub.hex(), "G", "guest key"))
     assert res.code == poller.OK and res.alternative and res.route.key == VIA.key
     assert any("alternative route" in e["detail"] for e in entries)
-    # With the setting off, the result says it wasn't tried.
+    assert rep.logins == 0
+    assert state["route_results"][DIRECT.key][1] == "no answer"
+    # With the setting off, the retry stays on the best route.
     rep2 = FakeRepeater(shared, answer_login=False, answer_status=False, answer_telemetry=False)
     res2 = poller.poll_one_shared(rep2, _neighbour(rep2), shared, {}, routes=[DIRECT, VIA], sleep=lambda s: None)
     assert res2.code == poller.NO_REPLY and "alternative route not tried" in res2.detail
 
 
-
-def test_no_alternative_for_a_repeater_silent_all_day(shared):
-    rep = FakeRepeater(shared, answer_login=False, answer_status=False, answer_telemetry=False)
-    res = poller.poll_one_shared(rep, _neighbour(rep), shared, {"last_success": 2e6 - 2 * 86400},
-                                 routes=[DIRECT, VIA], sleep=lambda s: None, now=2e6, alternative_routes=True)
-    assert res.code == poller.NO_REPLY and not res.alternative
-    assert "not heard in the last day" in res.detail
-    assert rep.logins == 2  # blank and hello on the best route only, not doubled
-
-
-def test_alternative_is_route_plus_one_request_and_rests_after_failing(shared):
+def test_retry_same_route_then_alternative_and_never_rests(shared):
     rep = FakeRepeater(shared, answer_login=False, answer_status=False, answer_telemetry=False)
     rep._in_acl = True
     now = 2_000_000.0
@@ -736,20 +731,16 @@ def test_alternative_is_route_plus_one_request_and_rests_after_failing(shared):
         return real(body)
     rep.send_raw_packet = spy
     state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 60, "login_checked_at": now - 60,
-             "last_success": now - 3600, "status_checked_at": now}
-    for i in range(poller.ALT_FAILS_BEFORE_REST):
+             "last_success": now - 2 * 86400, "status_checked_at": now}
+    for i in range(5):  # silent for days and failing every time: still the retry
         sent.clear()
         res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT, VIA],
                                      sleep=lambda s: None, now=now + i, alternative_routes=True)
-        assert res.alternative
-        on_alt = [t for t, plen in sent if plen]  # packets carrying the relay path
-        assert on_alt.count(PAYLOAD_TYPE_ANON_REQ) == 0 and on_alt.count(PAYLOAD_TYPE_REQ) == 1
-        poller.record(state, res, password_set=False, now=now + i)
-    # Failed 3 times as an alternative: rested for a day.
-    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT, VIA],
-                                 sleep=lambda s: None, now=now + 10, alternative_routes=True)
-    assert not res.alternative
-    assert poller.pick_alternative(state, [DIRECT, VIA], DIRECT, now + 25 * 3600) is VIA
+        assert res.alternative and "nor on the retry by the alternative" in res.detail
+        reqs = [plen for t, plen in sent if t == PAYLOAD_TYPE_REQ]
+        assert len(reqs) == 3 and reqs[0] == reqs[1] == 0 and reqs[2] > 0  # best, best again, alternative
+        assert not [t for t, _ in sent if t == PAYLOAD_TYPE_ANON_REQ]
+        state["no_reply_count"] = 1  # keep clear of the every-3rd-miss login
 
 
 def test_route_results_record_best_and_alternative():
@@ -761,7 +752,3 @@ def test_route_results_record_best_and_alternative():
         poller.note_route_result(st, f"r{i}", True, 200.0 + i)
     assert len(st["route_results"]) == poller.ROUTE_RESULTS_KEPT
     assert "best" not in st["route_results"]
-
-
-def test_alternative_rest_is_six_hours():
-    assert poller.ALT_REST_SECONDS == 6 * 3600

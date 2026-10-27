@@ -661,12 +661,9 @@
     $("details-dialog").showModal();
   }
 
-  // routeResult: the route's latest outcome and when, or that it is resting
-  // after failing repeatedly as an alternative (and when it is tried again).
+  // routeResult: the route's latest outcome and when.
   function routeResult(n, r, i) {
-    const now = Date.now() / 1000;
     const res = (n.route_results || {})[r.key];
-    const restUntil = (n.alt_rest_until || {})[r.key];
     let html;
     if (res) {
       const ok = res[1] === "answered";
@@ -676,9 +673,6 @@
       html = n.code === "ok" ? '<span class="pill good">answered</span>' : '<span class="pill bad">no answer</span>';
     } else {
       html = '<span class="muted small">not tried</span>';
-    }
-    if (restUntil && restUntil > now) {
-      html += `<div class="muted small">resting after 3 misses; next try after ${new Date(restUntil * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>`;
     }
     return html;
   }
