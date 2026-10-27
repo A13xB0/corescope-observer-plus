@@ -736,7 +736,7 @@ def test_retry_same_route_then_alternative_and_never_rests(shared):
         sent.clear()
         res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT, VIA],
                                      sleep=lambda s: None, now=now + i, alternative_routes=True)
-        assert res.alternative and "nor on the retry by the alternative" in res.detail
+        assert res.alternative and "or by the alternative" in res.detail
         reqs = [plen for t, plen in sent if t == PAYLOAD_TYPE_REQ]
         assert len(reqs) == 3 and reqs[0] == reqs[1] == 0 and reqs[2] > 0  # best, best again, alternative
         assert not [t for t, _ in sent if t == PAYLOAD_TYPE_ANON_REQ]
@@ -752,3 +752,43 @@ def test_route_results_record_best_and_alternative():
         poller.note_route_result(st, f"r{i}", True, 200.0 + i)
     assert len(st["route_results"]) == poller.ROUTE_RESULTS_KEPT
     assert "best" not in st["route_results"]
+
+
+def test_rebooted_repeater_on_a_broken_route_logs_in_by_the_alternative(shared):
+    # Our ACL entry is gone (reboot) and the best route is dead: the requests
+    # get nothing, so this third miss logs in; nothing answers on the best
+    # route, so the login is repeated by the alternative, which works.
+    rep = FakeRepeater(shared, battery_mv=4030)
+    rep._handle_orig = rep._handle
+
+    def only_via_relay(pkt):
+        if pkt.path_len:
+            rep._handle_orig(pkt)
+    rep._handle = only_via_relay
+    now = 2e6
+    state = {"acl_key": shared.public_key.hex(), "logged_in_at": now - 86400, "login_checked_at": now - 3600,
+             "last_success": now - 86400, "status_checked_at": now, "no_reply_count": 2, "shared_password": ""}
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, state, routes=[DIRECT, VIA],
+                                 sleep=lambda s: None, now=now, alternative_routes=True)
+    assert res.code == poller.OK and res.alternative and res.route.key == VIA.key
+    assert state["route_results"][DIRECT.key][1] == "no answer"
+
+
+def test_new_repeater_logs_in_by_the_alternative_when_the_best_is_dead(shared):
+    rep = FakeRepeater(shared, battery_mv=4030)
+    rep._handle_orig = rep._handle
+    rep._handle = lambda pkt: rep._handle_orig(pkt) if pkt.path_len else None
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, {}, routes=[DIRECT, VIA],
+                                 sleep=lambda s: None, now=2e6, alternative_routes=True)
+    assert res.code == poller.OK and res.route.key == VIA.key
+
+
+def test_silent_repeater_login_round_covers_both_routes_once(shared):
+    rep = FakeRepeater(shared, answer_login=False, answer_status=False, answer_telemetry=False)
+    res = poller.poll_one_shared(rep, _neighbour(rep), shared, {}, routes=[DIRECT, VIA],
+                                 sleep=lambda s: None, now=2e6, alternative_routes=True)
+    assert res.code == poller.NO_REPLY and res.alternative
+    assert rep.logins == 4  # blank and hello on each route, nothing more
+    off = FakeRepeater(shared, answer_login=False, answer_status=False, answer_telemetry=False)
+    poller.poll_one_shared(off, _neighbour(off), shared, {}, routes=[DIRECT, VIA], sleep=lambda s: None, now=2e6)
+    assert off.logins == 2  # setting off: best route only

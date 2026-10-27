@@ -615,9 +615,21 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
 
         tried = 0
 
+        best = route
+
+        def use(r: Route) -> None:
+            """Move the poll's sends to route r."""
+            nonlocal route, out_path, plen, one_hop, kind
+            route = r
+            out_path = r.path
+            plen = path_len_byte(out_path, r.hash_size)
+            one_hop = r.hops > 0
+            kind = "status" if (not one_hop and status_due) else "telemetry"
+            used_alt[0] = r.key != best.key
+
         def attempt(force_route: bool) -> tuple[sk.Reply | None, bool, bool, bool]:
-            """Steps 1-2 on the current route: (reply, admin, logged_in, login_answered)."""
-            nonlocal tried, route, out_path, plen, one_hop, kind
+            """Steps 1-2: (reply, admin, logged_in, login_answered)."""
+            nonlocal tried
             reply = None
             admin = False
             in_acl = bool(node_state.get("logged_in_at"))
@@ -649,12 +661,7 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                         sleep(RETRY_GAP_SECONDS)
                         tried += 1
                         note_route_result(node_state, route.key, False, now)
-                        route = alt
-                        out_path = route.path
-                        plen = path_len_byte(out_path, route.hash_size)
-                        one_hop = route.hops > 0
-                        kind = "status" if (not one_hop and status_due) else "telemetry"
-                        used_alt[0] = True
+                        use(alt)
                         step(f"Still no reply; asking by the alternative route {route.label}")
                         teach()  # the return path differs
                         reply = request()
@@ -672,45 +679,67 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
                     else:
                         in_acl = False
 
-            # 2. Log in, then route and request.
+            # 2. Log in, then route and request: on the best route, and when
+            #    nothing answers there, on the alternative. Without that a
+            #    repeater whose best route broke while it lost our ACL entry
+            #    (a reboot) could never be reached again: requests by the
+            #    alternative need the entry, and the logins only went by the
+            #    broken route.
             logged_in = False
             login_answered = False
             if reply is None and not trust_entry:
                 logged_in = True
-                if in_acl:
-                    # Admin re-check of a live entry: route first, so the login
-                    # answer comes back direct rather than flooded.
-                    teach()
-                for pw in shared_password_order(node_state, now, personal, guest_password):
-                    if tried:
-                        sleep(RETRY_GAP_SECONDS)
-                    tried += 1
-                    lr = login(pw)
-                    if lr is None:
-                        continue  # no answer heard by us or any observer: not accepted
-                    login_answered = True
-                    node_state["login_checked_at"] = now
-                    if lr.is_admin:
-                        admin = True
+                alt = pick_alternative(node_state, live, best, now) if alternative_routes else None
+                for r in [best] + ([alt] if alt is not None else []):
+                    if login_answered:
                         break
-                    if pw or personal:
-                        node_state["shared_password"] = pw  # see shared_password_order
-                    answer_flooded = bool(flooded and flooded[-1])
-                    if not in_acl or answer_flooded:
-                        # A flooded answer means the repeater has no route for us
-                        # (a new entry, or a lapsed one on the admin re-check).
-                        if answer_flooded:
-                            step("The login answer was flooded; waiting for it to clear before sending our route")
-                            sleep(FLOOD_CLEAR_SECONDS)
-                        teach()  # now the repeater can read it
-                        in_acl = True
-                    reply = request()
-                    break
-
+                    if r.key != route.key:
+                        if r.key != best.key:
+                            note_route_result(node_state, route.key, False, now)
+                            step(f"No login answer; logging in by the alternative route {r.label}")
+                        use(r)
+                    reply, admin, login_answered, in_acl = login_round(in_acl)
             return reply, admin, logged_in, login_answered
 
+        def login_round(in_acl: bool) -> tuple[sk.Reply | None, bool, bool, bool]:
+            """Log in on the current route: (reply, admin, login_answered, in_acl)."""
+            nonlocal tried
+            reply = None
+            admin = False
+            login_answered = False
+            if in_acl:
+                # Admin re-check of a live entry: route first, so the login
+                # answer comes back direct rather than flooded.
+                teach()
+            for pw in shared_password_order(node_state, now, personal, guest_password):
+                if tried:
+                    sleep(RETRY_GAP_SECONDS)
+                tried += 1
+                lr = login(pw)
+                if lr is None:
+                    continue  # no answer heard by us or any observer: not accepted
+                login_answered = True
+                node_state["login_checked_at"] = now
+                if lr.is_admin:
+                    admin = True
+                    break
+                if pw or personal:
+                    node_state["shared_password"] = pw  # see shared_password_order
+                answer_flooded = bool(flooded and flooded[-1])
+                if not in_acl or answer_flooded:
+                    # A flooded answer means the repeater has no route for us
+                    # (a new entry, or a lapsed one on the admin re-check).
+                    if answer_flooded:
+                        step("The login answer was flooded; waiting for it to clear before sending our route")
+                        sleep(FLOOD_CLEAR_SECONDS)
+                    teach()  # now the repeater can read it
+                    in_acl = True
+                reply = request()
+                break
+            return reply, admin, login_answered, in_acl
+
         reply, admin, logged_in, login_answered = attempt(False)
-        used_alternative = used_alt[0]
+        used_alternative = route.key != best.key
 
         if logged_in:
             if login_answered:
@@ -748,13 +777,11 @@ def poll_one_shared(client: CompanionClient, n: Neighbour, shared: sk.SharedKey,
         # logged_in_at is kept: record() forgets it after FORGET_LOGIN_AFTER
         # misses in a row, so a single lost reply doesn't cost a login.
         if used_alternative:
-            why = f"no answer on the best route, nor on the retry by the alternative ({route.label})"
+            why = f"no answer on the best route or by the alternative ({route.label})"
         elif len(live) > 1 and not alternative_routes:
             why = "no answer; alternative route not tried (setting off)"
         elif len(live) > 1 and login_answered:
             why = "no answer to the request after the login was answered; alternative not needed"
-        elif len(live) > 1 and logged_in:
-            why = "no answer to the login; the alternative is tried on the next poll's retry"
         elif len(live) > 1:
             why = "no answer"
         else:
