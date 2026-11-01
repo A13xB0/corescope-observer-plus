@@ -266,7 +266,6 @@
   function keyBadge(n) {
     if (n.shared_admin_seen) return ' · <span class="pill bad" title="Answered the guest key as admin; guest polling stopped here">admin!</span>';
     if (n.flood_replies >= 2) return ' · <span class="pill bad" title="Its replies keep coming back flooded (our return route isn\'t taking), so it is polled only once a day until a reply comes back direct">floods · daily</span>';
-    if (n.polled_by) return ` · <span class="pill neutral" title="CoreScope has another observer polling this repeater, so this one leaves it to them. Its readings still reach CoreScope.">polled by ${esc(n.polled_by)}</span>`;
     if (n.key_mode === "shared") {
       const own = (runtime.shared_key || {}).kind === "own";
       return ` · <span class="pill good" title="${own ? "Polled under this plugin's separate polling key (not the repeater's key), registered with CoreScope" : "Polled under the public shared guest key"}">${own ? "guest key" : "shared"}</span>`;
@@ -276,7 +275,116 @@
   }
 
   function everyText(min) {
-    return min < 60 ? `${min} min` : min === 60 ? "hourly" : `every ${min / 60} h`;
+    min = Math.round(min);
+    return min < 60 ? `every ${min} min` : min === 60 ? "hourly" : `every ${dur(min * 60)}`;
+  }
+
+  // -- community polling (CoreScope's limits and switches) -------------------
+
+  // dur: a length of time in seconds, short ("2 h", "1 h 30 min", "45 min").
+  function dur(s) {
+    s = Math.round(Number(s) || 0);
+    if (s < 3600) return `${Math.round(s / 60)} min`;
+    const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+    return m ? `${h} h ${m} min` : `${h} h`;
+  }
+  const hhmm = (ts) => (ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—");
+  const whenText = (iso) => {
+    const t = Date.parse(iso);
+    return Number.isNaN(t) ? String(iso) : new Date(t).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  };
+  const hopsText = (h) => (h === 0 ? " (direct)" : h === 1 ? " (1 hop)" : "");
+  const community = () => runtime.community || {};
+  const gate = () => community().gate || null;
+  const GATE_LABEL = { paused: "Paused by CoreScope", blocked: "Stopped by CoreScope", version_disabled: "Upgrade needed" };
+  const GATE_SHORT = { paused: "Paused", blocked: "Stopped", version_disabled: "Upgrade needed" };
+  const gateKind = (g) => (g && g.reason === "version_disabled" ? "warn" : "bad");
+  const hostOf = (url) => { try { return new URL(url).host; } catch (_) { return url || "CoreScope"; } };
+
+  // The window CoreScope sets for a repeater: its own figure, else direct or
+  // one-hop by this observer's best route (the floor for its interval).
+  function windowFor(n) {
+    if (n.community && n.community.window_s) return n.community.window_s;
+    const p = community().policy || {};
+    const routes = orderedRoutes(n);
+    const w = (p.node_windows || {})[n.node_id] || ((routes[0] || {}).hops ? p.one_hop_s : p.direct_s) || 0;
+    return community().stale ? w * 2 : w;
+  }
+
+  function clampText(c) {
+    const v = (x) => (c.field === "max_requests" || c.field === "takeover_after" ? x : dur(x));
+    return `CoreScope asked for ${v(c.asked)}, using ${v(c.using)}`;
+  }
+
+  // The "Who polls" cell: you (and when), standby (and who polls), covered by
+  // someone's fresh reading, or not polled at all.
+  function whoCell(n) {
+    const c = n.community;
+    if (!c) return '<span class="muted">—</span>';
+    const g = gate();
+    if (g) {
+      const part = c.who === "standby" ? "standby" : c.who === "excluded" ? "excluded" : "you poll this one";
+      return `<span class="pill ${gateKind(g)}">${esc(GATE_SHORT[g.reason] || "Stopped")}</span><div class="muted small">${part}</div>`;
+    }
+    if (c.who === "excluded") return '<span class="pill neutral">Not polled</span><div class="muted small">CoreScope excludes it (owner\'s request)</div>';
+    if (c.who === "standby") {
+      return `<span class="pill neutral">Standby</span><div class="muted small">${esc(c.by || "another observer")} polls${hopsText(c.owner_hops)}</div>`;
+    }
+    if (c.who === "covered") {
+      return `<span class="pill good">Covered</span><div class="muted small">reading ${ago(c.fresh_at)}${c.fresh_by ? " by " + esc(c.fresh_by) : ""}, skip until ${hhmm(c.next_at)}</div>`;
+    }
+    if (c.who === "capped") return `<span class="pill warn">Limit reached</span><div class="muted small">${esc((c.skip || {}).text || "")}; next ${hhmm(c.next_at)}</div>`;
+    const next = config.enabled ? `next ${hhmm(c.next_at)} · ${everyText(c.interval_s / 60)}` : "polling is off";
+    return `<span class="pill good">You</span><div class="muted small">${next}</div>`;
+  }
+
+  // The banner for CoreScope's switches: pause, block, version minimum.
+  function renderCommunityNotice() {
+    const el = $("community-notice");
+    const cm = community();
+    const p = cm.policy || {};
+    const g = gate();
+    if (!g) { el.hidden = true; el.innerHTML = ""; return; }
+    let html;
+    if (g.reason === "paused") {
+      html = `<b>Paused by CoreScope.${p.paused_reason ? " " + esc(p.paused_reason) : ""}</b>`
+        + `<span class="small">Nothing is sent ${p.paused_until ? `until ${esc(whenText(p.paused_until))}, or ` : ""}until CoreScope lifts the pause. Claims still go out, so CoreScope shows this observer as paused. Test and Check now are off.</span>`;
+    } else if (g.reason === "blocked") {
+      html = "<b>CoreScope has stopped this observer from polling.</b>"
+        + `<span class="small">This observer's key is on ${esc(hostOf(cm.corescope_url))}'s blocked list, so the plugin sends nothing and CoreScope ignores its readings. Ask the CoreScope operator why; nothing on this side can lift it.</span>`;
+    } else {
+      html = `<b>This version (${esc(runtime.plugin_version || "?")}) is disabled by CoreScope. Upgrade to ${esc(p.min_plugin_version || "a newer version")} or later to keep providing data.</b>`
+        + `<span class="small">${p.min_version_reason ? `CoreScope's note: "${esc(p.min_version_reason)}" ` : ""}Until you upgrade, nothing is sent and CoreScope ignores this observer's claims and readings. Your settings and passwords are kept.</span>`;
+    }
+    el.hidden = false;
+    el.className = `notice community-notice ${gateKind(g)}`;
+    el.innerHTML = html;
+  }
+
+  function renderCommunity() {
+    const cm = community();
+    const p = cm.policy || {};
+    const g = gate();
+    const pill = $("community-state");
+    const on = config.community !== false;
+    pill.textContent = g ? (GATE_SHORT[g.reason] || "Stopped") : !on ? "Off"
+      : `On · ${cm.claimed || 0} repeater${cm.claimed === 1 ? "" : "s"} claimed`;
+    pill.className = "pill " + (g ? gateKind(g) : on ? "good" : "neutral");
+    if (!dirty) $("community").checked = on;
+    $("community-limits").innerHTML = p.direct_s ? [
+      [dur(p.direct_s), "direct"], [dur(p.one_hop_s), "1 hop"], [dur(p.grace_s), "standby grace"],
+      [String(p.max_requests), `request${p.max_requests === 1 ? "" : "s"} per window`],
+    ].map(([v, l]) => `<div><b>${esc(v)}</b>${esc(l)}</div>`).join("") : "";
+    const where = hostOf(cm.corescope_url);
+    const why = "They apply to every observer polling a repeater, counted from the newest reading anyone sent.";
+    $("community-source").textContent = !cm.corescope_url ? `Built-in defaults: no CoreScope address set. ${why}`
+      : cm.has_policy ? `Limits from ${where}${p.version ? " · policy " + p.version : ""} · checked ${ago(cm.fetched_at)}${cm.last_error ? ` (last try: ${cm.last_error}; using the saved copy)` : ""}. ${why}`
+      : `Built-in defaults: no policy from ${where} yet${cm.last_error ? ` (${cm.last_error})` : ""}. ${why}`;
+    const warn = [];
+    if (cm.stale) warn.push("CoreScope hasn't answered for over 6 hours: every repeater is polled at twice its window until it does.");
+    (cm.clamped || []).filter((c) => !c.node_id).forEach((c) => warn.push(clampText(c) + "."));
+    if (cm.fast_mode) warn.push("Test fast mode is on (OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST): for bench runs only.");
+    $("community-warn").textContent = warn.join(" ");
   }
 
   // The packet log: what was sent, and what answered it (packet_log.py).
@@ -322,6 +430,24 @@
       : !Object.keys(checks).length ? "Starting" : allOk ? (config.enabled ? "Polling" : "Ready") : "Needs attention";
     gs.className = "pill " + (stopped ? "bad" : !Object.keys(checks).length ? "neutral" : allOk ? "good" : "warn");
     gs.title = stopped ? "The plugin isn't running. Changes are saved, but nothing is applied or polled until it starts." : "";
+    const g = gate();
+    if (g && !stopped) {
+      gs.textContent = GATE_LABEL[g.reason] || "Stopped by CoreScope";
+      gs.className = "pill " + gateKind(g);
+      gs.title = g.text || "";
+    }
+    renderCommunityNotice();
+    renderCommunity();
+    $("check-now").disabled = !!g;
+    $("check-now").title = g ? `${g.text}. Check now is off.` : "";
+    // Telemetry intervals faster than CoreScope's direct window can't be used.
+    const directMin = ((community().policy || {}).direct_s || 0) / 60;
+    [...$("interval_minutes").options].forEach((o) => {
+      if (!o.dataset.label) o.dataset.label = o.textContent;
+      const tooFast = directMin && !community().fast_mode && Number(o.value) < directMin;
+      o.disabled = !!tooFast && o.value !== $("interval_minutes").value;
+      o.textContent = o.dataset.label + (tooFast ? " (too fast for CoreScope)" : "");
+    });
     const LABELS = { config: "openHop config", api: "openHop API", companion: "Plugin companion", publish: "Publishing key" };
     $("checks").innerHTML = Object.entries(checks).map(([k, c]) =>
       `<li class="${c.ok ? "ok" : "bad"}"><span>${c.ok ? "✓" : "✗"}</span> <strong>${esc(LABELS[k] || k)}</strong> <span class="muted">${esc(c.message)}</span></li>`).join("");
@@ -399,17 +525,18 @@
     $("nodes").innerHTML = nodes.map((n, i) => {
       const ok = reachable(n);
       const divider = i === firstOther && i > 0
-        ? '<tr class="group-row"><td colspan="8" class="muted small">Not polled</td></tr>' : "";
+        ? '<tr class="group-row"><td colspan="9" class="muted small">Not polled</td></tr>' : "";
       return `${divider}<tr class="${ok ? "" : "dim"}">
         <td><input type="checkbox" data-node="${esc(n.node_id)}" ${chosen.has(n.node_id) ? "checked" : ""} ${ok ? "" : "disabled"} aria-label="Poll ${esc(n.name)}"></td>
         <td><strong>${esc(n.name)}</strong><div class="muted small mono">${esc(n.node_id.slice(0, 8))}…${n.uptime_secs ? ` · up ${Math.floor(n.uptime_secs / 86400)} d` : ""}${(config.poll_intervals || {})[n.node_id] ? ` · ${everyText(config.poll_intervals[n.node_id])}` : ""}${keyBadge(n)}</div></td>
         <td>${routeCell(n)}</td>
+        <td>${saved.has(n.node_id) && ok ? whoCell(n) : ""}</td>
         <td>${ago(n.last_seen)}</td>
         <td>${ok || n.role ? loginCell(n) : ""}</td>
         <td>${ok ? batteryCell(n) : ""}</td>
         <td class="temp-col" ${showTemp ? "" : "hidden"}>${ok ? tempCell(n) : ""}</td>
         <td><button class="button ghost small" type="button" data-details="${esc(n.node_id)}" ${ok ? "" : "disabled"} aria-label="Details for ${esc(n.name)}">Details</button></td></tr>`;
-    }).join("") || '<tr><td colspan="8" class="muted">No repeaters heard yet.</td></tr>';
+    }).join("") || '<tr><td colspan="9" class="muted">No repeaters heard yet.</td></tr>';
     $("reach-note").textContent = maxHops()
       ? "Repeaters heard direct, or through one relay you hear directly."
       : "Only repeaters heard directly (zero hops) can be selected. Set Reach to \"Up to 1 hop\" for more.";
@@ -432,6 +559,7 @@
     if (url && !/^https?:\/\//.test(url)) throw new Error("The CoreScope address must start with http:// or https://");
     config.corescope_url = url;  // empty = no CoreScope
     config.check_corescope = $("check_corescope").checked;
+    config.community = $("community").checked;
   }
 
   async function connect() {
@@ -536,13 +664,13 @@
       v.finish(e.aborted ? "warn" : "bad");
     } finally {
       clearInterval(timer);
-      if (current()) btn.disabled = false;
+      if (current()) btn.disabled = !!testBlock(nodeId);
     }
   }
 
   // One row of the live Check-now panel.
   function progressRow(name, statusHtml, kind) {
-    const icon = { good: "✓", bad: "✗", warn: "!" }[kind] || "";
+    const icon = { good: "✓", bad: "✗", warn: "!", skip: "–" }[kind] || "";
     return `<div class="cp-row cp-${kind}"><span class="cp-icon" aria-hidden="true">${icon}</span>`
       + `<span class="cp-name">${esc(name)}</span><span class="cp-status">${statusHtml}</span></div>`;
   }
@@ -553,10 +681,11 @@
     const panel = $("check-progress");
     if (dirty) { panelNote(panel, "Save first, so the check uses your selection.", "warn"); return; }
     if (!(config.targets || []).length) { panelNote(panel, "Tick at least one repeater in the list first.", "warn"); return; }
+    if (gate()) { panelNote(panel, `${esc(gate().text)}. Check now is off.`, gateKind(gate())); return; }
     panelNote(panel, "<strong>Check which repeaters?</strong>");
     panel.insertAdjacentHTML("beforeend", '<div class="cp-choice">'
-      + '<button type="button" class="button ghost small" data-check="stale">Only stale <span class="muted small">(no reading in the last hour)</span></button>'
-      + '<button type="button" class="button ghost small" data-check="all">All of them</button></div>');
+      + '<button type="button" class="button ghost small" data-check="stale">Only stale <span class="muted small">(no fresh reading from anyone; standby left alone)</span></button>'
+      + '<button type="button" class="button ghost small" data-check="all">All of them <span class="muted small">(within CoreScope\'s request limit)</span></button></div>');
   }
 
   async function runCheck(scope) {
@@ -568,8 +697,10 @@
     const draw = (a) => {
       const prog = a.progress || [];
       const total = a.total != null ? a.total : (scope === "stale" ? "the stale" : nTargets);
-      v.title(`<strong>Checking ${total} repeater${total === 1 ? "" : "s"}…</strong> <span class="muted small">${prog.length} done · up to a minute each</span>`);
+      const nSkipped = prog.filter((p) => p.skipped).length;
+      v.title(`<strong>Checking ${total} repeater${total === 1 ? "" : "s"}…</strong> <span class="muted small">${prog.length - nSkipped} asked · ${nSkipped} skipped · up to a minute each</span>`);
       v.body(prog.map((p) => {
+        if (p.skipped) return progressRow(p.name || nodeName(p.node_id), `Skipped: ${esc(p.message || p.skipped)}`, "skip");
         const cs = corescopeText(p.corescope);
         return progressRow(p.name || nodeName(p.node_id), esc(pollText(p)) + (cs ? ` <span class="muted small">· ${esc(cs)}</span>` : ""), pollKind(p));
       }).join(""));
@@ -579,8 +710,11 @@
       const id = await request("check_now", null, { scope });
       const a = await waitForAction("check_now", id, 120000 * Math.max(1, nTargets) + 30000, draw, () => v.stopped);
       draw(a);
-      v.title(`<strong>Done.</strong> <span class="muted small">${esc(a.message || "")}</span>`);
-      v.finish(a.ok === false ? "bad" : "");
+      const prog = a.progress || [];
+      const nSkipped = prog.filter((p) => p.skipped).length;
+      v.title(a.skipped && !prog.length ? esc(a.message || "")
+        : `<strong>Checked ${prog.length} repeater${prog.length === 1 ? "" : "s"}.</strong> <span class="muted small">${prog.length - nSkipped} asked · ${nSkipped} skipped · ${esc(a.message || "")}</span>`);
+      v.finish(a.ok === false ? (a.skipped ? gateKind({ reason: a.skipped }) : "bad") : "");
     } catch (e) {
       v.title(e.aborted ? "Stopped watching. Repeaters already queued finish in the background." : esc(e.message));
       v.finish(e.aborted ? "warn" : "bad");
@@ -602,13 +736,85 @@
     if (!ok) throw new Error("copy refused");
   }
 
+  // Why Test can't run for a repeater (CoreScope's switches or exclusion), or "".
+  function testBlock(nodeId) {
+    const g = gate();
+    if (g) return g.text;
+    const p = community().policy || {};
+    if ((p.excluded_nodes || []).includes(nodeId)) return "CoreScope excludes this repeater (owner's request)";
+    return "";
+  }
+
+  const ROLE_TEXT = {
+    polling: ["Polling", "good"], standby: ["Standby", "neutral"], independent: ["Independent", "neutral"],
+    excluded: ["Excluded", "neutral"], paused: ["Paused", "bad"], version_disabled: ["Version disabled", "warn"],
+    blocked: ["Blocked", "bad"], stale: ["Stale claim", "neutral"],
+  };
+  let monitorsRun = 0;
+
+  // The Details dialog's Community block: every observer that claims this
+  // repeater, from CoreScope's /api/nodes/{pk}/monitors (asked through the
+  // plugin, like the CoreScope search).
+  async function loadMonitors(nodeId) {
+    const run = ++monitorsRun;
+    const block = $("community-block");
+    block.hidden = !(runtime.corescope && runtime.corescope.url);
+    if (block.hidden) return;
+    const body = $("monitors"), note = $("monitors-note");
+    if (dirty) {
+      body.innerHTML = "";
+      note.textContent = "Save the page first to see who else monitors it.";
+      return;
+    }
+    body.innerHTML = '<tr><td colspan="4" class="muted">Asking CoreScope…</td></tr>';
+    note.textContent = "";
+    try {
+      const id = await request("monitors", nodeId);
+      const a = await waitForAction("monitors", id, 30000, null, () => run !== monitorsRun);
+      if (run !== monitorsRun || detailsTarget !== nodeId) return;
+      if (a.ok === false) { body.innerHTML = `<tr><td colspan="4" class="muted">${esc(a.message)}</td></tr>`; return; }
+      renderMonitors(nodeId, a.monitors || {});
+    } catch (e) {
+      if (run !== monitorsRun || e.aborted) return;
+      body.innerHTML = `<tr><td colspan="4" class="muted">${esc(e.message)}</td></tr>`;
+    }
+  }
+
+  function renderMonitors(nodeId, m) {
+    const me = runtime.observer_id || "";
+    const rows = m.monitors || [];
+    $("monitors").innerHTML = rows.map((r) => {
+      const mine = me && String(r.observer_id || "").toLowerCase() === me.toLowerCase();
+      const hops = r.effective_hops != null ? r.effective_hops : r.hops;
+      const via = r.via_name || (r.via ? String(r.via).slice(0, 8) : "");
+      const route = hops ? `1 hop${via ? " via " + esc(via) : ""}` : "Direct";
+      const [label, kind] = ROLE_TEXT[r.role] || [r.role || "—", "neutral"];
+      const last = r.last_reading ? ago(Date.parse(r.last_reading) / 1000) : "never";
+      return `<tr><td>${esc(r.name || String(r.observer_id || "").slice(0, 8))}${mine ? ' <span class="muted small">(this one)</span>' : ""}</td>
+        <td>${route}</td><td><span class="pill ${kind}">${esc(label)}</span></td><td>${last}</td></tr>`;
+    }).join("") || '<tr><td colspan="4" class="muted">No observer claims this repeater yet.</td></tr>';
+    const p = community().policy || {};
+    const notes = [];
+    const meRow = rows.find((r) => me && String(r.observer_id || "").toLowerCase() === me.toLowerCase());
+    const poller = rows.find((r) => r.role === "polling");
+    if (meRow && meRow.role === "standby" && poller) {
+      const w = (m.window_s || 0) + (p.grace_s || 0);
+      notes.push(`This observer steps in if ${poller.name || "the poller"}'s newest reading is older than ${dur(w)} (window plus grace), or once ${poller.name || "it"} misses ${p.takeover_after || 2} windows in a row.`);
+    } else if (meRow && meRow.role === "polling") {
+      notes.push("This observer polls it; any others stand by.");
+    }
+    if (m.paused) notes.push("Polling is paused by CoreScope.");
+    if (m.excluded) notes.push("CoreScope excludes this repeater.");
+    (community().clamped || []).filter((c) => c.node_id === nodeId).forEach((c) => notes.push(clampText(c) + "."));
+    $("monitors-note").textContent = notes.join(" ");
+  }
+
   function openDetails(nodeId) {
     detailsTarget = nodeId;
     const n = (runtime.nodes || []).find((x) => x.node_id === nodeId);
     if (!n) return;
     $("details-title").textContent = n.name;
     $("test-status").hidden = true;  // clear any result from a previous test
-    $("test-now").disabled = false;
     $("login-password").value = "";
     $("remove-password").checked = false;
     const pending = passwordUpdates[nodeId];
@@ -625,7 +831,27 @@
     $("temp-this").checked = tempSet().has(nodeId);
     const own = (config.poll_intervals || {})[nodeId];
     $("node-interval").value = own ? String(own) : "default";
-    $("node-interval").options[0].textContent = `Default (${everyText(config.interval_minutes || 60)})`;
+    // Choices faster than CoreScope's window for this repeater are greyed out.
+    const floorMin = community().fast_mode ? 0 : windowFor(n) / 60;
+    const oneHop = ((orderedRoutes(n)[0] || {}).hops || 0) > 0;
+    const globalMin = config.interval_minutes || 60;
+    [...$("node-interval").options].forEach((o) => {
+      if (o.value === "default") {
+        o.textContent = floorMin && globalMin < floorMin
+          ? `Default (CoreScope: ${dur(floorMin * 60)} ${oneHop ? "at 1 hop" : "direct"})`
+          : `Default (${everyText(globalMin)})`;
+        return;
+      }
+      if (!o.dataset.label) o.dataset.label = o.textContent;
+      const tooFast = floorMin && Number(o.value) < floorMin;
+      o.disabled = !!tooFast && o.value !== $("node-interval").value;
+      o.textContent = o.dataset.label + (tooFast ? " — faster than CoreScope allows" : "");
+    });
+    const blocked = testBlock(nodeId);
+    $("test-now").disabled = !!blocked;
+    $("test-gate").hidden = !blocked;
+    $("test-gate").textContent = blocked ? `Test is off: ${blocked}.` : "";
+    loadMonitors(nodeId);
     $("temp-last").textContent = n.temperature_c != null ? `Last: ${Number(n.temperature_c).toFixed(1)} °C, ${ago(n.temp_at)}`
       : n.temp_misses >= 3 ? "None reported so far" : "";
 
@@ -730,7 +956,7 @@
   }
   $("shared-this").addEventListener("change", showPasswordBlock);
   // Closing the dialog abandons a Test that is still being watched.
-  $("details-dialog").addEventListener("close", () => { testRun++; });
+  $("details-dialog").addEventListener("close", () => { testRun++; monitorsRun++; });
 
   document.addEventListener("click", (ev) => {
     const t = ev.target;

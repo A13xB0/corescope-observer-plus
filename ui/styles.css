@@ -35,6 +35,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; background: var(--bg); color: var(--text); }
 button, input, select { font: inherit; color: inherit; }
 code, .mono { font-family: var(--mono); }
@@ -148,3 +149,16 @@ dialog .check { display: flex; gap: 8px; align-items: baseline; }
 .consent li { margin: 2px 0; }
 .notice.small { padding: 8px 12px; font-size: 13px; }
 
+
+/* Community card: CoreScope's limits as small read-only tiles. */
+.limits { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 8px; }
+.limits div { border: 1px solid var(--line); border-radius: 10px; padding: 6px 12px; font-size: 12px; color: var(--muted); }
+.limits b { display: block; font-size: 16px; color: var(--text); font-weight: 600; }
+.warn-text { color: var(--warn); }
+.warn-text:empty { display: none; }
+.community-notice.bad { background: var(--bad-soft); }
+.community-notice.warn { background: var(--warn-soft); }
+.community-notice b { display: block; margin-bottom: 2px; }
+.cp-row.cp-skip .cp-status { color: var(--muted); }
+select option:disabled { color: var(--muted); }
+.cp-skip .cp-icon { color: var(--muted); }

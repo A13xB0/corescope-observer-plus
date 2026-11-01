@@ -18,6 +18,7 @@
     </header>
 
     <div id="notice" class="notice" role="status" aria-live="polite"></div>
+    <div id="community-notice" class="notice community-notice" role="status" aria-live="polite" hidden></div>
 
     <section class="card" aria-labelledby="conn-h">
       <div class="card-head">
@@ -51,6 +52,18 @@
       <p class="muted small">Where the plugin fetches the key, looks up repeaters, and checks whether a reading already arrived.</p>
       <label class="option" style="margin-top:8px"><input id="check_corescope" type="checkbox"> <span><strong>Use CoreScope's observers as a wider antenna</strong>
         <span class="muted small">When a guest-key reply isn't heard here, look for it in the packets CoreScope's observers heard and decrypt it, instead of asking again.</span></span></label>
+    </section>
+
+    <section class="card" aria-labelledby="community-h">
+      <div class="card-head">
+        <h2 id="community-h">Community</h2>
+        <span id="community-state" class="pill neutral">—</span>
+      </div>
+      <label class="option"><input id="community" type="checkbox"> <span><strong>Share polling with other observers</strong>
+        <span class="muted small">Tell CoreScope which repeaters this observer reaches, and how. CoreScope picks the closest observer to poll each one; the others wait on standby. Off: this observer polls on its own, still within CoreScope's limits.</span></span></label>
+      <div id="community-limits" class="limits"></div>
+      <p id="community-source" class="muted small"></p>
+      <p id="community-warn" class="small warn-text"></p>
     </section>
 
     <section class="card" aria-labelledby="poll-h">
@@ -103,7 +116,7 @@
       <div id="check-progress" class="live check-progress" data-base="live check-progress" hidden></div>
       <div class="table-wrap">
       <table class="table nodes-table">
-        <thead><tr><th scope="col"></th><th scope="col">Repeater</th><th scope="col">Route</th><th scope="col">Heard</th><th scope="col">Login</th><th scope="col">Battery</th><th scope="col" class="temp-col">Temp</th><th scope="col"></th></tr></thead>
+        <thead><tr><th scope="col"></th><th scope="col">Repeater</th><th scope="col">Route</th><th scope="col">Who polls</th><th scope="col">Heard</th><th scope="col">Login</th><th scope="col">Battery</th><th scope="col" class="temp-col">Temp</th><th scope="col"></th></tr></thead>
         <tbody id="nodes"></tbody>
       </table>
       </div>
@@ -178,6 +191,16 @@
         <p id="shared-admin-warn" class="notice bad small" hidden></p>
         <p id="shared-pw-warn" class="muted small" hidden>This repeater has a saved password, so the guest key can't be used. Remove the password first.</p>
       </div>
+      <div id="community-block" hidden>
+        <h4>Community <span class="muted small">who monitors this repeater, from CoreScope</span></h4>
+        <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th scope="col">Observer</th><th scope="col">Route</th><th scope="col">Role</th><th scope="col">Last reading</th></tr></thead>
+          <tbody id="monitors"></tbody>
+        </table>
+        </div>
+        <p id="monitors-note" class="muted small"></p>
+      </div>
       <h4>Routes, best first</h4>
       <div class="table-wrap">
       <table class="table">
@@ -194,6 +217,7 @@
       </table>
       </div>
       <div id="test-status" class="live test-status" data-base="live test-status" hidden></div>
+      <p id="test-gate" class="small warn-text" hidden></p>
       <div class="actions dialog-actions">
         <button value="save" class="button" type="submit">Apply</button>
         <button value="test" id="test-now" class="button ghost" type="submit">Test now</button>
