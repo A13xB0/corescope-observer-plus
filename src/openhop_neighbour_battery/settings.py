@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,7 @@ DEFAULTS = {
     "check_corescope": True,
     "guest_passwords": {},
     "poll_intervals": {},
+    "community": True,
 }
 
 # Written by the plugin page, consumed and cleared by the plugin. Secrets go
@@ -75,6 +77,10 @@ class Settings:
     guest_passwords: dict = field(default_factory=dict)
     # Per-repeater telemetry interval in minutes, overriding interval_minutes.
     poll_intervals: dict = field(default_factory=dict)
+    # Community polling: tell CoreScope which repeaters this observer polls
+    # (claims) and stand by when it picks another observer. Off: no claims,
+    # owners ignored; CoreScope's limits, check, pause and exclusions still apply.
+    community: bool = True
 
     def interval_for(self, node_id: str) -> int:
         """Minutes between polls of this repeater."""
@@ -145,13 +151,21 @@ def parse(raw: dict) -> Settings:
             continue
         if KEY_RE.match(str(k).lower()) and v in NODE_INTERVALS:
             s.poll_intervals[str(k).lower()] = v
-    cc = raw.get("check_corescope", True)
-    # A JSON false, or the strings "false"/"0"/"no"/"off" from a form, all mean off.
-    if isinstance(cc, str):
-        s.check_corescope = cc.strip().lower() not in ("false", "0", "no", "off", "")
-    else:
-        s.check_corescope = bool(cc)
+    s.check_corescope = _flag(raw.get("check_corescope", True))
+    s.community = _flag(raw.get("community", True))
+    # A headless run (a test bench) can point at openHop's config without
+    # editing config.json.
+    env_path = os.environ.get("OPENHOP_CONFIG_PATH", "").strip()
+    if env_path:
+        s.openhop_config_path = env_path
     return s
+
+
+def _flag(v) -> bool:
+    # A JSON false, or the strings "false"/"0"/"no"/"off" from a form, all mean off.
+    if isinstance(v, str):
+        return v.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(v)
 
 
 def read_raw(data_dir: Path) -> dict:

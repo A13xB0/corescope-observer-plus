@@ -1,0 +1,294 @@
+"""Community polling: the limits CoreScope sets for every observer polling a
+repeater, and the switches it can throw (pause, block, minimum version).
+
+The policy is pulled from CoreScope's /api/guest-polling/policy (and comes
+along with /owners), clamped to what this plugin accepts, and kept in
+state.json with when it was fetched. The hard gates (paused, this observer
+blocked, this version disabled) are read from that saved copy, so they hold
+through a CoreScope outage until a fetched policy clears them (or the pause's
+end time passes). With no policy ever fetched the built-in defaults apply.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+from dataclasses import dataclass
+from datetime import datetime
+
+LOG = logging.getLogger("openhop.neighbour_battery")
+
+FAST_ENV = "OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST"
+
+
+def fast_mode() -> bool:
+    """Test-only fast mode, for end-to-end bench runs that can't wait hours.
+    Only the environment variable turns it on; never a setting or the page."""
+    return os.environ.get(FAST_ENV, "").strip() == "1"
+
+
+@dataclass(frozen=True)
+class Timings:
+    refresh_s: float  # pull /policy and /owners this often
+    policy_cache_s: float  # before a send, re-pull a policy older than this
+    claims_every_s: float  # re-publish the claim this often (and on a route change)
+    no_reply_retry_s: float  # the quick retry after an unanswered poll
+    scheduled_gap_s: float  # at least this far between scheduled polls
+    owners_stale_s: float  # forget CoreScope's owners after this long without an answer
+    hold_recheck_s: float  # a standby holding through an outage looks again after this
+    stale_policy_s: float  # an unreachable CoreScope's policy older than this: 2x windows
+
+
+NORMAL = Timings(refresh_s=600, policy_cache_s=60, claims_every_s=1800, no_reply_retry_s=20 * 60,
+                 scheduled_gap_s=60, owners_stale_s=1800, hold_recheck_s=600, stale_policy_s=6 * 3600)
+FAST = Timings(refresh_s=30, policy_cache_s=10, claims_every_s=60, no_reply_retry_s=30,
+               scheduled_gap_s=5, owners_stale_s=90, hold_recheck_s=30, stale_policy_s=6 * 3600)
+
+
+def timings() -> Timings:
+    return FAST if fast_mode() else NORMAL
+
+
+DEFAULT_POLICY = {
+    "version": "",
+    "direct_s": 3600,
+    "one_hop_s": 7200,
+    "grace_s": 1800,
+    "max_requests": 2,
+    "takeover_after": 2,
+    "paused": False,
+    "paused_reason": "",
+    "paused_until": "",
+    "excluded_nodes": [],
+    "node_windows": {},
+    "min_plugin_version": "",
+    "min_version_reason": "",
+}
+
+# What the plugin accepts from CoreScope, whatever it asks for.
+LIMITS = {
+    "direct_s": (30 * 60, 1440 * 60),
+    "one_hop_s": (60 * 60, 1440 * 60),
+    "grace_s": (10 * 60, 120 * 60),
+    "max_requests": (1, 3),
+    "takeover_after": (1, 6),
+}
+# Fast mode drops the time floors to a minute so a bench run can use
+# few-minute windows.
+FAST_LIMITS = {**LIMITS, "direct_s": (60, 1440 * 60), "one_hop_s": (60, 1440 * 60), "grace_s": (60, 120 * 60)}
+
+KEY_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _int(v, default: int) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def clamp(raw: dict | None, fast: bool | None = None) -> tuple[dict, list[dict]]:
+    """CoreScope's policy made safe: every limit inside this plugin's range,
+    unknown or malformed fields replaced by the defaults. Returns the policy
+    and a note per clamped value ({field, asked, using})."""
+    fast = fast_mode() if fast is None else fast
+    limits = FAST_LIMITS if fast else LIMITS
+    raw = raw if isinstance(raw, dict) else {}
+    out = dict(DEFAULT_POLICY)
+    notes: list[dict] = []
+    for name, (lo, hi) in limits.items():
+        asked = _int(raw.get(name), DEFAULT_POLICY[name]) if name in raw else DEFAULT_POLICY[name]
+        using = max(lo, min(hi, asked))
+        if using != asked:
+            notes.append({"field": name, "asked": asked, "using": using})
+        out[name] = using
+    out["version"] = str(raw.get("version") or "")
+    out["paused"] = raw.get("paused") is True
+    out["paused_reason"] = str(raw.get("paused_reason") or "")
+    out["paused_until"] = str(raw.get("paused_until") or "")
+    out["excluded_nodes"] = sorted({str(k).lower() for k in raw.get("excluded_nodes") or []
+                                    if KEY_RE.match(str(k).lower())})
+    # A repeater's own window is a window like any other: never below the
+    # direct floor, never above a day.
+    lo, hi = limits["direct_s"]
+    windows = {}
+    nw = raw.get("node_windows")
+    for k, v in (nw.items() if isinstance(nw, dict) else []):
+        k = str(k).lower()
+        if not KEY_RE.match(k):
+            continue
+        asked = _int(v, 0)
+        if asked <= 0:
+            continue
+        using = max(lo, min(hi, asked))
+        if using != asked:
+            notes.append({"field": "node_windows", "node_id": k, "asked": asked, "using": using})
+        windows[k] = using
+    out["node_windows"] = windows
+    out["min_plugin_version"] = str(raw.get("min_plugin_version") or "")
+    out["min_version_reason"] = str(raw.get("min_version_reason") or "")
+    # Only meaningful when CoreScope was told who and what is asking.
+    if "version_ok" in raw:
+        out["version_ok"] = raw.get("version_ok") is not False
+    if "observer_blocked" in raw:
+        out["observer_blocked"] = raw.get("observer_blocked") is True
+    return out, notes
+
+
+def parse_version(v: str) -> tuple[int, int, int] | None:
+    m = re.match(r"^\s*v?(\d+)\.(\d+)\.(\d+)", str(v or ""))
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def version_at_least(mine: str, minimum: str) -> bool:
+    """mine >= minimum, numerically per component. No minimum: True. An
+    unparsable own version counts as 0.0.0."""
+    want = parse_version(minimum)
+    if want is None:
+        return True
+    return (parse_version(mine) or (0, 0, 0)) >= want
+
+
+def iso_ts(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+class Community:
+    """The saved policy (state.json "community") and what follows from it."""
+
+    def __init__(self, store: dict, plugin_version: str):
+        self.s = store
+        self.plugin_version = plugin_version
+
+    # -- what was fetched ---------------------------------------------------
+
+    def reset_for_url(self, url: str) -> None:
+        """A policy belongs to the CoreScope that sent it: a different address
+        starts from the defaults (and that CoreScope's own switches)."""
+        if self.s.get("url") != url:
+            self.s.clear()
+            self.s["url"] = url
+
+    def apply(self, raw: dict, now: float) -> None:
+        """Keep a policy CoreScope just served (the raw copy, re-clamped on use)."""
+        was = self.gate(now)
+        self.s["policy"] = raw
+        self.s["fetched_at"] = now
+        self.s["for_version"] = self.plugin_version
+        self.s["last_error"] = ""
+        self.s["last_status"] = 200
+        now_gate = self.gate(now)
+        if (was or {}).get("reason") != (now_gate or {}).get("reason"):
+            if now_gate:
+                LOG.warning("CoreScope policy: %s", now_gate["text"])
+            elif was:
+                LOG.info("CoreScope policy: %s lifted, polling resumes", was["reason"])
+
+    def note_failure(self, status: int, now: float) -> None:
+        """A policy pull that didn't return one. The saved copy (and its
+        switches) stays in force."""
+        self.s["last_status"] = status
+        self.s["last_error"] = ("this CoreScope has no polling policy (404)" if status == 404
+                                else f"HTTP {status}" if status else "CoreScope unreachable")
+
+    @property
+    def fetched_at(self) -> float:
+        return float(self.s.get("fetched_at") or 0)
+
+    @property
+    def has_policy(self) -> bool:
+        return isinstance(self.s.get("policy"), dict)
+
+    def stale(self, now: float) -> bool:
+        """Policy older than stale_policy_s while CoreScope can't be reached:
+        everyone polls at twice the window until it answers again. Not for a
+        CoreScope that answers 404 (it simply has no policy) and not before
+        any policy was ever fetched (the defaults apply as they are)."""
+        return (self.has_policy and int(self.s.get("last_status") or 0) not in (200, 404)
+                and now - self.fetched_at > timings().stale_policy_s)
+
+    def policy(self) -> tuple[dict, list[dict]]:
+        return clamp(self.s.get("policy") if self.has_policy else None)
+
+    # -- the switches -----------------------------------------------------------
+
+    def paused(self, now: float) -> bool:
+        p, _ = self.policy()
+        if not p["paused"]:
+            return False
+        until = iso_ts(p["paused_until"])
+        return until is None or now < until
+
+    def version_ok(self) -> bool:
+        p, _ = self.policy()
+        # CoreScope's answer is about the version that asked; after an upgrade
+        # the saved copy is judged against the new version until re-fetched.
+        if "version_ok" in p and self.s.get("for_version") == self.plugin_version:
+            return p["version_ok"]
+        return version_at_least(self.plugin_version, p["min_plugin_version"])
+
+    def blocked(self) -> bool:
+        p, _ = self.policy()
+        return bool(p.get("observer_blocked"))
+
+    def gate(self, now: float) -> dict | None:
+        """Why nothing at all may be sent right now (Test and Check now
+        included), or None."""
+        p, _ = self.policy()
+        if self.blocked():
+            return {"reason": "blocked", "text": "CoreScope has stopped this observer from polling"}
+        if not self.version_ok():
+            reason = f': "{p["min_version_reason"]}"' if p["min_version_reason"] else ""
+            return {"reason": "version_disabled",
+                    "text": f"This version ({self.plugin_version}) is disabled by CoreScope. "
+                            f"Upgrade to {p['min_plugin_version']} or later{reason}"}
+        if self.paused(now):
+            until = f" until {p['paused_until']}" if p["paused_until"] else ""
+            why = f": {p['paused_reason']}" if p["paused_reason"] else ""
+            return {"reason": "paused", "text": f"Paused by CoreScope{until}{why}"}
+        return None
+
+    def excluded(self, node_id: str) -> bool:
+        p, _ = self.policy()
+        return node_id in p["excluded_nodes"]
+
+    # -- windows ------------------------------------------------------------------
+
+    def window_s(self, node_id: str, hops: int, now: float) -> int:
+        """The window for a repeater: CoreScope's own figure for it, else the
+        direct or one-hop window by this observer's best route. Twice that
+        when the policy is stale (CoreScope out of reach for hours)."""
+        p, _ = self.policy()
+        w = p["node_windows"].get(node_id) or (p["direct_s"] if hops == 0 else p["one_hop_s"])
+        return int(w * 2 if self.stale(now) else w)
+
+    def grace_s(self) -> int:
+        return int(self.policy()[0]["grace_s"])
+
+    def max_requests(self) -> int:
+        return int(self.policy()[0]["max_requests"])
+
+    def view(self, now: float) -> dict:
+        """For the plugin page."""
+        p, notes = self.policy()
+        g = self.gate(now)
+        return {
+            "has_policy": self.has_policy,
+            "policy": p,
+            "version": p["version"],
+            "fetched_at": self.fetched_at or None,
+            "last_error": self.s.get("last_error") or "",
+            "stale": self.stale(now),
+            "clamped": notes,
+            "gate": g,
+            "paused": self.paused(now),
+            "blocked": self.blocked(),
+            "version_ok": self.version_ok(),
+            "fast_mode": fast_mode(),
+        }
