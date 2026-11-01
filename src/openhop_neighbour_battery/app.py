@@ -387,7 +387,7 @@ class App:
         if not o.get("mine"):
             return {"role": "standby",
                     "by": str(o.get("owner_name") or str(o.get("owner") or "")[:8]),
-                    "owner_hops": o.get("owner_hops")}
+                    "owner_hops": o.get("owner_hops"), "rank": max(1, int(o.get("standby_rank") or 1))}
         return {"role": "poller"}
 
     def _startup_hold_s(self) -> float:
@@ -460,7 +460,9 @@ class App:
             return self._skip(st, "fresh_own", "this observer read it within the window", now)
         if not self.settings.corescope_url:
             return None  # nothing to ask: poll
-        wait = window + (self.community.grace_s() if standby else 0)
+        # Standbys queue, each a grace period behind the last, so one steps in
+        # for a silent poller and its reading stands the others down.
+        wait = window + (self.community.grace_s() * role["rank"] if standby else 0)
         reachable, snap = corescope_battery_check(self.settings.corescope_url, node_id)
         if not reachable:
             if standby:

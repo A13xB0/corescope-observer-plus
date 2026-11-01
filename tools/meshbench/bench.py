@@ -244,6 +244,28 @@ def start_plugin(st):
           {"OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST": "1", "OPENHOP_PLUGIN_DATA": str(pd), "OPENHOP_CONFIG_PATH": str(d / "config.yaml")})
 
 
+def manager(st="A"):
+    """Run station st's plugin through openHop's real plugin manager, so its page opens in the dashboard."""
+    d, http = BENCH / f"st{st}", STATIONS[st][1]
+    cfg = json.loads((d / "plugin/config.json").read_text())
+    stop(f"plugin{st}")
+    spawn(f"manager{st}", [VENV / "bin/openhop-plugin-manager", "--config", d / "config.yaml"], d / "manager.log",
+          {"OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST": "1", "OPENHOP_CONFIG_PATH": str(d / "config.yaml")})
+    time.sleep(5)
+    wheel = max((PLUGIN / "dist").glob("*.whl"), key=lambda p: p.stat().st_mtime)
+    tok = (d / "token").read_text().strip()
+    py = (f"import requests\nr=requests.post('http://127.0.0.1:{http}/api/plugins/install',headers={{'X-API-Key':{tok!r}}},"
+          f"files=dict(wheel=open({str(wheel)!r},'rb')),timeout=280)\nprint(r.status_code,r.text[:400])")
+    print(subprocess.check_output([VENV / "bin/python", "-c", py], text=True).strip())
+    data = next((d / "data/plugins").glob("**/openhop.neighbour_battery/**/config.default.json"), None)
+    print("installed", data)
+    roots = [p for p in (d / "data/plugins").rglob("*") if p.is_dir() and p.name == "data"]
+    print("data dirs", roots)
+    for root in roots:
+        cfg["api_token_input"] = tok
+        (root / "config.json").write_text(json.dumps(cfg, indent=1))
+
+
 def up():
     stop("plugin"); stop("openhop"); stop("socat")
     time.sleep(2)
@@ -334,6 +356,8 @@ if __name__ == "__main__":
         stop("plugin"); time.sleep(2); venv()
         for st in STATIONS:
             start_plugin(st)
+    elif cmd == "manager":
+        manager(*sys.argv[2:3])
     elif cmd == "status":
         status()
     elif cmd == "count":

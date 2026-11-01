@@ -218,17 +218,17 @@ def test_gates_persist_through_an_outage_and_a_restart(tmp_path, fake, monkeypat
 
 
 def test_version_gate(tmp_path, fake, monkeypatch, sent):
-    serve_policy(monkeypatch, {"min_plugin_version": "0.8.2", "version_ok": False,
+    serve_policy(monkeypatch, {"min_plugin_version": "9.9.9", "version_ok": False,
                                "min_version_reason": "resends logins"})
     a, _ = ready(tmp_path, fake, monkeypatch)
     a.refresh_policy(time.time(), 0)
     g = a.community.gate(time.time())
     assert g["reason"] == "version_disabled"
     assert f"This version ({app_mod.__version__}) is disabled by CoreScope" in g["text"]
-    assert "Upgrade to 0.8.2 or later" in g["text"] and "resends logins" in g["text"]
+    assert "Upgrade to 9.9.9 or later" in g["text"] and "resends logins" in g["text"]
     assert a.poll([NODE], mode="test") == [] and sent == []
     # After an upgrade the saved answer (about the old version) is judged afresh.
-    a.community.plugin_version = "0.8.2"
+    a.community.plugin_version = "9.9.9"
     assert a.community.gate(time.time()) is None
 
 
@@ -722,3 +722,21 @@ def test_freshness_uses_the_newest_reading_of_any_source(monkeypatch):
     monkeypatch.setattr(oh, "corescope_get", lambda *a, **k: (200, body))
     assert oh.corescope_battery_check("https://cs.example", NODE) == (
         True, {"latest_ts": "2026-11-01T15:28:03Z", "by": "CP-Station-A"})
+
+
+def test_standbys_queue_so_only_the_first_steps_in(tmp_path, fake, monkeypatch, sent):
+    now = time.time()
+    node = {"owner": "ee" * 32, "owner_name": "Montrave", "mine": False, "role": "standby", "owner_hops": 0}
+    serve_owners(monkeypatch, {NODE: {**node, "standby_rank": 2}})
+    # 1 h 40 min old: past window + one grace, inside window + two graces.
+    serve_latest(monkeypatch, utc_iso(now - 6000), by="Montrave")
+    a, _ = ready(tmp_path, fake, monkeypatch)
+    assert a.poll([NODE]) == [] and sent == []
+    assert abs(a.state.node(NODE)["next_due_at"] - (now - 6000 + 3600 + 2 * 1800)) < 5
+    # The first in the queue goes at that age.
+    serve_owners(monkeypatch, {NODE: {**node, "standby_rank": 1}})
+    a._owners["at"] = 0.0
+    a.state.node(NODE).pop("next_due_at")
+    a._last_scheduled = 0
+    a.poll([NODE])
+    assert sent == [NODE]
