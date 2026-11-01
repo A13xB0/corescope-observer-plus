@@ -41,7 +41,8 @@ your repeater's observer, for CoreScope to show.
 
 A repeater can be polled under a shared, public guest identity instead of this
 observer's own key, so any observer that hears the reply can feed CoreScope.
-Off by default; turned on per repeater from its Details.
+On by default (Poll with the guest key, under Polling); a repeater set by hand in its Details keeps
+its own choice and shows Overridden.
 
 The plugin keeps no key of its own: it fetches the shared key from CoreScope
 (`GET /api/shared-guest/key` on `corescope_url`). When CoreScope serves a key,
