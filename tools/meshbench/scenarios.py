@@ -87,7 +87,11 @@ def kill_switch():
     t0 = clock()
     b.policy(['paused=false', 'pausedReason=""'])
     wait(WINDOW + 60); t1 = clock()
-    check(bool(polls(t0, t1)), "polling resumes after the pause lifts")
+    p = polls(t0, t1)
+    check(bool(p), "polling resumes after the pause lifts")
+    for node, rows in p.items():
+        burst = {r[1] for r in rows if secs(r[0]) - secs(rows[0][0]) < GRACE}
+        check(len(burst) == 1, f"{node}: one station asked first after the pause ({rows})")
 
 
 def min_version():
@@ -130,7 +134,7 @@ def blocked():
 def takeover():
     print("== poller goes silent, then comes back", flush=True)
     who = poller("CP_WLOMOND")
-    last = max(secs(r[0]) for r in polls("00:00:00", clock()).get("CP_WLOMOND", []) )
+    last = max(secs(r[0]) for r in polls("00:00:00", clock()).get("CP_WLOMOND", []) if r[2] == "ok")
     b.stop("plugin" + who)
     t0 = clock(); wait(WINDOW * 3 + GRACE); t1 = clock()
     rows = polls(t0, t1).get("CP_WLOMOND", [])

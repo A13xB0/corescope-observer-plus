@@ -84,6 +84,7 @@ class App:
         self._last_scheduled = 0.0  # when the last scheduled poll finished (scheduled_gap_s)
         self._started_at = time.time()  # scheduled polls wait for CoreScope's word first (_starting)
         self._claims_sent_at = 0.0  # when this run last published a claim
+        self._gated_at = 0.0  # when CoreScope last had this observer stopped
         # CoreScope's polling policy (limits and switches), kept in state.json.
         self.community = Community(self.state.value.setdefault("community", {}), __version__)
         self._policy_tried = 0.0
@@ -396,6 +397,9 @@ class App:
                     "owner_hops": o.get("owner_hops"), "rank": max(1, int(o.get("standby_rank") or 1))}
         return {"role": "poller"}
 
+    def _standby_hold_from(self) -> float:
+        return max(self._started_at, self._gated_at)
+
     def _startup_hold_s(self) -> float:
         return 2 * timings().refresh_s + 60
 
@@ -430,9 +434,10 @@ class App:
         st = self.state.node(node_id)
         gate = self.community.gate(now)
         if gate:
+            self._gated_at = now
             return self._skip(st, gate["reason"], gate["text"], now)
         if self.community.excluded(node_id):
-            return self._skip(st, "excluded", "CoreScope excludes it (owner's request)", now)
+            return self._skip(st, "excluded", "Excluded by CoreScope", now)
         window = self.window_s(node_id, now)
         if mode != "test":
             sends = [x for x in st.get("sends") or [] if now - x < window]
@@ -445,7 +450,7 @@ class App:
             return None
         role = self.role_for(node_id, now)
         if role["role"] == "excluded":
-            return self._skip(st, "excluded", "CoreScope excludes it (owner's request)", now)
+            return self._skip(st, "excluded", "Excluded by CoreScope", now)
         if role["role"] in ("paused", "disabled"):
             return self._skip(st, role["role"], "CoreScope has paused polling" if role["role"] == "paused"
                               else "CoreScope has disabled this observer", now)
@@ -485,11 +490,15 @@ class App:
         if latest is None and standby:
             # No reading anywhere yet: give the poller one window plus grace
             # from when this observer went on standby before stepping in.
-            until = float(st["standby_since"]) + wait
+            until = max(float(st["standby_since"]), self._standby_hold_from()) + wait
             if now < until:
                 st["next_due_at"] = until
                 return self._skip(st, "standby", f"{by_text}; you're standby", now, by=role.get("by"),
                                   owner_hops=hops, until=until)
+        if latest is not None and standby:
+            # Every timer runs out during a pause or an outage of this plugin:
+            # the wait restarts, or poller and standbys would all ask at once.
+            latest = max(latest, self._standby_hold_from())
         if latest is not None and now - latest < wait:
             st["next_due_at"] = latest + wait
             st["fresh_at"], st["fresh_by"] = latest, snap.get("by") or ""
@@ -871,7 +880,7 @@ class App:
         # CoreScope's switches and exclusions stop a Test too (its limits don't).
         self.refresh_policy(started, timings().policy_cache_s)
         stop = self.community.gate(started) or (
-            {"reason": "excluded", "text": "CoreScope excludes this repeater (owner's request)"}
+            {"reason": "excluded", "text": "Excluded by CoreScope"}
             if self.community.excluded(node_id) else None)
         if stop:
             result.update(self._node_view(node_id), running=False, ok=False, skipped=stop["reason"],

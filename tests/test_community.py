@@ -740,3 +740,17 @@ def test_standbys_queue_so_only_the_first_steps_in(tmp_path, fake, monkeypatch, 
     a._last_scheduled = 0
     a.poll([NODE])
     assert sent == [NODE]
+
+
+@pytest.mark.startup_hold
+def test_a_standbys_wait_restarts_when_a_pause_lifts(tmp_path, fake, monkeypatch, sent):
+    now = time.time()
+    serve_owners(monkeypatch, {NODE: {"owner": "ee" * 32, "owner_name": "Montrave", "mine": False,
+                                      "role": "standby", "owner_hops": 0, "standby_rank": 1}})
+    serve_latest(monkeypatch, utc_iso(now - 20 * 3600), by="Montrave")  # long past, during the pause
+    a, _ = ready(tmp_path, fake, monkeypatch)
+    monkeypatch.setattr(App, "_starting", lambda self, t: False)
+    a._started_at = now - 24 * 3600
+    a._gated_at = now - 60  # the pause lifted a minute ago
+    assert a.poll([NODE]) == [] and sent == []
+    assert abs(a.state.node(NODE)["next_due_at"] - (now - 60 + 3600 + 1800)) < 5

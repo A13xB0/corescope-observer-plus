@@ -756,7 +756,7 @@
     const g = gate();
     if (g) return g.text;
     const p = community().policy || {};
-    if ((p.excluded_nodes || []).includes(nodeId)) return "CoreScope excludes this repeater (owner's request)";
+    if ((p.excluded_nodes || []).includes(nodeId)) return "Excluded by CoreScope";
     return "";
   }
 

@@ -25,6 +25,7 @@ def no_startup_hold(request, monkeypatch):
         return
     from openhop_neighbour_battery.app import App
     monkeypatch.setattr(App, "_starting", lambda self, now: False)
+    monkeypatch.setattr(App, "_standby_hold_from", lambda self: 0.0)
 
 
 def pytest_configure(config):
