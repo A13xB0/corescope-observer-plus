@@ -24,6 +24,16 @@ class ManualRepeater(TypedDict):
     name: str
 
 
+class Claim(TypedDict):
+    """One repeater this observer says it polls, and how."""
+
+    node_id: str
+    reply_hops: int
+    via: str | None
+    key: str
+    snr: float | None
+
+
 @dataclass
 class Route:
     """One way to reach a repeater: direct, or through one relay heard direct."""

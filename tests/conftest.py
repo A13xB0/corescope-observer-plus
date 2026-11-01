@@ -27,10 +27,10 @@ def no_startup_hold(request, monkeypatch):
     tests (marked startup_hold)."""
     if request.node.get_closest_marker("startup_hold"):
         return
-    from openhop_corescope_observer_plus.app import App
+    from openhop_corescope_observer_plus.coordination import Coordinator
 
-    monkeypatch.setattr(App, "_starting", lambda self, now: False)
-    monkeypatch.setattr(App, "_standby_hold_from", lambda self: 0.0)
+    monkeypatch.setattr(Coordinator, "starting", lambda self, now: False)
+    monkeypatch.setattr(Coordinator, "standby_hold_from", lambda self: 0.0)
 
 
 def pytest_configure(config):

@@ -221,6 +221,10 @@ class Community:
         return float(self.s.get("fetched_at") or 0)
 
     @property
+    def last_error(self) -> str:
+        return str(self.s.get("last_error") or "")
+
+    @property
     def has_policy(self) -> bool:
         return isinstance(self.s.get("policy"), dict)
 
