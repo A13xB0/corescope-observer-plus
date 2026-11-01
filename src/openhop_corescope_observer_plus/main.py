@@ -22,7 +22,9 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(
-        level=getattr(logging, os.environ.get("OPENHOP_OBSERVER_PLUS_LOG_LEVEL", "INFO").upper(), logging.INFO),
+        level=getattr(
+            logging, os.environ.get("OPENHOP_OBSERVER_PLUS_LOG_LEVEL", "INFO").upper(), logging.INFO
+        ),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         stream=sys.stdout,
     )

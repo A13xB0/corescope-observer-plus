@@ -112,7 +112,9 @@ def parse(raw: dict) -> Settings:
     except (TypeError, ValueError):
         hours = 6
     s.status_every_hours = hours if hours in STATUS_HOURS else 6
-    s.targets = sorted({str(k).lower() for k in raw.get("targets") or [] if KEY_RE.match(str(k).lower())})
+    s.targets = sorted(
+        {str(k).lower() for k in raw.get("targets") or [] if KEY_RE.match(str(k).lower())}
+    )
     s.brokers = [str(b) for b in raw.get("brokers") or [] if isinstance(b, str)]
     try:
         s.max_age_hours = max(1, min(168, int(raw.get("max_age_hours") or 24)))
@@ -122,8 +124,13 @@ def parse(raw: dict) -> Settings:
         s.spacing_seconds = max(5, min(300, int(raw.get("spacing_seconds") or 20)))
     except (TypeError, ValueError):
         pass
-    s.temperature_targets = sorted({str(k).lower() for k in raw.get("temperature_targets") or []
-                                    if KEY_RE.match(str(k).lower())})
+    s.temperature_targets = sorted(
+        {
+            str(k).lower()
+            for k in raw.get("temperature_targets") or []
+            if KEY_RE.match(str(k).lower())
+        }
+    )
     try:
         s.max_hops = 1 if int(raw.get("max_hops") or 0) >= 1 else 0
     except (TypeError, ValueError):
@@ -144,17 +151,25 @@ def parse(raw: dict) -> Settings:
         s.corescope_url = ""  # cleared on purpose: no CoreScope (no shared key, no checks)
     s.guest_key_default = bool(raw.get("guest_key_default", True))
     ov = raw.get("guest_key_overrides")
-    s.guest_key_overrides = {str(k).lower(): bool(v) for k, v in (ov.items() if isinstance(ov, dict) else [])
-                             if KEY_RE.match(str(k).lower())}
+    s.guest_key_overrides = {
+        str(k).lower(): bool(v)
+        for k, v in (ov.items() if isinstance(ov, dict) else [])
+        if KEY_RE.match(str(k).lower())
+    }
     s.shared_key_targets = sorted(
-        k for k in {*s.targets, *s.guest_key_overrides}
-        if s.guest_key_overrides.get(k, s.guest_key_default))
+        k
+        for k in {*s.targets, *s.guest_key_overrides}
+        if s.guest_key_overrides.get(k, s.guest_key_default)
+    )
     gp = raw.get("guest_passwords")
-    s.guest_passwords = {str(k).lower(): v for k, v in (gp.items() if isinstance(gp, dict) else [])
-                         if KEY_RE.match(str(k).lower()) and v in ("", "hello")}
+    s.guest_passwords = {
+        str(k).lower(): v
+        for k, v in (gp.items() if isinstance(gp, dict) else [])
+        if KEY_RE.match(str(k).lower()) and v in ("", "hello")
+    }
     pi = raw.get("poll_intervals")
     s.poll_intervals = {}
-    for k, v in (pi.items() if isinstance(pi, dict) else []):
+    for k, v in pi.items() if isinstance(pi, dict) else []:
         try:
             v = int(v)
         except (TypeError, ValueError):

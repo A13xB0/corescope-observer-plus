@@ -38,7 +38,6 @@ from openhop_core.protocol.constants import (
     PAYLOAD_TYPE_PATH,
     PAYLOAD_TYPE_RESPONSE,
     REQ_TYPE_GET_STATUS,
-    REQ_TYPE_GET_TELEMETRY_DATA,
     TXT_TYPE_CLI_COMMAND,
 )
 from openhop_core.protocol.constants import PAYLOAD_TYPE_PATH as _PT_PATH
@@ -66,6 +65,7 @@ _RX_HEADER = 3
 # 2 for a plain guest, so bool() would misread it).
 LOGIN_ADMIN_CODE_ADMIN = 1
 RESP_SERVER_LOGIN_OK = 0
+
 
 class UnsafeSharedPassword(Exception):
     """A password that is not blank or "hello" was offered for the shared key."""
@@ -108,7 +108,7 @@ class SharedKey:
         return LocalIdentity(self.private_key)
 
     @classmethod
-    def from_api(cls, body: dict) -> "SharedKey | None":
+    def from_api(cls, body: dict) -> SharedKey | None:
         """A SharedKey from CoreScope's /api/shared-guest/key payload, or None.
 
         CoreScope is the one holder of the key; the plugin fetches it rather
@@ -120,8 +120,12 @@ class SharedKey:
         pub = str(body.get("public_key") or "")
         priv = str(body.get("private_key") or "")
         try:
-            key = cls(str(body.get("name") or "shared guest"), int(body.get("version") or 0),
-                      bytes.fromhex(pub), bytes.fromhex(priv))
+            key = cls(
+                str(body.get("name") or "shared guest"),
+                int(body.get("version") or 0),
+                bytes.fromhex(pub),
+                bytes.fromhex(priv),
+            )
         except (ValueError, SharedKeyError):
             return None
         # The public half must belong to the private half, or every request is
@@ -174,8 +178,13 @@ def _frame(packet: Packet) -> bytes:
     return bytes([PRIORITY_NORMAL]) + packet.write_to()
 
 
-def build_login(shared: SharedKey, repeater_pubkey: bytes, out_path: bytes, out_path_len: int,
-                password: str = "") -> tuple[bytes, int]:
+def build_login(
+    shared: SharedKey,
+    repeater_pubkey: bytes,
+    out_path: bytes,
+    out_path_len: int,
+    password: str = "",
+) -> tuple[bytes, int]:
     """A login packet under the shared key. Returns (command body, tag).
 
     Refuses any password outside SHARED_PASSWORDS: the one place the never-a-real-
@@ -200,8 +209,9 @@ def _login_tag(packet: Packet) -> int:
     return PacketBuilder._last_unique_timestamp
 
 
-def build_status_request(shared: SharedKey, repeater_pubkey: bytes, out_path: bytes,
-                         out_path_len: int) -> tuple[bytes, int]:
+def build_status_request(
+    shared: SharedKey, repeater_pubkey: bytes, out_path: bytes, out_path_len: int
+) -> tuple[bytes, int]:
     """A repeater-stats request under the shared key. Returns (command body, tag)."""
     contact = _contact(repeater_pubkey, out_path, out_path_len)
     packet, tag = PacketBuilder.create_protocol_request(
@@ -210,8 +220,9 @@ def build_status_request(shared: SharedKey, repeater_pubkey: bytes, out_path: by
     return _frame(packet), tag
 
 
-def build_telemetry_request(shared: SharedKey, repeater_pubkey: bytes, out_path: bytes,
-                            out_path_len: int) -> tuple[bytes, int]:
+def build_telemetry_request(
+    shared: SharedKey, repeater_pubkey: bytes, out_path: bytes, out_path_len: int
+) -> tuple[bytes, int]:
     """A telemetry request under the shared key. Returns (command body, tag)."""
     contact = _contact(repeater_pubkey, out_path, out_path_len)
     packet, tag = PacketBuilder.create_telem_request(
@@ -220,8 +231,14 @@ def build_telemetry_request(shared: SharedKey, repeater_pubkey: bytes, out_path:
     return _frame(packet), tag
 
 
-def build_route_update(shared: SharedKey, repeater_pubkey: bytes, out_path: bytes, out_path_len: int,
-                       return_path: bytes = b"", return_path_len: int | None = None) -> bytes:
+def build_route_update(
+    shared: SharedKey,
+    repeater_pubkey: bytes,
+    out_path: bytes,
+    out_path_len: int,
+    return_path: bytes = b"",
+    return_path_len: int | None = None,
+) -> bytes:
     """A PATH packet teaching the repeater its route back to the shared key.
 
     A key freshly added by login has no return route (firmware
@@ -238,8 +255,11 @@ def build_route_update(shared: SharedKey, repeater_pubkey: bytes, out_path: byte
         raise SharedKeyError("the shared key is never flooded; pin a route first")
     secret = Identity(repeater_pubkey).calc_shared_secret(shared.identity().get_private_key())
     packet = PacketBuilder.create_path_return(
-        dest_hash=repeater_pubkey[0], src_hash=shared.hash_byte, secret=secret,
-        path=return_path, path_len_encoded=return_path_len,
+        dest_hash=repeater_pubkey[0],
+        src_hash=shared.hash_byte,
+        secret=secret,
+        path=return_path,
+        path_len_encoded=return_path_len,
     )
     # create_path_return marks the packet flood; send it direct to the repeater
     # instead (it is a neighbour), and carry the outer path if it is one hop.
@@ -249,8 +269,9 @@ def build_route_update(shared: SharedKey, repeater_pubkey: bytes, out_path: byte
     return _frame(packet)
 
 
-def build_admin_removal(shared: SharedKey, repeater_pubkey: bytes, out_path: bytes,
-                        out_path_len: int) -> bytes:
+def build_admin_removal(
+    shared: SharedKey, repeater_pubkey: bytes, out_path: bytes, out_path_len: int
+) -> bytes:
     """The CLI command that deletes the shared key's own ACL entry.
 
     Only built as part of the removal drill, after a repeater has answered the

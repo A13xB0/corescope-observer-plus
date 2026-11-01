@@ -51,9 +51,15 @@ class Route:
         return f"via {self.relay_name or self.relay_id[:8]}" if self.relay_id else "direct"
 
     def as_dict(self) -> dict:
-        return {"key": self.key, "hops": self.hops, "relay_id": self.relay_id,
-                "relay_name": self.relay_name, "label": self.label, "adverts": self.adverts,
-                "snr": None if self.snr is None else round(self.snr, 1)}
+        return {
+            "key": self.key,
+            "hops": self.hops,
+            "relay_id": self.relay_id,
+            "relay_name": self.relay_name,
+            "label": self.label,
+            "adverts": self.adverts,
+            "snr": None if self.snr is None else round(self.snr, 1),
+        }
 
 
 @dataclass
@@ -181,7 +187,9 @@ class OpenHopAPI:
 
     def advert_packets(self, max_age_hours: int) -> list[dict]:
         body = self._get(
-            "/api/filtered_packets", type=ADVERT_PACKET_TYPE, limit=ADVERT_PACKET_LIMIT,
+            "/api/filtered_packets",
+            type=ADVERT_PACKET_TYPE,
+            limit=ADVERT_PACKET_LIMIT,
             start_timestamp=int(time.time() - max_age_hours * 3600),
         )
         rows = body.get("data", []) if isinstance(body, dict) else []
@@ -309,8 +317,6 @@ def companion_port(cfg: OpenHopConfig, name: str) -> int | None:
     return int(port) if port else None
 
 
-
-
 def _path_hashes(row: dict) -> list[str] | None:
     """The hop hashes an advert came through, as lowercase hex; None if unreadable."""
     raw = row.get("original_path")
@@ -368,10 +374,15 @@ def attach_routes(neighbours: list[Neighbour], packets: list[dict]) -> None:
         for (key, relay), (count, snr_sum, snr_n, size) in counts.items():
             if key != n.node_id:
                 continue
-            routes.append(Route(
-                relay_id=relay, relay_name=by_id[relay].name if relay else "", hash_size=size,
-                adverts=count, snr=snr_sum / snr_n if snr_n else None,
-            ))
+            routes.append(
+                Route(
+                    relay_id=relay,
+                    relay_name=by_id[relay].name if relay else "",
+                    hash_size=size,
+                    adverts=count,
+                    snr=snr_sum / snr_n if snr_n else None,
+                )
+            )
         if n.zero_hop and not any(r.hops == 0 for r in routes):
             routes.append(Route(adverts=0, snr=n.snr))
         routes.sort(key=lambda r: (-r.adverts, -(r.snr if r.snr is not None else -99)))
@@ -383,7 +394,9 @@ def search_corescope(base_url: str, query: str, *, timeout: float = 10.0) -> lis
     if not base_url:
         raise OpenHopError("no CoreScope address set")
     try:
-        r = requests.get(f"{base_url}/api/nodes", params={"search": query, "limit": 20}, timeout=timeout)
+        r = requests.get(
+            f"{base_url}/api/nodes", params={"search": query, "limit": 20}, timeout=timeout
+        )
         r.raise_for_status()
         body = r.json()
     except (requests.RequestException, ValueError) as exc:
@@ -394,9 +407,16 @@ def search_corescope(base_url: str, query: str, *, timeout: float = 10.0) -> lis
         key = str(n.get("public_key") or "").lower()
         if len(key) != 64 or n.get("role") not in ("repeater", "room"):
             continue
-        out.append({"node_id": key, "name": str(n.get("name") or key[:8]), "role": n.get("role"),
-                    "last_seen": n.get("last_heard") or n.get("last_seen"),
-                    "lat": n.get("lat"), "lon": n.get("lon")})
+        out.append(
+            {
+                "node_id": key,
+                "name": str(n.get("name") or key[:8]),
+                "role": n.get("role"),
+                "last_seen": n.get("last_heard") or n.get("last_seen"),
+                "lat": n.get("lat"),
+                "lon": n.get("lon"),
+            }
+        )
     return out
 
 
@@ -432,7 +452,9 @@ def corescope_latest_battery_ts(base_url: str, node_id: str, *, timeout: float =
     if not base_url:
         return None
     try:
-        r = requests.get(f"{base_url}/api/nodes/{node_id}/battery", params={"days": 1}, timeout=timeout)
+        r = requests.get(
+            f"{base_url}/api/nodes/{node_id}/battery", params={"days": 1}, timeout=timeout
+        )
         r.raise_for_status()
         body = r.json()
     except (requests.RequestException, ValueError):
@@ -451,7 +473,9 @@ def corescope_battery_snapshot(base_url: str, node_id: str, *, timeout: float = 
     if not base_url:
         return None
     try:
-        r = requests.get(f"{base_url}/api/nodes/{node_id}/battery", params={"days": 1}, timeout=timeout)
+        r = requests.get(
+            f"{base_url}/api/nodes/{node_id}/battery", params={"days": 1}, timeout=timeout
+        )
         r.raise_for_status()
         body = r.json()
     except (requests.RequestException, ValueError):
@@ -468,8 +492,9 @@ def corescope_battery_snapshot(base_url: str, node_id: str, *, timeout: float = 
     }
 
 
-def corescope_responses(base_url: str, since: str, *, timeout: float = 5.0,
-                        limit: int = 2000) -> list[bytes] | None:
+def corescope_responses(
+    base_url: str, since: str, *, timeout: float = 5.0, limit: int = 2000
+) -> list[bytes] | None:
     """Every RESPONSE packet any CoreScope observer heard since ``since`` (ISO
     UTC), as raw wire bytes, or None on any error.
 
@@ -481,8 +506,11 @@ def corescope_responses(base_url: str, since: str, *, timeout: float = 5.0,
     if not base_url:
         return None
     try:
-        r = requests.get(f"{base_url}/api/packets",
-                         params={"type": 1, "since": since, "limit": limit}, timeout=timeout)
+        r = requests.get(
+            f"{base_url}/api/packets",
+            params={"type": 1, "since": since, "limit": limit},
+            timeout=timeout,
+        )
         r.raise_for_status()
         body = r.json()
     except (requests.RequestException, ValueError):
@@ -517,8 +545,9 @@ def register_guest_key(base_url: str, body: dict, *, timeout: float = 10.0) -> t
     return r.status_code, payload if isinstance(payload, dict) else {}
 
 
-def corescope_owners(base_url: str, observer_id: str, plugin_version: str = "", *,
-                     timeout: float = 5.0) -> dict | None:
+def corescope_owners(
+    base_url: str, observer_id: str, plugin_version: str = "", *, timeout: float = 5.0
+) -> dict | None:
     """Which observer CoreScope has chosen to poll each repeater this one
     claims: {"nodes": {node_id: {"owner", "owner_name", "mine", and on a
     CoreScope with community polling "role", "owner_hops", "latest_ts",
@@ -548,8 +577,10 @@ def corescope_owners(base_url: str, observer_id: str, plugin_version: str = "", 
 # caller tells "this CoreScope doesn't have it" (404) from "CoreScope is down"
 # (0) because they fail safe differently.
 
-def corescope_get(base_url: str, path: str, params: dict | None = None, *,
-                  timeout: float = 5.0) -> tuple[int, Any]:
+
+def corescope_get(
+    base_url: str, path: str, params: dict | None = None, *, timeout: float = 5.0
+) -> tuple[int, Any]:
     if not base_url:
         return 0, None
     try:
@@ -564,8 +595,9 @@ def corescope_get(base_url: str, path: str, params: dict | None = None, *,
         return 0, None
 
 
-def corescope_policy(base_url: str, observer_id: str, plugin_version: str, *,
-                     timeout: float = 5.0) -> tuple[int, dict | None]:
+def corescope_policy(
+    base_url: str, observer_id: str, plugin_version: str, *, timeout: float = 5.0
+) -> tuple[int, dict | None]:
     """GET /api/guest-polling/policy for this observer and plugin version."""
     params = {"plugin_version": plugin_version}
     if observer_id:
@@ -576,21 +608,30 @@ def corescope_policy(base_url: str, observer_id: str, plugin_version: str, *,
     return status, body
 
 
-def corescope_monitors(base_url: str, node_id: str, plugin_version: str, *,
-                       timeout: float = 5.0) -> tuple[int, dict | None]:
+def corescope_monitors(
+    base_url: str, node_id: str, plugin_version: str, *, timeout: float = 5.0
+) -> tuple[int, dict | None]:
     """GET /api/nodes/{pk}/monitors: every observer that claims the repeater."""
-    status, body = corescope_get(base_url, f"/api/nodes/{node_id}/monitors",
-                                 {"plugin_version": plugin_version}, timeout=timeout)
+    status, body = corescope_get(
+        base_url,
+        f"/api/nodes/{node_id}/monitors",
+        {"plugin_version": plugin_version},
+        timeout=timeout,
+    )
     if status == 200 and not isinstance(body, dict):
         return 0, None
     return status, body
 
 
-def corescope_battery_check(base_url: str, node_id: str, *, timeout: float = 5.0) -> tuple[bool, dict]:
+def corescope_battery_check(
+    base_url: str, node_id: str, *, timeout: float = 5.0
+) -> tuple[bool, dict]:
     """The freshness check: (reachable, {latest_ts, by}). Unlike
     corescope_latest_battery_ts this tells "no reading yet" (reachable, no
     latest_ts) from "CoreScope is down" (not reachable)."""
-    status, body = corescope_get(base_url, f"/api/nodes/{node_id}/battery", {"days": 1}, timeout=timeout)
+    status, body = corescope_get(
+        base_url, f"/api/nodes/{node_id}/battery", {"days": 1}, timeout=timeout
+    )
     if status == 404:
         return True, {"latest_ts": None, "by": ""}  # CoreScope has no such node: nothing fresh
     if status != 200 or not isinstance(body, dict):

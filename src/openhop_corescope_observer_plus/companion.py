@@ -127,11 +127,24 @@ def contact_out_path_len(frame: bytes) -> int:
 # RepeaterStats (MeshCore examples/simple_repeater/MyMesh.h), in order. Older
 # firmware sends a shorter struct; fields past its end are left out.
 STATS_FIELDS = (
-    ("battery_mv", "H"), ("tx_queue", "H"), ("noise_floor", "h"), ("last_rssi", "h"),
-    ("packets_recv", "I"), ("packets_sent", "I"), ("tx_air_secs", "I"), ("uptime_secs", "I"),
-    ("sent_flood", "I"), ("sent_direct", "I"), ("recv_flood", "I"), ("recv_direct", "I"),
-    ("err_events", "H"), ("last_snr_x4", "h"), ("direct_dups", "H"), ("flood_dups", "H"),
-    ("rx_air_secs", "I"), ("recv_errors", "I"),
+    ("battery_mv", "H"),
+    ("tx_queue", "H"),
+    ("noise_floor", "h"),
+    ("last_rssi", "h"),
+    ("packets_recv", "I"),
+    ("packets_sent", "I"),
+    ("tx_air_secs", "I"),
+    ("uptime_secs", "I"),
+    ("sent_flood", "I"),
+    ("sent_direct", "I"),
+    ("recv_flood", "I"),
+    ("recv_direct", "I"),
+    ("err_events", "H"),
+    ("last_snr_x4", "h"),
+    ("direct_dups", "H"),
+    ("flood_dups", "H"),
+    ("rx_air_secs", "I"),
+    ("recv_errors", "I"),
 )
 
 
@@ -165,9 +178,32 @@ LPP_TEMPERATURE = 103
 LPP_VOLTAGE = 116
 TELEM_CHANNEL_SELF = 1
 _LPP_SIZES = {
-    0: 1, 1: 1, 2: 2, 3: 2, 100: 4, 101: 2, 102: 1, 103: 2, 104: 2, 113: 6, 115: 2,
-    116: 2, 117: 2, 118: 4, 120: 1, 121: 2, 125: 2, 128: 2, 130: 4, 131: 4, 132: 2,
-    133: 4, 134: 6, 135: 3, 136: 9, 142: 1,
+    0: 1,
+    1: 1,
+    2: 2,
+    3: 2,
+    100: 4,
+    101: 2,
+    102: 1,
+    103: 2,
+    104: 2,
+    113: 6,
+    115: 2,
+    116: 2,
+    117: 2,
+    118: 4,
+    120: 1,
+    121: 2,
+    125: 2,
+    128: 2,
+    130: 4,
+    131: 4,
+    132: 2,
+    133: 4,
+    134: 6,
+    135: 3,
+    136: 9,
+    142: 1,
 }
 
 
@@ -220,7 +256,7 @@ class CompanionClient:
         self._buf = b""
         self.public_key: bytes = b""
 
-    def __enter__(self) -> "CompanionClient":
+    def __enter__(self) -> CompanionClient:
         self.connect()
         return self
 
@@ -272,7 +308,7 @@ class CompanionClient:
             self._sock.settimeout(remaining)
             try:
                 chunk = self._sock.recv(4096)
-            except socket.timeout:
+            except TimeoutError:
                 return None
             if not chunk:
                 raise CompanionError("companion closed the connection")
@@ -355,9 +391,7 @@ class CompanionClient:
         """Send one binary request; the reply data after the tag, or None."""
         self._send(bytes([CMD_SEND_BINARY_REQ]) + pubkey + request)
         wait, tag = self._expect_sent()
-        frame = self._wait(
-            {PUSH_CODE_BINARY_RESPONSE}, wait, match=lambda f: f[2:6] == tag
-        )
+        frame = self._wait({PUSH_CODE_BINARY_RESPONSE}, wait, match=lambda f: f[2:6] == tag)
         if frame is None:
             return None
         return frame[6:]

@@ -53,7 +53,10 @@ def test_topic_and_payload():
     assert payload["v"] == 1 and payload["origin_id"] == p.public_key_hex
     assert payload["origin"] == "Cadham Village"
     # The claim topic shares the structure, with a polling leaf.
-    assert pub._topic(b, p.cfg, p.public_key_hex, "polling") == f"meshcore/EDI/{p.public_key_hex}/polling"
+    assert (
+        pub._topic(b, p.cfg, p.public_key_hex, "polling")
+        == f"meshcore/EDI/{p.public_key_hex}/polling"
+    )
     assert pub._topic(custom, p.cfg, p.public_key_hex, "polling") == "home/obs/polling"
 
 
@@ -117,8 +120,16 @@ class FakeClient:
 def test_publish_never_retains_and_sets_no_last_will(monkeypatch):
     monkeypatch.setattr(pub.mqtt, "Client", FakeClient)
     p = pub.Publisher(cfg())
-    b = Broker(name="ScotMesh", host="mqtt.example", port=443, transport="websockets", tls=True,
-               use_jwt_auth=True, audience="mqtt.example", format="meshcoretomqtt")
+    b = Broker(
+        name="ScotMesh",
+        host="mqtt.example",
+        port=443,
+        transport="websockets",
+        tls=True,
+        use_jwt_auth=True,
+        audience="mqtt.example",
+        format="meshcoretomqtt",
+    )
     p.publish(b, [{"node_id": "x", "battery_mv": 1}])
     fc = FakeClient.instances[-1]
     assert fc.will is None
@@ -139,18 +150,49 @@ def test_publish_claim_sends_v2_nodes(monkeypatch):
     p = pub.Publisher(cfg())
     b = Broker(name="ScotMesh", host="h", port=443, format="meshcoretomqtt")
     captured = {}
-    monkeypatch.setattr(p, "_send",
-                        lambda broker, topic, payload, role="battery": captured.update(topic=topic, role=role, payload=json.loads(payload)))
-    p.publish_claim(b, [{"node_id": "ab" * 32, "reply_hops": 0, "via": None, "key": "own", "snr": 6.5},
-                        {"node_id": "cd" * 32, "reply_hops": 1, "via": "ef" * 32, "key": "shared", "snr": None}],
-                    policy_version="a1b2c3d4", community=True)
+    monkeypatch.setattr(
+        p,
+        "_send",
+        lambda broker, topic, payload, role="battery": captured.update(
+            topic=topic, role=role, payload=json.loads(payload)
+        ),
+    )
+    p.publish_claim(
+        b,
+        [
+            {"node_id": "ab" * 32, "reply_hops": 0, "via": None, "key": "own", "snr": 6.5},
+            {"node_id": "cd" * 32, "reply_hops": 1, "via": "ef" * 32, "key": "shared", "snr": None},
+        ],
+        policy_version="a1b2c3d4",
+        community=True,
+    )
     assert captured["topic"] == f"meshcore/EDI/{p.public_key_hex}/polling"
     payload = captured["payload"]
-    assert payload["nodes"][0] == {"node_id": "ab" * 32, "reply_hops": 0, "via": None, "key": "own", "snr": 6.5}
-    assert payload["nodes"][1] == {"node_id": "cd" * 32, "reply_hops": 1, "via": "ef" * 32, "key": "shared",
-                                   "snr": None}
+    assert payload["nodes"][0] == {
+        "node_id": "ab" * 32,
+        "reply_hops": 0,
+        "via": None,
+        "key": "own",
+        "snr": 6.5,
+    }
+    assert payload["nodes"][1] == {
+        "node_id": "cd" * 32,
+        "reply_hops": 1,
+        "via": "ef" * 32,
+        "key": "shared",
+        "snr": None,
+    }
     assert payload["v"] == 2 and payload["origin_id"] == p.public_key_hex and payload["origin"]
     assert payload["plugin"] == f"openhop.corescope_observer_plus/{pub.__version__}"
     assert payload["policy_version"] == "a1b2c3d4" and payload["community"] is True
-    assert set(payload) == {"v", "origin", "origin_id", "timestamp", "plugin", "policy_version", "community", "nodes"}
+    assert set(payload) == {
+        "v",
+        "origin",
+        "origin_id",
+        "timestamp",
+        "plugin",
+        "policy_version",
+        "community",
+        "nodes",
+    }
     assert captured["role"] == "claim"

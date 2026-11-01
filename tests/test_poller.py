@@ -8,8 +8,9 @@ from openhop_corescope_observer_plus import poller
 from openhop_corescope_observer_plus.companion import CompanionClient
 from openhop_corescope_observer_plus.openhop import Neighbour, Route
 
-NODE = Neighbour(node_id="02f1" + "ab" * 30, name="West Lomond", snr=-5.0, rssi=-119,
-                 last_seen=0, zero_hop=True)
+NODE = Neighbour(
+    node_id="02f1" + "ab" * 30, name="West Lomond", snr=-5.0, rssi=-119, last_seen=0, zero_hop=True
+)
 RELAY_A = "4128a6" + "11" * 29
 RELAY_B = "2eecdf" + "22" * 29
 VIA_A = Route(relay_id=RELAY_A, relay_name="sco-edi-garvald", hash_size=3, adverts=5, snr=-0.8)
@@ -28,17 +29,26 @@ def poll(fake, password="", state=None, now=None, routes=None, **kw):
     state = {} if state is None else state
     with CompanionClient("127.0.0.1", fake.port, timeout=2) as client:
         client._expect_sent = _quick(client._expect_sent)
-        result = poller.poll_one(client, NODE, password, state, now=now,
-                                 routes=routes if routes is not None else [DIRECT],
-                                 sleep=lambda s: None, **kw)
+        result = poller.poll_one(
+            client,
+            NODE,
+            password,
+            state,
+            now=now,
+            routes=routes if routes is not None else [DIRECT],
+            sleep=lambda s: None,
+            **kw,
+        )
         return result, state
 
 
 def _quick(expect_sent):
     """Don't wait the full reply window in tests."""
+
     def wrapped():
         _wait, tag = expect_sent()
         return 0.3, tag
+
     return wrapped
 
 
@@ -67,7 +77,9 @@ def test_logs_in_once_then_never_again(fake):
 
 def test_route_pinned_before_any_request(fake):
     poll(fake)
-    first_send = next(i for i, cmd in enumerate(fake.commands) if cmd in (c.CMD_SEND_LOGIN, c.CMD_SEND_BINARY_REQ))
+    first_send = next(
+        i for i, cmd in enumerate(fake.commands) if cmd in (c.CMD_SEND_LOGIN, c.CMD_SEND_BINARY_REQ)
+    )
     assert fake.commands[:first_send].count(c.CMD_ADD_UPDATE_CONTACT) == 1
     assert fake.commands[:first_send].count(c.CMD_GET_CONTACT_BY_KEY) == 1
     assert fake.contacts[bytes.fromhex(NODE.node_id)] == (0, b"")
@@ -100,7 +112,11 @@ def test_each_poll_starts_with_a_login_until_one_works(fake):
     result, state = poll(fake, now=10_000.0)
     # A silent first login doesn't write the route off: all tries still go out.
     assert result.code == poller.NO_REPLY
-    assert fake.commands.count(c.CMD_SEND_LOGIN) == 1 and len(statuses(fake)) == 3 and len(telemetries(fake)) == 3
+    assert (
+        fake.commands.count(c.CMD_SEND_LOGIN) == 1
+        and len(statuses(fake)) == 3
+        and len(telemetries(fake)) == 3
+    )
     fake.answer_login = True
     fake.commands.clear()
     result, _ = poll(fake, state=state, now=11_200.0)
@@ -125,7 +141,11 @@ def test_a_dead_route_does_not_use_up_tries(fake):
     fake.telemetry = None
     poll(fake, routes=[VIA_A, VIA_B], alternative_routes=True, state=dict(LOGGED_IN), now=10_000.0)
     # Try 1 via A fails, the probe via A is silent (A dead), then tries 2 and 3 both go via B.
-    assert [r[2] for r in telemetries(fake)] == [bytes.fromhex("4128a6"), bytes.fromhex("2eecdf"), bytes.fromhex("2eecdf")]
+    assert [r[2] for r in telemetries(fake)] == [
+        bytes.fromhex("4128a6"),
+        bytes.fromhex("2eecdf"),
+        bytes.fromhex("2eecdf"),
+    ]
 
 
 def test_unanswered_request_probes_with_one_login(fake):
@@ -211,7 +231,9 @@ def test_alternative_routes_go_round_and_the_good_one_is_remembered(fake):
     fake.answer_paths = {bytes.fromhex("2eecdf")}
     fake.telemetry = None
     state = dict(LOGGED_IN, last_success=9_000.0)  # heard recently, so alternatives are tried
-    result, state = poll(fake, routes=[DIRECT, VIA_A, VIA_B], alternative_routes=True, state=state, now=10_000.0)
+    result, state = poll(
+        fake, routes=[DIRECT, VIA_A, VIA_B], alternative_routes=True, state=state, now=10_000.0
+    )
     assert result.code == poller.OK and result.route is VIA_B and result.retried
     # Direct: status, then a login that goes unanswered (the path is dead), so
     # the round moves on, skipping the dead route.
@@ -220,7 +242,13 @@ def test_alternative_routes_go_round_and_the_good_one_is_remembered(fake):
     assert state["last_route"] == RELAY_B
     fake.requests.clear()
     # Past STATUS_EVERY_SECONDS, so this poll asks for status again.
-    poll(fake, routes=[DIRECT, VIA_A, VIA_B], alternative_routes=True, state=state, now=10_000.0 + 7 * 3600)
+    poll(
+        fake,
+        routes=[DIRECT, VIA_A, VIA_B],
+        alternative_routes=True,
+        state=state,
+        now=10_000.0 + 7 * 3600,
+    )
     assert statuses(fake)[0][2] == bytes.fromhex("2eecdf")  # last good route goes first
 
 
@@ -245,7 +273,9 @@ def test_status_ignored_falls_back_to_telemetry(fake):
     assert state["status_ignored"]
     fake.requests.clear()
     result, state = poll(fake, state=state, now=10_000.0 + 3600)
-    assert result.code == poller.OK and not statuses(fake) and len(telemetries(fake)) == 1  # telemetry first
+    assert (
+        result.code == poller.OK and not statuses(fake) and len(telemetries(fake)) == 1
+    )  # telemetry first
     fake.requests.clear()
     poll(fake, state=state, now=10_000.0 + 25 * 3600)
     assert statuses(fake)  # status checked again after a day
@@ -308,26 +338,38 @@ def test_no_reply_retried_three_times_an_hour_then_hourly():
 def test_rejected_password_not_retried_until_changed():
     st = {}
     poller.record(st, poller.PollResult(poller.PASSWORD_REJECTED), True, now=0)
-    assert not poller.is_due(st, 3600, True, now=10 ** 6)
+    assert not poller.is_due(st, 3600, True, now=10**6)
     st["password_changed"] = True
-    assert poller.is_due(st, 3600, True, now=10 ** 6)
+    assert poller.is_due(st, 3600, True, now=10**6)
 
 
 def test_reading_shape():
-    result = poller.PollResult(poller.OK, battery_mv=3940, route=DIRECT,
-                               stats={"battery_mv": 3940, "uptime_secs": 5, "noise_floor": -116})
+    result = poller.PollResult(
+        poller.OK,
+        battery_mv=3940,
+        route=DIRECT,
+        stats={"battery_mv": 3940, "uptime_secs": 5, "noise_floor": -116},
+    )
     r = poller.reading(NODE, result, 1761300000)
     assert r == {
-        "node_id": NODE.node_id, "battery_mv": 3940, "source": "poll", "reply_hops": 0,
-        "method": "status", "sampled_at": "2025-10-24T10:00:00Z", "snr": -5.0, "rssi": -119,
+        "node_id": NODE.node_id,
+        "battery_mv": 3940,
+        "source": "poll",
+        "reply_hops": 0,
+        "method": "status",
+        "sampled_at": "2025-10-24T10:00:00Z",
+        "snr": -5.0,
+        "rssi": -119,
         "stats": {"uptime_secs": 5, "noise_floor": -116},
     }
 
 
 def test_parse_stats_real_reply():
     # West Lomond, 25 Oct 2026 10:31.
-    data = bytes.fromhex("c60f00008cff8eff523d0100344f00007d47000079060c000b4b000029040000"
-                         "a629010094130000020005002400eadb6b200100aa6d000000000000")
+    data = bytes.fromhex(
+        "c60f00008cff8eff523d0100344f00007d47000079060c000b4b000029040000"
+        "a629010094130000020005002400eadb6b200100aa6d000000000000"
+    )
     s = c.parse_stats(data)
     assert s["battery_mv"] == 4038 and s["uptime_secs"] == 788089 and s["noise_floor"] == -116
     assert s["recv_flood"] == 76198 and s["flood_dups"] == 56298 and s["recv_errors"] == 28074
@@ -368,10 +410,12 @@ def test_unheard_24h_backs_off_to_daily():
     st["unheard_since"] = now0 - 25 * hour
     st["last_attempt"] = now0 - hour
     st["no_reply_count"] = 50
-    assert not poller.is_due(st, hour, False, now=now0)              # not every hour any more
-    assert poller.is_due(st, hour, False, now=now0 + 24 * hour)     # once a day
+    assert not poller.is_due(st, hour, False, now=now0)  # not every hour any more
+    assert poller.is_due(st, hour, False, now=now0 + 24 * hour)  # once a day
     # A success clears the backoff: record() drops unheard_since.
-    poller.record(st, poller.PollResult(poller.OK, battery_mv=4000), password_set=False, now=now0 + 24 * hour)
+    poller.record(
+        st, poller.PollResult(poller.OK, battery_mv=4000), password_set=False, now=now0 + 24 * hour
+    )
     assert "unheard_since" not in st
     st["last_attempt"] = now0 + 24 * hour
     assert poller.is_due(st, hour, False, now=now0 + 25 * hour + 1)  # back to hourly
@@ -382,10 +426,13 @@ def test_recent_failures_do_not_back_off():
     # not once a day.
     hour = 3600
     now0 = 1_000_000.0
-    st = {"code": poller.NO_REPLY, "unheard_since": now0 - 2 * hour,
-          "last_attempt": now0 - hour, "no_reply_count": 50}
+    st = {
+        "code": poller.NO_REPLY,
+        "unheard_since": now0 - 2 * hour,
+        "last_attempt": now0 - hour,
+        "no_reply_count": 50,
+    }
     assert poller.is_due(st, hour, False, now=now0)  # 2 h unheard: still hourly
-
 
 
 def test_status_only_every_six_hours_otherwise_telemetry(fake):
@@ -402,7 +449,6 @@ def test_status_only_every_six_hours_otherwise_telemetry(fake):
     fake.requests.clear()
     r3, state = poll(fake, state=state, now=100_000.0 + 6 * 3600 + 1)
     assert r3.method == "status"
-
 
 
 def test_companion_stays_on_a_route_whose_login_was_answered(fake):

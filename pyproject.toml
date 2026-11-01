@@ -17,7 +17,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<9"]
+dev = [
+  "pytest>=8,<9",
+  "ruff>=0.17,<0.18",
+  "mypy>=2.4,<3",
+  "types-PyYAML",
+  "types-requests",
+]
 
 [project.scripts]
 openhop-corescope-observer-plus = "openhop_corescope_observer_plus.main:main"
@@ -39,3 +45,26 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+extend-exclude = ["tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "BLE", "C4", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["BLE", "B", "E402", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src"]
+mypy_path = "src"
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["openhop_core", "openhop_core.*"]
+ignore_missing_imports = true

@@ -35,8 +35,9 @@ def _identity() -> LocalIdentity:
 
 def _shared() -> tuple[sk.SharedKey, LocalIdentity]:
     lid = _identity()
-    return sk.SharedKey("CoreScope shared guest", 1,
-                        lid.get_public_key(), lid.get_signing_key_bytes()), lid
+    return sk.SharedKey(
+        "CoreScope shared guest", 1, lid.get_public_key(), lid.get_signing_key_bytes()
+    ), lid
 
 
 def _forge_reply(repeater: LocalIdentity, shared_pub: bytes, tag: int, body: bytes) -> bytes:
@@ -51,11 +52,26 @@ def _forge_reply(repeater: LocalIdentity, shared_pub: bytes, tag: int, body: byt
 
 
 def _stats_bytes(**over) -> bytes:
-    stats = {"battery_mv": 4042, "tx_queue": 0, "noise_floor": -92, "last_rssi": -41,
-             "packets_recv": 10, "packets_sent": 8, "tx_air_secs": 3, "uptime_secs": 86400,
-             "sent_flood": 1, "sent_direct": 7, "recv_flood": 4, "recv_direct": 6,
-             "err_events": 0, "last_snr_x4": 30, "direct_dups": 0, "flood_dups": 2,
-             "rx_air_secs": 5, "recv_errors": 0}
+    stats = {
+        "battery_mv": 4042,
+        "tx_queue": 0,
+        "noise_floor": -92,
+        "last_rssi": -41,
+        "packets_recv": 10,
+        "packets_sent": 8,
+        "tx_air_secs": 3,
+        "uptime_secs": 86400,
+        "sent_flood": 1,
+        "sent_direct": 7,
+        "recv_flood": 4,
+        "recv_direct": 6,
+        "err_events": 0,
+        "last_snr_x4": 30,
+        "direct_dups": 0,
+        "flood_dups": 2,
+        "rx_air_secs": 5,
+        "recv_errors": 0,
+    }
     stats.update(over)
     raw = b""
     for name, fmt in c.STATS_FIELDS:
@@ -105,8 +121,12 @@ def test_telemetry_reply_round_trip():
     repeater = _identity()
     rpub = repeater.get_public_key()
     _body, tag = sk.build_telemetry_request(shared, rpub, b"", 0)
-    lpp = (bytes([1, c.LPP_VOLTAGE]) + struct.pack(">H", 404)
-           + bytes([1, c.LPP_TEMPERATURE]) + struct.pack(">h", 162))
+    lpp = (
+        bytes([1, c.LPP_VOLTAGE])
+        + struct.pack(">H", 404)
+        + bytes([1, c.LPP_TEMPERATURE])
+        + struct.pack(">h", 162)
+    )
     frame = _forge_reply(repeater, shared.public_key, tag, lpp)
     reply = sk.decode_rx(frame, shared, [rpub])
     assert reply is not None and reply.tag == tag
@@ -159,6 +179,7 @@ def test_wrong_repeater_for_the_hash_ruled_out_by_mac():
 def test_route_update_builds_a_direct_path_packet():
     from openhop_core.protocol.constants import PAYLOAD_TYPE_PATH
     from openhop_core.protocol.packet import Packet
+
     shared, _ = _shared()
     rpub = _identity().get_public_key()
     body = sk.build_route_update(shared, rpub, b"", 0)
@@ -172,10 +193,12 @@ def test_route_update_builds_a_direct_path_packet():
 
 def test_route_update_one_hop_carries_the_relay_return_path():
     from openhop_core.protocol.packet import Packet
+
     from openhop_corescope_observer_plus.companion import path_len_byte
+
     shared, _ = _shared()
     rpub = _identity().get_public_key()
-    relay = bytes([0x41, 0x28, 0xa6])  # one 3-byte relay hash
+    relay = bytes([0x41, 0x28, 0xA6])  # one 3-byte relay hash
     plen = path_len_byte(relay, 3)
     body = sk.build_route_update(shared, rpub, relay, plen, return_path=relay, return_path_len=plen)
     pkt = Packet()

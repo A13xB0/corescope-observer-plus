@@ -17,6 +17,7 @@ def _expanded_key() -> bytes:
     """A MeshCore-style 64-byte repeater key: SHA-512 of a seed with the scalar
     clamped, as real repeaters have (random bytes alone don't sign consistently)."""
     import hashlib
+
     k = bytearray(hashlib.sha512(os.urandom(32)).digest())
     k[0] &= 248
     k[31] &= 63
@@ -26,19 +27,38 @@ def _expanded_key() -> bytes:
 
 def write_openhop_config(tmp_path, port):
     path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump({
-        "repeater": {"node_name": "Cadham Village", "identity_key": _expanded_key()},
-        "mqtt_brokers": {"iata_code": "EDI", "brokers": [
-            {"name": "ScotMesh", "host": "mqtt.example", "port": 443, "format": "meshcoretomqtt",
-             "use_jwt_auth": True, "audience": "mqtt.example", "enabled": True,
-             "tls": {"enabled": True, "insecure": True}},
-            {"preset": "letsmesh"},
-        ]},
-        "identities": {"companions": [
-            {"name": "NeighbourBattery", "identity_key": os.urandom(32).hex(),
-             "settings": {"tcp_port": port, "bind_address": "127.0.0.1"}},
-        ]},
-    }))
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "repeater": {"node_name": "Cadham Village", "identity_key": _expanded_key()},
+                "mqtt_brokers": {
+                    "iata_code": "EDI",
+                    "brokers": [
+                        {
+                            "name": "ScotMesh",
+                            "host": "mqtt.example",
+                            "port": 443,
+                            "format": "meshcoretomqtt",
+                            "use_jwt_auth": True,
+                            "audience": "mqtt.example",
+                            "enabled": True,
+                            "tls": {"enabled": True, "insecure": True},
+                        },
+                        {"preset": "letsmesh"},
+                    ],
+                },
+                "identities": {
+                    "companions": [
+                        {
+                            "name": "NeighbourBattery",
+                            "identity_key": os.urandom(32).hex(),
+                            "settings": {"tcp_port": port, "bind_address": "127.0.0.1"},
+                        },
+                    ]
+                },
+            }
+        )
+    )
     return path
 
 
@@ -48,7 +68,7 @@ def make_app(tmp_path, fake, **cfg):
     conf = {"openhop_config_path": str(write_openhop_config(tmp_path, fake.port)), **cfg}
     # Tests name the repeaters on the guest key; everything else stays off it.
     conf.setdefault("guest_key_default", False)
-    conf["guest_key_overrides"] = {k: True for k in conf.pop("shared_key_targets", [])}
+    conf["guest_key_overrides"] = dict.fromkeys(conf.pop("shared_key_targets", []), True)
     (data / "config.json").write_text(json.dumps(conf))
     a = App(data)
     a.load_settings()
@@ -58,7 +78,9 @@ def make_app(tmp_path, fake, **cfg):
 def test_secrets_leave_config_and_are_private(tmp_path):
     fake = FakeCompanion()
     try:
-        a, data = make_app(tmp_path, fake, api_token_input="tok-123", password_updates={NODE: "pw-456"})
+        a, data = make_app(
+            tmp_path, fake, api_token_input="tok-123", password_updates={NODE: "pw-456"}
+        )
         cfg = json.loads((data / "config.json").read_text())
         assert "api_token_input" not in cfg and "password_updates" not in cfg
         assert a.secrets.api_token == "tok-123" and a.secrets.password(NODE) == "pw-456"
@@ -84,8 +106,9 @@ def test_poll_cycle_queues_and_publishes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(app_mod, "Publisher", P)
     try:
-        a, data = make_app(tmp_path, fake, enabled=True, targets=[NODE], brokers=["ScotMesh"],
-                           spacing_seconds=5)
+        a, data = make_app(
+            tmp_path, fake, enabled=True, targets=[NODE], brokers=["ScotMesh"], spacing_seconds=5
+        )
         a.secrets.set_api_token("t")
         monkeypatch.setattr(a, "refresh", lambda: None)
         a.ohcfg = load_openhop_config(tmp_path / "config.yaml")
@@ -127,7 +150,9 @@ def test_preset_broker_entries_are_skipped(tmp_path):
 
 
 def test_settings_validation():
-    s = parse({"targets": [NODE.upper(), "short", NODE], "interval_minutes": 5, "brokers": ["A", 3]})
+    s = parse(
+        {"targets": [NODE.upper(), "short", NODE], "interval_minutes": 5, "brokers": ["A", 3]}
+    )
     assert s.targets == [NODE]
     assert s.interval_minutes == 30
     assert s.brokers == ["A"]
@@ -148,18 +173,31 @@ def test_check_now_polls_every_target_and_publishes(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "Publisher", P)
     # No network and no delay in the CoreScope confirmation pass.
     monkeypatch.setattr(app_mod, "CORESCOPE_SETTLE_S", 0)
-    monkeypatch.setattr(app_mod, "corescope_battery_snapshot",
-                        lambda url, nid, **k: {"latest_ts": "2026-10-26T09:00:00Z", "latest_mv": 3240,
-                                               "status": "ok", "by": "West Lomond", "key_mode": ""})
+    monkeypatch.setattr(
+        app_mod,
+        "corescope_battery_snapshot",
+        lambda url, nid, **k: {
+            "latest_ts": "2026-10-26T09:00:00Z",
+            "latest_mv": 3240,
+            "status": "ok",
+            "by": "West Lomond",
+            "key_mode": "",
+        },
+    )
     try:
-        a, _ = make_app(tmp_path, fake, targets=[NODE], brokers=["ScotMesh"],
-                        requests=[{"id": "c1", "type": "check_now"}])
+        a, _ = make_app(
+            tmp_path,
+            fake,
+            targets=[NODE],
+            brokers=["ScotMesh"],
+            requests=[{"id": "c1", "type": "check_now"}],
+        )
         monkeypatch.setattr(a, "refresh", lambda: None)
         a.ohcfg = load_openhop_config(tmp_path / "config.yaml")
         a.check = {"companion": {"ok": True}, "publish": {"ok": True}}
         a.candidates = [Neighbour(NODE, "West Lomond", -5.0, -119, 0, True)]
         # Polled now although polling is off and the node was just read.
-        a.state.node(NODE)["last_attempt"] = 10 ** 12
+        a.state.node(NODE)["last_attempt"] = 10**12
         a.run_requests()
         assert published and published[0][0]["node_id"] == NODE
         act = a.actions["check_now"]
@@ -175,13 +213,16 @@ def test_check_now_polls_every_target_and_publishes(tmp_path, monkeypatch):
 
 def test_one_hop_targets_need_max_hops(tmp_path, monkeypatch):
     from openhop_corescope_observer_plus.openhop import Route
+
     fake = FakeCompanion()
     try:
         a, _ = make_app(tmp_path, fake, enabled=True, targets=[NODE])
         monkeypatch.setattr(a, "refresh", lambda: None)
         a.ohcfg = load_openhop_config(tmp_path / "config.yaml")
         a.check = {"companion": {"ok": True}}
-        via = Route(relay_id="4128a6" + "11" * 29, relay_name="sco-edi-garvald", hash_size=3, adverts=3)
+        via = Route(
+            relay_id="4128a6" + "11" * 29, relay_name="sco-edi-garvald", hash_size=3, adverts=3
+        )
         a.candidates = [Neighbour(NODE, "Dalgety Bay", None, None, 0, False, routes=[via])]
         assert a.poll([NODE]) == []
         assert fake.commands == []
@@ -200,8 +241,16 @@ def test_settings_new_options():
 
 
 def test_manual_repeaters_and_corescope_url_settings():
-    s = parse({"manual_repeaters": [{"node_id": NODE.upper(), "name": "Redstone"}, {"node_id": "bad"}, "x"],
-               "corescope_url": "https://cs.example/"})
+    s = parse(
+        {
+            "manual_repeaters": [
+                {"node_id": NODE.upper(), "name": "Redstone"},
+                {"node_id": "bad"},
+                "x",
+            ],
+            "corescope_url": "https://cs.example/",
+        }
+    )
     assert s.manual_repeaters == [{"node_id": NODE, "name": "Redstone"}]
     assert s.corescope_url == "https://cs.example"
     assert parse({"corescope_url": "ftp://nope"}).corescope_url == "https://corescope.scotmesh.net"
@@ -210,20 +259,26 @@ def test_manual_repeaters_and_corescope_url_settings():
 def _serve_key(monkeypatch):
     """Make CoreScope serve a usable shared key to the app under test."""
     import pytest
+
     pytest.importorskip("openhop_core")
     from openhop_core.protocol.identity import LocalIdentity
+
     while True:
         lid = LocalIdentity()
         if lid.get_public_key()[0] not in (0x00, 0xFF):
             break
-    key = {"name": "CoreScope shared guest", "version": 1,
-           "public_key": lid.get_public_key().hex(),
-           "private_key": lid.get_signing_key_bytes().hex()}
+    key = {
+        "name": "CoreScope shared guest",
+        "version": 1,
+        "public_key": lid.get_public_key().hex(),
+        "private_key": lid.get_signing_key_bytes().hex(),
+    }
     key["_calls"] = calls = []
 
     def fake_fetch(url, **k):
         calls.append(url)
         return {k2: v for k2, v in key.items() if k2 != "_calls"}
+
     monkeypatch.setattr(app_mod, "fetch_shared_guest_key", fake_fetch)
     return key
 
@@ -261,8 +316,9 @@ def test_shared_key_never_used_with_a_password(tmp_path, monkeypatch):
     fake = FakeCompanion()
     try:
         _serve_key(monkeypatch)
-        a, _ = make_app(tmp_path, fake, shared_key_targets=[NODE],
-                        password_updates={NODE: "a-real-secret"})
+        a, _ = make_app(
+            tmp_path, fake, shared_key_targets=[NODE], password_updates={NODE: "a-real-secret"}
+        )
         assert a.secrets.has_password(NODE)
         assert a.uses_shared_key(NODE) is False  # a saved password blocks the shared key
     finally:
@@ -301,8 +357,12 @@ def test_test_login_reports_live_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "CORESCOPE_SETTLE_S", 0)
     monkeypatch.setattr(app_mod, "corescope_battery_snapshot", lambda *a, **k: None)
     try:
-        a, _ = make_app(tmp_path, fake, targets=[NODE],
-                        requests=[{"id": "t1", "type": "test_login", "node_id": NODE}])
+        a, _ = make_app(
+            tmp_path,
+            fake,
+            targets=[NODE],
+            requests=[{"id": "t1", "type": "test_login", "node_id": NODE}],
+        )
         monkeypatch.setattr(a, "refresh", lambda: None)
         a.ohcfg = load_openhop_config(tmp_path / "config.yaml")
         a.check = {"companion": {"ok": True}}
@@ -314,7 +374,6 @@ def test_test_login_reports_live_steps(tmp_path, monkeypatch):
         labels = " ".join(s["label"].lower() for s in act["steps"])
         assert "login" in labels or "status" in labels
 
-
     finally:
         fake.close()
 
@@ -322,6 +381,7 @@ def test_test_login_reports_live_steps(tmp_path, monkeypatch):
 def test_check_now_stale_scope_skips_fresh(tmp_path, monkeypatch):
     # scope "stale" polls only targets with no reading within the window.
     import time as _t
+
     fake = FakeCompanion()
     monkeypatch.setattr(app_mod, "CORESCOPE_SETTLE_S", 0)
     monkeypatch.setattr(app_mod, "corescope_battery_snapshot", lambda *a, **k: None)
@@ -336,13 +396,20 @@ def test_check_now_stale_scope_skips_fresh(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "Publisher", P)
     other = "0aa0" + "cd" * 30
     try:
-        a, _ = make_app(tmp_path, fake, targets=[NODE, other], brokers=["ScotMesh"],
-                        requests=[{"id": "c1", "type": "check_now", "scope": "stale"}])
+        a, _ = make_app(
+            tmp_path,
+            fake,
+            targets=[NODE, other],
+            brokers=["ScotMesh"],
+            requests=[{"id": "c1", "type": "check_now", "scope": "stale"}],
+        )
         monkeypatch.setattr(a, "refresh", lambda: None)
         a.ohcfg = load_openhop_config(tmp_path / "config.yaml")
         a.check = {"companion": {"ok": True}, "publish": {"ok": True}}
-        a.candidates = [Neighbour(NODE, "West Lomond", -5.0, -119, 0, True),
-                        Neighbour(other, "Bowden", -6.0, -118, 0, True)]
+        a.candidates = [
+            Neighbour(NODE, "West Lomond", -5.0, -119, 0, True),
+            Neighbour(other, "Bowden", -6.0, -118, 0, True),
+        ]
         # NODE read 2 minutes ago (fresh); `other` never read (stale).
         a.state.node(NODE)["last_success"] = _t.time() - 120
         a.run_requests()
@@ -362,11 +429,16 @@ def test_failed_request_is_not_left_running(tmp_path, monkeypatch):
     # An exception mid-Test must still clear "running", or the page waits forever.
     fake = FakeCompanion()
     try:
-        a, _ = make_app(tmp_path, fake, targets=[NODE],
-                        requests=[{"id": "t1", "type": "test_login", "node_id": NODE}])
+        a, _ = make_app(
+            tmp_path,
+            fake,
+            targets=[NODE],
+            requests=[{"id": "t1", "type": "test_login", "node_id": NODE}],
+        )
 
         def boom():
             raise RuntimeError("companion gone")
+
         monkeypatch.setattr(a, "refresh", boom)
         a.run_requests()
         act = a.actions["test_login"]
@@ -377,8 +449,13 @@ def test_failed_request_is_not_left_running(tmp_path, monkeypatch):
 
 
 def _app_with_shared_target(tmp_path, monkeypatch, fake):
-    a, data = make_app(tmp_path, fake, targets=[NODE], shared_key_targets=[NODE],
-                       corescope_url="https://corescope.example")
+    a, data = make_app(
+        tmp_path,
+        fake,
+        targets=[NODE],
+        shared_key_targets=[NODE],
+        corescope_url="https://corescope.example",
+    )
     a.ohcfg = load_openhop_config(tmp_path / "config.yaml")
     return a, data
 
@@ -386,11 +463,19 @@ def _app_with_shared_target(tmp_path, monkeypatch, fake):
 def test_own_key_is_registered_signed_and_used(tmp_path, monkeypatch):
     from openhop_core import LocalIdentity
     from openhop_core.protocol.identity import Identity
+
     from openhop_corescope_observer_plus import guest_key
+
     fake = FakeCompanion()
     sent = []
-    monkeypatch.setattr(app_mod, "register_guest_key",
-                        lambda url, body, **k: (sent.append(body), (200, {"ok": True, "expires_at": "2026-10-27T12:00:00Z"}))[1])
+    monkeypatch.setattr(
+        app_mod,
+        "register_guest_key",
+        lambda url, body, **k: (
+            sent.append(body),
+            (200, {"ok": True, "expires_at": "2026-10-27T12:00:00Z"}),
+        )[1],
+    )
     try:
         a, data = _app_with_shared_target(tmp_path, monkeypatch, fake)
         key = a.polling_key(now=1_000_000.0)
@@ -398,7 +483,9 @@ def test_own_key_is_registered_signed_and_used(tmp_path, monkeypatch):
         body = sent[0]
         observer = LocalIdentity(a.ohcfg.identity_key)
         assert body["observer_id"] == observer.get_public_key().hex()
-        msg = guest_key.registration_message(body["observer_id"], body["public_key"], body["timestamp"])
+        msg = guest_key.registration_message(
+            body["observer_id"], body["public_key"], body["timestamp"]
+        )
         assert Identity(observer.get_public_key()).verify(msg, bytes.fromhex(body["signature"]))
         assert stat.S_IMODE(os.stat(data / guest_key.KEY_FILE).st_mode) == 0o600
         # Re-registered only every 6 h, and the same key survives a restart.
@@ -429,15 +516,21 @@ def test_shared_key_when_corescope_takes_no_own_keys(tmp_path, monkeypatch):
 def test_repeater_owned_by_another_observer_is_left_to_them(tmp_path, monkeypatch):
     fake = FakeCompanion()
     monkeypatch.setattr(app_mod, "register_guest_key", lambda url, body, **k: (200, {"ok": True}))
-    monkeypatch.setattr(app_mod, "corescope_owners",
-                        lambda url, obs, **k: {"nodes": {NODE: {"owner": "cc" * 32, "owner_name": "Cadham Village",
-                                                                "mine": False}}})
+    monkeypatch.setattr(
+        app_mod,
+        "corescope_owners",
+        lambda url, obs, **k: {
+            "nodes": {NODE: {"owner": "cc" * 32, "owner_name": "Cadham Village", "mine": False}}
+        },
+    )
     calls = []
 
     def fake_poll(*a, **k):
         calls.append(1)
         from openhop_corescope_observer_plus.poller import OK, PollResult
+
         return PollResult(OK, battery_mv=4000, key_mode="shared")
+
     monkeypatch.setattr(app_mod, "poll_one_shared", fake_poll)
     try:
         a, _ = _app_with_shared_target(tmp_path, monkeypatch, fake)
@@ -457,7 +550,10 @@ def test_repeater_owned_by_another_observer_is_left_to_them(tmp_path, monkeypatc
 def test_never_uploads_the_repeaters_own_key():
     import pytest
     from openhop_core import LocalIdentity
-    from openhop_corescope_observer_plus import guest_key, shared_key as sk
+
+    from openhop_corescope_observer_plus import guest_key
+    from openhop_corescope_observer_plus import shared_key as sk
+
     ident = LocalIdentity()
     same = sk.SharedKey("x", 1, ident.get_public_key(), ident.get_signing_key_bytes())
     with pytest.raises(ValueError):
@@ -468,9 +564,21 @@ GK_OTHER = "cd" * 32
 
 
 def test_guest_key_default_covers_new_repeaters_unless_overridden():
-    s = parse({"targets": [NODE, GK_OTHER], "guest_key_default": True, "guest_key_overrides": {GK_OTHER: False}})
+    s = parse(
+        {
+            "targets": [NODE, GK_OTHER],
+            "guest_key_default": True,
+            "guest_key_overrides": {GK_OTHER: False},
+        }
+    )
     assert s.shared_key_targets == [NODE]
-    s = parse({"targets": [NODE, GK_OTHER], "guest_key_default": False, "guest_key_overrides": {GK_OTHER: True}})
+    s = parse(
+        {
+            "targets": [NODE, GK_OTHER],
+            "guest_key_default": False,
+            "guest_key_overrides": {GK_OTHER: True},
+        }
+    )
     assert s.shared_key_targets == [GK_OTHER]
     assert parse({"targets": [NODE]}).shared_key_targets == [NODE]  # on by default
 
@@ -479,8 +587,11 @@ def test_an_old_opt_in_list_moves_everything_to_the_default(tmp_path):
     fake = FakeCompanion()
     try:
         a, data = make_app(tmp_path, fake, targets=[NODE, GK_OTHER])
-        saved = {k: v for k, v in json.loads((data / "config.json").read_text()).items()
-                 if not k.startswith("guest_key")}
+        saved = {
+            k: v
+            for k, v in json.loads((data / "config.json").read_text()).items()
+            if not k.startswith("guest_key")
+        }
         (data / "config.json").write_text(json.dumps({**saved, "shared_key_targets": [NODE]}))
         a.load_settings()
         assert a.settings.shared_key_targets == sorted([NODE, GK_OTHER])
@@ -504,25 +615,34 @@ def test_the_default_never_restarts_a_repeater_that_answered_as_admin(tmp_path):
 
 def test_an_admin_answer_stays_off_with_the_default_on(tmp_path):
     from openhop_corescope_observer_plus.poller import PollResult
+
     fake = FakeCompanion()
     try:
         a, data = make_app(tmp_path, fake, targets=[NODE], guest_key_default=True)
         assert a.settings.shared_key_targets == [NODE]
-        a._disable_shared_key(Neighbour(NODE, "West Lomond", 1.0, -100, 0, True), PollResult("admin_stop"))
+        a._disable_shared_key(
+            Neighbour(NODE, "West Lomond", 1.0, -100, 0, True), PollResult("admin_stop")
+        )
         a.load_settings()
-        assert a.settings.shared_key_targets == [] and a.settings.guest_key_overrides == {NODE: False}
+        assert a.settings.shared_key_targets == [] and a.settings.guest_key_overrides == {
+            NODE: False
+        }
     finally:
         fake.close()
 
 
 def test_activity_counts_answers_no_answers_and_floods_by_day():
     from openhop_corescope_observer_plus import packet_log as pl
+
     stats = {}
     log = pl.PacketLog([], stats=stats)
     n = log.for_node(NODE, "West Lomond", "guest key")
-    a = n.sent("telemetry request", "direct"); n.answered(a, "radio", flooded=False)
-    b = n.sent("telemetry request", "direct"); n.answered(b, "radio", flooded=True)
-    c = n.sent("telemetry request", "direct"); n.unanswered(c)
+    a = n.sent("telemetry request", "direct")
+    n.answered(a, "radio", flooded=False)
+    b = n.sent("telemetry request", "direct")
+    n.answered(b, "radio", flooded=True)
+    c = n.sent("telemetry request", "direct")
+    n.unanswered(c)
     n.none_expected(n.sent("route", "direct"))
     # A reply CoreScope finds later turns the no answer into a success, once.
     n.answered(c, "CoreScope", flooded=False)

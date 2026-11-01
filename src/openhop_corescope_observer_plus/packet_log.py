@@ -51,7 +51,9 @@ class PacketLog:
         if outcome == ANSWERED and entry.get("flooded"):
             day["flooded"] = int(day.get("flooded") or 0) + 1
             by = day.setdefault("flooded_by", {})
-            n = by.setdefault(entry.get("node_id") or "", {"name": entry.get("name") or "", "count": 0})
+            n = by.setdefault(
+                entry.get("node_id") or "", {"name": entry.get("name") or "", "count": 0}
+            )
             n["count"] += 1
         for old in sorted(self.stats)[:-STATS_DAYS]:
             del self.stats[old]
@@ -59,17 +61,33 @@ class PacketLog:
     def summary(self, now: float | None = None) -> dict:
         """Today, yesterday and the last week, for the Activity page."""
         now = time.time() if now is None else now
+
         def day(at: float) -> dict:
             d = self.stats.get(_day(at)) or {}
             answered, none, refused = (int(d.get(k) or 0) for k in (ANSWERED, NO_ANSWER, REFUSED))
-            return {"day": _day(at), "answered": answered, "no_answer": none, "refused": refused,
-                    "flooded": int(d.get("flooded") or 0),
-                    "flooded_by": sorted(((d.get("flooded_by") or {}).values()), key=lambda n: -n["count"])}
-        week = [day(now - i * 86400) for i in range(7)]
-        return {"today": week[0], "yesterday": week[1], "week": {
-            k: sum(d[k] for d in week) for k in ("answered", "no_answer", "refused", "flooded")}}
+            return {
+                "day": _day(at),
+                "answered": answered,
+                "no_answer": none,
+                "refused": refused,
+                "flooded": int(d.get("flooded") or 0),
+                "flooded_by": sorted(
+                    ((d.get("flooded_by") or {}).values()), key=lambda n: -n["count"]
+                ),
+            }
 
-    def for_node(self, node_id: str, name: str, key: str, node_entries: list | None = None) -> "NodeLog":
+        week = [day(now - i * 86400) for i in range(7)]
+        return {
+            "today": week[0],
+            "yesterday": week[1],
+            "week": {
+                k: sum(d[k] for d in week) for k in ("answered", "no_answer", "refused", "flooded")
+            },
+        }
+
+    def for_node(
+        self, node_id: str, name: str, key: str, node_entries: list | None = None
+    ) -> NodeLog:
         """``node_entries``: the repeater's own list (in its state), which
         keeps its last SIZE packets however busy the others are."""
         return NodeLog(self, node_id, name, key, node_entries)
@@ -78,18 +96,30 @@ class PacketLog:
 class NodeLog:
     """The log as seen by one poll of one repeater."""
 
-    def __init__(self, log: PacketLog | None, node_id: str = "", name: str = "", key: str = "",
-                 node_entries: list | None = None):
+    def __init__(
+        self,
+        log: PacketLog | None,
+        node_id: str = "",
+        name: str = "",
+        key: str = "",
+        node_entries: list | None = None,
+    ):
         self._log = log
         self._mine = node_entries
         self._node = {"node_id": node_id, "name": name, "key": key}
 
     def sent(self, kind: str, route: str, detail: str = "") -> dict:
-        entry = {"at": time.time(), **self._node, "kind": kind, "route": route, "detail": detail,
-                 "reply": WAITING}
+        entry = {
+            "at": time.time(),
+            **self._node,
+            "kind": kind,
+            "route": route,
+            "detail": detail,
+            "reply": WAITING,
+        }
         if self._log is not None:
             self._log.entries.append(entry)
-            del self._log.entries[:-self._log.size]
+            del self._log.entries[: -self._log.size]
         if self._mine is not None:
             # The same dict, so answers recorded later show in both lists.
             self._mine.append(entry)
@@ -105,10 +135,22 @@ class NodeLog:
         if self._log is not None:
             self._log.count(entry, outcome)
 
-    def answered(self, entry: dict, via: str, *, flooded: bool | None = None, after_s: float | None = None,
-                 what: str = "") -> None:
-        entry.update(reply=ANSWERED, via=via, flooded=flooded, what=what,
-                     after_s=round(after_s, 1) if after_s is not None else None)
+    def answered(
+        self,
+        entry: dict,
+        via: str,
+        *,
+        flooded: bool | None = None,
+        after_s: float | None = None,
+        what: str = "",
+    ) -> None:
+        entry.update(
+            reply=ANSWERED,
+            via=via,
+            flooded=flooded,
+            what=what,
+            after_s=round(after_s, 1) if after_s is not None else None,
+        )
         self._count(entry, ANSWERED)
 
     def unanswered(self, entry: dict, what: str = "") -> None:

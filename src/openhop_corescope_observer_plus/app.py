@@ -10,7 +10,9 @@ from pathlib import Path
 from openhop_core import LocalIdentity
 from openhop_core.protocol.packet_builder import PacketBuilder
 
-from . import __version__
+from . import __version__, guest_key, packet_log
+from . import shared_key as sk
+from .community import Community, fast_mode, iso_ts, timings
 from .companion import CompanionClient
 from .openhop import (
     Neighbour,
@@ -22,20 +24,27 @@ from .openhop import (
     corescope_battery_check,
     corescope_battery_snapshot,
     corescope_monitors,
+    corescope_owners,
     corescope_policy,
     corescope_responses,
-    corescope_owners,
     fetch_shared_guest_key,
     load_openhop_config,
     register_guest_key,
     search_corescope,
 )
-from . import guest_key
-from .community import Community, fast_mode, iso_ts, timings
-from . import packet_log
-from . import shared_key as sk
-from .poller import (ADMIN_STOP, NO_BATTERY, OK, is_due, next_slot, poll_one, poll_one_shared, reading,
-                     record, spread_phases, utc_iso)
+from .poller import (
+    ADMIN_STOP,
+    NO_BATTERY,
+    OK,
+    is_due,
+    next_slot,
+    poll_one,
+    poll_one_shared,
+    reading,
+    record,
+    spread_phases,
+    utc_iso,
+)
 from .publisher import Publisher
 from .settings import TRANSIENT_KEYS, Settings, parse, read_raw, write_raw
 from .storage import Secrets, State
@@ -76,14 +85,22 @@ class App:
         self.companion_key = ""
         self.actions: dict[str, dict] = self.state.value.setdefault("actions", {})
         # The last packets sent and what answered them (packet_log.py).
-        self.packets = packet_log.PacketLog(self.state.value.setdefault("packet_log", []),
-                                            stats=self.state.value.setdefault("packet_stats", {}))
+        self.packets = packet_log.PacketLog(
+            self.state.value.setdefault("packet_log", []),
+            stats=self.state.value.setdefault("packet_stats", {}),
+        )
         self._last_refresh = 0.0
         self._shared_cache: dict = {}  # the shared key fetched from CoreScope, cached by URL
         self._own_key: sk.SharedKey | None = None  # this observer's polling key (guest_key.py)
-        self._owners: dict = {"at": 0.0, "ok_at": 0.0, "nodes": {}}  # who polls which repeater (CoreScope)
+        self._owners: dict = {
+            "at": 0.0,
+            "ok_at": 0.0,
+            "nodes": {},
+        }  # who polls which repeater (CoreScope)
         self._last_scheduled = 0.0  # when the last scheduled poll finished (scheduled_gap_s)
-        self._started_at = time.time()  # scheduled polls wait for CoreScope's word first (_starting)
+        self._started_at = (
+            time.time()
+        )  # scheduled polls wait for CoreScope's word first (_starting)
         self._claims_sent_at = 0.0  # when this run last published a claim
         self._gated_at = 0.0  # when CoreScope last had this observer stopped
         # CoreScope's polling policy (limits and switches), kept in state.json.
@@ -91,9 +108,11 @@ class App:
         self._policy_tried = 0.0
         self._claims_tried = 0.0
         if fast_mode():
-            LOG.warning("*** TEST FAST MODE IS ON (OPENHOP_OBSERVER_PLUS_TEST_FAST=1): minute floors, "
-                        "30 s policy refresh, 60 s claims, 30 s retries. For bench runs only, never on a "
-                        "real mesh. ***")
+            LOG.warning(
+                "*** TEST FAST MODE IS ON (OPENHOP_OBSERVER_PLUS_TEST_FAST=1): minute floors, "
+                "30 s policy refresh, 60 s claims, 30 s retries. For bench runs only, never on a "
+                "real mesh. ***"
+            )
 
     # -- settings ---------------------------------------------------------
 
@@ -170,20 +189,31 @@ class App:
             check["config"] = {"ok": False, "message": str(exc)}
 
         if not self.secrets.api_token:
-            check["api"] = {"ok": False, "message": "no API token yet: use Connect on the plugin page"}
+            check["api"] = {
+                "ok": False,
+                "message": "no API token yet: use Connect on the plugin page",
+            }
         else:
             try:
-                self.candidates = self.api().repeaters(self.settings.max_age_hours, self.settings.manual_repeaters)
+                self.candidates = self.api().repeaters(
+                    self.settings.max_age_hours, self.settings.manual_repeaters
+                )
                 self.openhop_brokers = self.api().mqtt_status()
                 direct = sum(n.hops == 0 for n in self.candidates)
                 one_hop = sum(n.hops == 1 for n in self.candidates)
-                check["api"] = {"ok": True, "message": f"{direct} repeaters heard direct, {one_hop} one hop away"}
+                check["api"] = {
+                    "ok": True,
+                    "message": f"{direct} repeaters heard direct, {one_hop} one hop away",
+                }
             except OpenHopError as exc:
                 check["api"] = {"ok": False, "message": str(exc)}
 
         port = companion_port(self.ohcfg, self.settings.companion_name) if self.ohcfg else None
         if port is None:
-            check["companion"] = {"ok": False, "message": f"no companion named {self.settings.companion_name!r} yet: use Connect"}
+            check["companion"] = {
+                "ok": False,
+                "message": f"no companion named {self.settings.companion_name!r} yet: use Connect",
+            }
         else:
             try:
                 with CompanionClient(self.companion_host, port) as c:
@@ -262,7 +292,11 @@ class App:
         # cached only briefly, so a transient failure isn't stuck for a day.
         ttl = 24 * 3600 if c.get("key") else 300
         if not (c.get("url") == url and now - float(c.get("at") or 0) < ttl):
-            self._shared_cache = {"url": url, "at": now, "key": sk.SharedKey.from_api(fetch_shared_guest_key(url))}
+            self._shared_cache = {
+                "url": url,
+                "at": now,
+                "key": sk.SharedKey.from_api(fetch_shared_guest_key(url)),
+            }
         return self._shared_cache.get("key")
 
     @property
@@ -285,9 +319,18 @@ class App:
         if reg.get("url") != self.settings.corescope_url:
             reg.clear()
             reg["url"] = self.settings.corescope_url
-        retry = (guest_key.REREGISTER_EVERY if reg.get("ok")
-                 else 6 * 3600 if reg.get("unsupported") else 300)
-        if self.ohcfg and self.settings.corescope_url and now - float(reg.get("tried_at") or 0) >= retry:
+        retry = (
+            guest_key.REREGISTER_EVERY
+            if reg.get("ok")
+            else 6 * 3600
+            if reg.get("unsupported")
+            else 300
+        )
+        if (
+            self.ohcfg
+            and self.settings.corescope_url
+            and now - float(reg.get("tried_at") or 0) >= retry
+        ):
             self._register_own_key(reg, now)
         if reg.get("ok") and now - float(reg.get("ok_at") or 0) < guest_key.KEY_LIFETIME:
             return self.own_key()
@@ -299,20 +342,28 @@ class App:
         lapses; a CoreScope without the feature (404) means the shared key."""
         reg["tried_at"] = now
         try:
-            body = guest_key.registration_body(LocalIdentity(self.ohcfg.identity_key), self.own_key(), now)
+            body = guest_key.registration_body(
+                LocalIdentity(self.ohcfg.identity_key), self.own_key(), now
+            )
         except ValueError as exc:
             reg["error"] = str(exc)
             LOG.warning("can't register the polling key: %s", exc)
             return
         status, resp = register_guest_key(self.settings.corescope_url, body)
         if status == 200 and resp.get("ok"):
-            reg.update(ok=True, ok_at=now, unsupported=False, error="", expires_at=resp.get("expires_at"))
+            reg.update(
+                ok=True, ok_at=now, unsupported=False, error="", expires_at=resp.get("expires_at")
+            )
             LOG.info("own polling key %s registered with CoreScope", self.own_key().hex8)
         elif status == 404:
-            reg.update(ok=False, unsupported=True, error="this CoreScope doesn't take per-observer keys")
+            reg.update(
+                ok=False, unsupported=True, error="this CoreScope doesn't take per-observer keys"
+            )
             LOG.info("CoreScope doesn't take per-observer keys; using the shared key")
         else:
-            reg["error"] = str(resp.get("error") or (f"HTTP {status}" if status else "CoreScope unreachable"))
+            reg["error"] = str(
+                resp.get("error") or (f"HTTP {status}" if status else "CoreScope unreachable")
+            )
             LOG.warning("couldn't register the polling key with CoreScope: %s", reg["error"])
 
     def owners(self, now: float) -> dict:
@@ -325,7 +376,9 @@ class App:
         t = timings()
         if self.ohcfg and self.settings.corescope_url and now - c["at"] >= t.refresh_s:
             c["at"] = now
-            body = corescope_owners(self.settings.corescope_url, self.observer_id, plugin_version=__version__)
+            body = corescope_owners(
+                self.settings.corescope_url, self.observer_id, plugin_version=__version__
+            )
             if body is not None:
                 c["nodes"], c["ok_at"] = body.get("nodes") or {}, now
                 if isinstance(body.get("policy"), dict):
@@ -351,8 +404,11 @@ class App:
         else:
             self.community.note_failure(status, now)
             if status != 404:
-                LOG.warning("CoreScope policy: %s; keeping the %s", self.community.s.get("last_error"),
-                            "saved policy" if self.community.has_policy else "built-in defaults")
+                LOG.warning(
+                    "CoreScope policy: %s; keeping the %s",
+                    self.community.s.get("last_error"),
+                    "saved policy" if self.community.has_policy else "built-in defaults",
+                )
         self.state.save()
 
     # -- community polling: windows, roles, skips ----------------------------
@@ -393,9 +449,12 @@ class App:
         if role in ("polling", "independent") or (role is None and o.get("mine")):
             return {"role": "poller", "independent": role == "independent"}
         if not o.get("mine"):
-            return {"role": "standby",
-                    "by": str(o.get("owner_name") or str(o.get("owner") or "")[:8]),
-                    "owner_hops": o.get("owner_hops"), "rank": max(1, int(o.get("standby_rank") or 1))}
+            return {
+                "role": "standby",
+                "by": str(o.get("owner_name") or str(o.get("owner") or "")[:8]),
+                "owner_hops": o.get("owner_hops"),
+                "rank": max(1, int(o.get("standby_rank") or 1)),
+            }
         return {"role": "poller"}
 
     def _standby_hold_from(self) -> float:
@@ -413,7 +472,8 @@ class App:
         if now - self._started_at >= self._startup_hold_s():
             return False
         claimed = self._claims_sent_at > 0 or (
-            now - float(self.state.value.get("claims_at") or 0) < timings().claims_every_s)
+            now - float(self.state.value.get("claims_at") or 0) < timings().claims_every_s
+        )
         heard = float(self._owners.get("ok_at") or 0) > max(self._started_at, self._claims_sent_at)
         return not (claimed and heard)
 
@@ -444,17 +504,28 @@ class App:
             sends = [x for x in st.get("sends") or [] if now - x < window]
             if len(sends) >= self.community.max_requests():
                 st["next_due_at"] = min(sends) + window
-                return self._skip(st, "cap", f"{len(sends)} requests already sent within the window "
-                                  f"(CoreScope allows {self.community.max_requests()})", now,
-                                  until=st["next_due_at"])
+                return self._skip(
+                    st,
+                    "cap",
+                    f"{len(sends)} requests already sent within the window "
+                    f"(CoreScope allows {self.community.max_requests()})",
+                    now,
+                    until=st["next_due_at"],
+                )
         if mode in ("test", "all"):
             return None
         role = self.role_for(node_id, now)
         if role["role"] == "excluded":
             return self._skip(st, "excluded", "Excluded by CoreScope", now)
         if role["role"] in ("paused", "disabled"):
-            return self._skip(st, role["role"], "CoreScope has paused polling" if role["role"] == "paused"
-                              else "CoreScope has disabled this observer", now)
+            return self._skip(
+                st,
+                role["role"],
+                "CoreScope has paused polling"
+                if role["role"] == "paused"
+                else "CoreScope has disabled this observer",
+                now,
+            )
         standby = role["role"] == "standby"
         if standby:
             st.setdefault("standby_since", now)
@@ -466,8 +537,9 @@ class App:
             # anything, so stations restarting together don't all ask at once.
             # No next_due_at: polls start on the first tick after CoreScope answers.
             return self._skip(st, "starting", "waiting to hear from CoreScope who polls it", now)
-        by_text = (f"{role.get('by') or 'another observer'} polls it"
-                   + (" (direct)" if hops == 0 else " (1 hop)" if hops == 1 else ""))
+        by_text = f"{role.get('by') or 'another observer'} polls it" + (
+            " (direct)" if hops == 0 else " (1 hop)" if hops == 1 else ""
+        )
         if mode == "stale" and now - float(st.get("last_success") or 0) < window:
             return self._skip(st, "fresh_own", "this observer read it within the window", now)
         if not self.settings.corescope_url:
@@ -481,11 +553,19 @@ class App:
                 # Standby holds through an outage (the poller is probably fine);
                 # once CoreScope's owners lapse this observer polls again.
                 st["next_due_at"] = now + timings().hold_recheck_s
-                return self._skip(st, "standby", f"{by_text}; you're standby (CoreScope unreachable, holding)",
-                                  now, by=role.get("by"), owner_hops=hops)
+                return self._skip(
+                    st,
+                    "standby",
+                    f"{by_text}; you're standby (CoreScope unreachable, holding)",
+                    now,
+                    by=role.get("by"),
+                    owner_hops=hops,
+                )
             return None  # the poller fails open
         latest = iso_ts(snap.get("latest_ts"))
-        owner_latest = iso_ts(((self._owners.get("nodes") or {}).get(node_id) or {}).get("latest_ts"))
+        owner_latest = iso_ts(
+            ((self._owners.get("nodes") or {}).get(node_id) or {}).get("latest_ts")
+        )
         if owner_latest is not None and (latest is None or owner_latest > latest):
             latest = owner_latest
         if latest is None and standby:
@@ -494,8 +574,15 @@ class App:
             until = max(float(st["standby_since"]), self._standby_hold_from()) + wait
             if now < until:
                 st["next_due_at"] = until
-                return self._skip(st, "standby", f"{by_text}; you're standby", now, by=role.get("by"),
-                                  owner_hops=hops, until=until)
+                return self._skip(
+                    st,
+                    "standby",
+                    f"{by_text}; you're standby",
+                    now,
+                    by=role.get("by"),
+                    owner_hops=hops,
+                    until=until,
+                )
         if latest is not None and standby:
             # Every timer runs out during a pause or an outage of this plugin:
             # the wait restarts, or poller and standbys would all ask at once.
@@ -504,14 +591,30 @@ class App:
             st["next_due_at"] = latest + wait
             st["fresh_at"], st["fresh_by"] = latest, snap.get("by") or ""
             if standby:
-                return self._skip(st, "standby", f"{by_text}; you're standby", now, by=role.get("by"),
-                                  owner_hops=hops, until=st["next_due_at"])
+                return self._skip(
+                    st,
+                    "standby",
+                    f"{by_text}; you're standby",
+                    now,
+                    by=role.get("by"),
+                    owner_hops=hops,
+                    until=st["next_due_at"],
+                )
             mins = max(0, round((now - latest) / 60))
-            return self._skip(st, "fresh", f"{snap.get('by') or 'another observer'} sent a reading {mins} min ago",
-                              now, by=snap.get("by") or "", until=st["next_due_at"])
+            return self._skip(
+                st,
+                "fresh",
+                f"{snap.get('by') or 'another observer'} sent a reading {mins} min ago",
+                now,
+                by=snap.get("by") or "",
+                until=st["next_due_at"],
+            )
         if standby:
-            LOG.info("standby for %s (%s): newest reading is older than the window plus grace; stepping in",
-                     n.name, node_id[:8])
+            LOG.info(
+                "standby for %s (%s): newest reading is older than the window plus grace; stepping in",
+                n.name,
+                node_id[:8],
+            )
         return None
 
     def uses_shared_key(self, node_id: str) -> bool:
@@ -531,8 +634,16 @@ class App:
             return False
         return self.polling_key() is not None
 
-    def poll(self, node_ids: list[str], *, force: bool = False, mode: str | None = None,
-             on_node=None, on_step=None, on_skip=None) -> list[dict]:
+    def poll(
+        self,
+        node_ids: list[str],
+        *,
+        force: bool = False,
+        mode: str | None = None,
+        on_node=None,
+        on_step=None,
+        on_skip=None,
+    ) -> list[dict]:
         """Poll the given targets that are reachable now; return payload readings.
 
         mode is "scheduled" (default), "stale", "all" or "test" (see
@@ -563,8 +674,14 @@ class App:
             if scheduled:
                 if now < float(st.get("next_due_at") or 0):
                     continue  # rescheduled: someone's reading is fresh, the cap is reached, or standing by
-                if not is_due(st, interval, self.secrets.has_password(node_id), now, phases.get(node_id),
-                              retry_s=t.no_reply_retry_s):
+                if not is_due(
+                    st,
+                    interval,
+                    self.secrets.has_password(node_id),
+                    now,
+                    phases.get(node_id),
+                    retry_s=t.no_reply_retry_s,
+                ):
                     continue
             due.append(n)
         due.sort(key=lambda n: float(self.state.node(n.node_id).get("last_attempt") or 0))
@@ -598,16 +715,26 @@ class App:
                     time.sleep(s.spacing_seconds * (2 if routes[0].hops else 1))
                 st = self.state.node(n.node_id)
                 # Every request counts toward the per-window cap (quick retries too).
-                st["sends"] = ([x for x in st.get("sends") or [] if time.time() - x < 2 * 86400]
-                               + [time.time()])[-SENDS_KEPT:]
+                st["sends"] = (
+                    [x for x in st.get("sends") or [] if time.time() - x < 2 * 86400]
+                    + [time.time()]
+                )[-SENDS_KEPT:]
                 for k in ("skip", "next_due_at"):
                     st.pop(k, None)
                 pw = self.secrets.password(n.node_id)
                 shared = self.polling_key() if self.uses_shared_key(n.node_id) else None
                 plog = self.packets.for_node(
-                    n.node_id, n.name, "companion" if shared is None
-                    else ("guest key" if shared.public_key == self.own_key().public_key else "shared key"),
-                    st.setdefault("packets", []))
+                    n.node_id,
+                    n.name,
+                    "companion"
+                    if shared is None
+                    else (
+                        "guest key"
+                        if shared.public_key == self.own_key().public_key
+                        else "shared key"
+                    ),
+                    st.setdefault("packets", []),
+                )
                 if shared is not None:
                     # Whatever we don't hear ourselves, the poll looks for in
                     # the packets CoreScope's observers heard, and decrypts.
@@ -616,19 +743,32 @@ class App:
                         url = self.settings.corescope_url
                         antenna = lambda since, u=url: corescope_responses(u, utc_iso(since))
                     result = poll_one_shared(
-                        client, n, shared, st, routes=routes,
+                        client,
+                        n,
+                        shared,
+                        st,
+                        routes=routes,
                         read_temperature=n.node_id in s.temperature_targets,
-                        on_step=on_step, antenna=antenna,
+                        on_step=on_step,
+                        antenna=antenna,
                         personal=shared.public_key == self.own_key().public_key,
-                        status_every=s.status_every_hours * 3600, plog=plog,
+                        status_every=s.status_every_hours * 3600,
+                        plog=plog,
                         guest_password=s.guest_passwords.get(n.node_id),
                         alternative_routes=s.alternative_routes,
                     )
                 else:
                     result = poll_one(
-                        client, n, pw, st, routes=routes, alternative_routes=s.alternative_routes,
+                        client,
+                        n,
+                        pw,
+                        st,
+                        routes=routes,
+                        alternative_routes=s.alternative_routes,
                         read_temperature=n.node_id in s.temperature_targets,
-                        on_step=on_step, status_every=s.status_every_hours * 3600, plog=plog,
+                        on_step=on_step,
+                        status_every=s.status_every_hours * 3600,
+                        plog=plog,
                     )
                 record(st, result, bool(pw), time.time())
                 st.pop("password_changed", None)
@@ -637,19 +777,32 @@ class App:
                 st["name"] = n.name
                 if result.code == ADMIN_STOP:
                     self._disable_shared_key(n, result)
-                LOG.info("poll %s (%s) %s%s%s: %s %s%s%s", n.name, n.node_id[:8],
-                         result.route.label if result.route else "-",
-                         " (alternative route: best got no answer)" if result.alternative else "",
-                         " [shared]" if result.key_mode == "shared" else "", result.code,
-                         f"{result.battery_mv} mV" if result.battery_mv is not None else result.detail,
-                         f", {result.temperature_c} °C" if result.temperature_c is not None
-                         else (f", temperature {result.temperature_code}" if result.temperature_code else ""),
-                         f", reply {result.reply_s:.1f} s" if result.reply_s is not None
-                         else (" (heard via CoreScope)" if result.via_corescope else ""))
+                LOG.info(
+                    "poll %s (%s) %s%s%s: %s %s%s%s",
+                    n.name,
+                    n.node_id[:8],
+                    result.route.label if result.route else "-",
+                    " (alternative route: best got no answer)" if result.alternative else "",
+                    " [shared]" if result.key_mode == "shared" else "",
+                    result.code,
+                    f"{result.battery_mv} mV" if result.battery_mv is not None else result.detail,
+                    f", {result.temperature_c} °C"
+                    if result.temperature_c is not None
+                    else (
+                        f", temperature {result.temperature_code}"
+                        if result.temperature_code
+                        else ""
+                    ),
+                    f", reply {result.reply_s:.1f} s"
+                    if result.reply_s is not None
+                    else (" (heard via CoreScope)" if result.via_corescope else ""),
+                )
                 if shared is not None:
                     # Keep the newest request timestamp across restarts (see _seed_tag).
-                    self.state.value["last_tag"] = max(int(self.state.value.get("last_tag") or 0),
-                                                       PacketBuilder._last_unique_timestamp)
+                    self.state.value["last_tag"] = max(
+                        int(self.state.value.get("last_tag") or 0),
+                        PacketBuilder._last_unique_timestamp,
+                    )
                 # A shared-key reading is not published here: CoreScope decodes
                 # it from the raw reply (which this node's openHop uploads like
                 # any observer) and credits it to this poller via the claim, so
@@ -673,7 +826,11 @@ class App:
         where it came from, and the opt-in list."""
         key = self.polling_key()
         reg = self.state.value.get("guest_reg") or {}
-        personal = key is not None and self._own_key is not None and key.public_key == self._own_key.public_key
+        personal = (
+            key is not None
+            and self._own_key is not None
+            and key.public_key == self._own_key.public_key
+        )
         return {
             "configured": key is not None,
             "kind": "own" if personal else ("shared" if key is not None else ""),
@@ -700,10 +857,16 @@ class App:
         raw["guest_key_overrides"] = {**(raw.get("guest_key_overrides") or {}), n.node_id: False}
         write_raw(self.data_dir, raw)
         self.settings.guest_key_overrides[n.node_id] = False
-        self.settings.shared_key_targets = [t for t in self.settings.shared_key_targets if t != n.node_id]
-        LOG.warning("%s (%s) answered the shared guest key as ADMIN: shared key disabled for it, "
-                    "removal %s", n.name, n.node_id[:8],
-                    "succeeded" if result.admin_removed else "FAILED — ask the owner to run setperm 0")
+        self.settings.shared_key_targets = [
+            t for t in self.settings.shared_key_targets if t != n.node_id
+        ]
+        LOG.warning(
+            "%s (%s) answered the shared guest key as ADMIN: shared key disabled for it, "
+            "removal %s",
+            n.name,
+            n.node_id[:8],
+            "succeeded" if result.admin_removed else "FAILED — ask the owner to run setperm 0",
+        )
 
     # -- publishing ---------------------------------------------------------
 
@@ -723,11 +886,23 @@ class App:
             if not routes or self.community.excluded(node_id):
                 continue
             r = routes[0]
-            key = ("shared" if self.uses_shared_key(node_id)
-                   else "password" if self.secrets.has_password(node_id) else "own")
+            key = (
+                "shared"
+                if self.uses_shared_key(node_id)
+                else "password"
+                if self.secrets.has_password(node_id)
+                else "own"
+            )
             snr = r.snr if r.snr is not None else n.snr
-            out.append({"node_id": node_id, "reply_hops": r.hops, "via": r.relay_id or None,
-                        "key": key, "snr": None if snr is None else round(float(snr), 1)})
+            out.append(
+                {
+                    "node_id": node_id,
+                    "reply_hops": r.hops,
+                    "via": r.relay_id or None,
+                    "key": key,
+                    "snr": None if snr is None else round(float(snr), 1),
+                }
+            )
         return out
 
     def publish_claims(self, now: float) -> None:
@@ -761,13 +936,19 @@ class App:
             if b is None:
                 continue
             try:
-                publisher.publish_claim(b, claims, policy_version=self.community.policy()[0]["version"],
-                                        community=community)
+                publisher.publish_claim(
+                    b,
+                    claims,
+                    policy_version=self.community.policy()[0]["version"],
+                    community=community,
+                )
                 sent = True
             except Exception as exc:  # noqa: BLE001 - retried a minute later
                 LOG.warning("polling claim to %s failed: %s", name, exc)
         if sent:
-            sv.update(claims_at=now, claims_sig=sig, claims_community=community, claims_count=len(claims))
+            sv.update(
+                claims_at=now, claims_sig=sig, claims_community=community, claims_count=len(claims)
+            )
             self._claims_sent_at = now
             self._owners["at"] = 0.0  # ask who polls what again now CoreScope has the claim
             self.state.save()
@@ -780,7 +961,9 @@ class App:
         now = time.time()
         for name in self.settings.brokers:
             bs = self.state.broker(name)
-            q = [r for r in bs.get("queue", []) if now - _ts(r["sampled_at"]) < QUEUE_MAX_AGE][-QUEUE_MAX:]
+            q = [r for r in bs.get("queue", []) if now - _ts(r["sampled_at"]) < QUEUE_MAX_AGE][
+                -QUEUE_MAX:
+            ]
             # One reading per node per message: keep the newest.
             latest: dict[str, dict] = {}
             for r in q:
@@ -875,17 +1058,28 @@ class App:
         last = float(self.state.node(node_id).get("last_attempt") or 0)
         if started - last < TEST_COOLDOWN_S:
             wait = int(TEST_COOLDOWN_S - (started - last)) + 1
-            result.update(self._node_view(node_id), running=False, ok=False,
-                          message=f"Polled {int(started - last)} s ago. Wait {wait} s before testing it again.")
+            result.update(
+                self._node_view(node_id),
+                running=False,
+                ok=False,
+                message=f"Polled {int(started - last)} s ago. Wait {wait} s before testing it again.",
+            )
             return
         # CoreScope's switches and exclusions stop a Test too (its limits don't).
         self.refresh_policy(started, timings().policy_cache_s)
         stop = self.community.gate(started) or (
             {"reason": "excluded", "text": "Excluded by CoreScope"}
-            if self.community.excluded(node_id) else None)
+            if self.community.excluded(node_id)
+            else None
+        )
         if stop:
-            result.update(self._node_view(node_id), running=False, ok=False, skipped=stop["reason"],
-                          message=stop["text"])
+            result.update(
+                self._node_view(node_id),
+                running=False,
+                ok=False,
+                skipped=stop["reason"],
+                message=stop["text"],
+            )
             return
         self.refresh()
         # Announce "running" before the poll (it can take up to a minute) so
@@ -924,8 +1118,15 @@ class App:
         self.refresh_policy(started, timings().policy_cache_s)
         gate = self.community.gate(started)
         if gate:
-            result.update(scope=scope, total=len(targets), progress=[], running=False, ok=False,
-                          skipped=gate["reason"], message=gate["text"])
+            result.update(
+                scope=scope,
+                total=len(targets),
+                progress=[],
+                running=False,
+                ok=False,
+                skipped=gate["reason"],
+                message=gate["text"],
+            )
             return
         result.update(scope=scope, total=len(targets), progress=[], running=True)
         self._publish_action("check_now", result)
@@ -965,12 +1166,18 @@ class App:
             result["message"] = "no repeaters selected"
             return
         if not asked:
-            result["message"] = (f"nothing to ask: {skipped} skipped" if skipped
-                                 else "no selected repeater is reachable")
+            result["message"] = (
+                f"nothing to ask: {skipped} skipped"
+                if skipped
+                else "no selected repeater is reachable"
+            )
             return
         rest = sorted({c for c in codes if c not in (OK, NO_BATTERY)})
-        result["message"] = (f"{answered} of {len(asked)} read" + (f" ({', '.join(rest)} for the rest)" if rest else "")
-                             + (f" · {skipped} skipped" if skipped else ""))
+        result["message"] = (
+            f"{answered} of {len(asked)} read"
+            + (f" ({', '.join(rest)} for the rest)" if rest else "")
+            + (f" · {skipped} skipped" if skipped else "")
+        )
 
     def _run_monitors(self, req: dict, result: dict) -> None:
         """Who else monitors a repeater (CoreScope's /api/nodes/{pk}/monitors),
@@ -986,8 +1193,13 @@ class App:
             return
         result["ok"] = False
         result["status"] = status
-        result["message"] = ("This CoreScope doesn't list monitors yet" if status == 404
-                             else f"CoreScope answered HTTP {status}" if status else "CoreScope unreachable")
+        result["message"] = (
+            "This CoreScope doesn't list monitors yet"
+            if status == 404
+            else f"CoreScope answered HTTP {status}"
+            if status
+            else "CoreScope unreachable"
+        )
 
     def tick(self) -> None:
         self.load_settings()
@@ -1044,7 +1256,9 @@ class App:
         view.update(
             enabled=self.settings.community,
             corescope_url=self.settings.corescope_url,
-            claimed=int(self.state.value.get("claims_count") or 0) if self.state.value.get("claims_community") else 0,
+            claimed=int(self.state.value.get("claims_count") or 0)
+            if self.state.value.get("claims_community")
+            else 0,
             claims_at=self.state.value.get("claims_at"),
             owners_ok_at=self._owners.get("ok_at") or None,
         )
@@ -1057,52 +1271,79 @@ class App:
         nodes = []
         for n in self.candidates:
             st = self.state.value["nodes"].get(n.node_id, {})
-            nodes.append({
-                "node_id": n.node_id, "name": n.name, "snr": n.snr, "rssi": n.rssi,
-                "last_seen": n.last_seen, "zero_hop": n.zero_hop, "hops": n.hops,
-                "routes": [r.as_dict() for r in n.routes], "reachable": bool(self.routes_for(n)),
-                "manual": n.manual,
-                "selected": n.node_id in selected,
-                "password_set": self.secrets.has_password(n.node_id),
-                # The guest password the guest key last logged in with (learnt).
-                "guest_password": st.get("shared_password"),
-                "packets": st.get("packets") or [],
-                "code": st.get("code"), "detail": st.get("detail"), "role": st.get("role"),
-                "battery_mv": st.get("battery_mv"), "last_success": st.get("last_success"),
-                "last_attempt": st.get("last_attempt"), "retried": bool(st.get("retried")),
-                "no_reply_count": st.get("no_reply_count") or 0,
-                "last_route": st.get("last_route"), "last_route_label": st.get("last_route_label"),
-                # Each route's latest outcome, for the routes table.
-                "route_results": st.get("route_results") or {},
-                "temperature_c": st.get("temperature_c"), "temp_at": st.get("temp_at"),
-                "temp_code": st.get("temp_code"), "temp_misses": st.get("temp_misses") or 0,
-                "read_temperature": n.node_id in self.settings.temperature_targets,
-                "uptime_secs": st.get("uptime_secs"), "method": st.get("method"),
-                "status_ignored": bool(st.get("status_ignored")),
-                "key_mode": "shared" if self.uses_shared_key(n.node_id) else "own",
-                "shared_opt_in": (n.node_id in self.settings.shared_key_targets
-                                  and not self.secrets.has_password(n.node_id)),
-                "guest_overridden": n.node_id in self.settings.guest_key_overrides,
-                "shared_admin_seen": bool(st.get("shared_admin_seen")),
-                "shared_admin_removed": st.get("shared_admin_removed"),
-                "shared_admin_at": st.get("shared_admin_at"),
-                "covered_at": st.get("covered_at"),
-                "covered": bool(st.get("last_covered")),
-                "via_corescope": bool(st.get("via_corescope")),
-                "flood_replies": int(st.get("flood_replies") or 0),
-                "community": self._community_node(n, now, phases) if n.node_id in selected else None,
-            })
+            nodes.append(
+                {
+                    "node_id": n.node_id,
+                    "name": n.name,
+                    "snr": n.snr,
+                    "rssi": n.rssi,
+                    "last_seen": n.last_seen,
+                    "zero_hop": n.zero_hop,
+                    "hops": n.hops,
+                    "routes": [r.as_dict() for r in n.routes],
+                    "reachable": bool(self.routes_for(n)),
+                    "manual": n.manual,
+                    "selected": n.node_id in selected,
+                    "password_set": self.secrets.has_password(n.node_id),
+                    # The guest password the guest key last logged in with (learnt).
+                    "guest_password": st.get("shared_password"),
+                    "packets": st.get("packets") or [],
+                    "code": st.get("code"),
+                    "detail": st.get("detail"),
+                    "role": st.get("role"),
+                    "battery_mv": st.get("battery_mv"),
+                    "last_success": st.get("last_success"),
+                    "last_attempt": st.get("last_attempt"),
+                    "retried": bool(st.get("retried")),
+                    "no_reply_count": st.get("no_reply_count") or 0,
+                    "last_route": st.get("last_route"),
+                    "last_route_label": st.get("last_route_label"),
+                    # Each route's latest outcome, for the routes table.
+                    "route_results": st.get("route_results") or {},
+                    "temperature_c": st.get("temperature_c"),
+                    "temp_at": st.get("temp_at"),
+                    "temp_code": st.get("temp_code"),
+                    "temp_misses": st.get("temp_misses") or 0,
+                    "read_temperature": n.node_id in self.settings.temperature_targets,
+                    "uptime_secs": st.get("uptime_secs"),
+                    "method": st.get("method"),
+                    "status_ignored": bool(st.get("status_ignored")),
+                    "key_mode": "shared" if self.uses_shared_key(n.node_id) else "own",
+                    "shared_opt_in": (
+                        n.node_id in self.settings.shared_key_targets
+                        and not self.secrets.has_password(n.node_id)
+                    ),
+                    "guest_overridden": n.node_id in self.settings.guest_key_overrides,
+                    "shared_admin_seen": bool(st.get("shared_admin_seen")),
+                    "shared_admin_removed": st.get("shared_admin_removed"),
+                    "shared_admin_at": st.get("shared_admin_at"),
+                    "covered_at": st.get("covered_at"),
+                    "covered": bool(st.get("last_covered")),
+                    "via_corescope": bool(st.get("via_corescope")),
+                    "flood_replies": int(st.get("flood_replies") or 0),
+                    "community": self._community_node(n, now, phases)
+                    if n.node_id in selected
+                    else None,
+                }
+            )
         brokers = []
-        for b in (self.ohcfg.brokers if self.ohcfg else []):
+        for b in self.ohcfg.brokers if self.ohcfg else []:
             bs = self.state.value["brokers"].get(b.name, {})
             live = self.openhop_brokers.get(b.name, {})
-            brokers.append({
-                "name": b.name, "host": b.host, "format": b.format, "enabled": b.enabled,
-                "openhop_connected": bool((live.get("status") or {}).get("connected")),
-                "selected": b.name in self.settings.brokers,
-                "queued": len(bs.get("queue", [])), "last_ok": bs.get("last_ok"),
-                "last_count": bs.get("last_count"), "last_error": bs.get("last_error", ""),
-            })
+            brokers.append(
+                {
+                    "name": b.name,
+                    "host": b.host,
+                    "format": b.format,
+                    "enabled": b.enabled,
+                    "openhop_connected": bool((live.get("status") or {}).get("connected")),
+                    "selected": b.name in self.settings.brokers,
+                    "queued": len(bs.get("queue", [])),
+                    "last_ok": bs.get("last_ok"),
+                    "last_count": bs.get("last_count"),
+                    "last_error": bs.get("last_error", ""),
+                }
+            )
         runtime = {
             "schema": 1,
             "plugin_version": __version__,
@@ -1112,8 +1353,10 @@ class App:
             "self_check": self.check,
             "token_configured": bool(self.secrets.api_token),
             "companion": {"name": self.settings.companion_name, "public_key": self.companion_key},
-            "repeater": {"name": self.ohcfg.node_name if self.ohcfg else "",
-                         "iata": self.ohcfg.iata_code if self.ohcfg else ""},
+            "repeater": {
+                "name": self.ohcfg.node_name if self.ohcfg else "",
+                "iata": self.ohcfg.iata_code if self.ohcfg else "",
+            },
             "nodes": nodes,
             "brokers": brokers,
             "actions": self.actions,

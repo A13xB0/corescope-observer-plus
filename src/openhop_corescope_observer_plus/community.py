@@ -40,10 +40,26 @@ class Timings:
     stale_policy_s: float  # an unreachable CoreScope's policy older than this: 2x windows
 
 
-NORMAL = Timings(refresh_s=600, policy_cache_s=60, claims_every_s=1800, no_reply_retry_s=20 * 60,
-                 scheduled_gap_s=60, owners_stale_s=1800, hold_recheck_s=600, stale_policy_s=6 * 3600)
-FAST = Timings(refresh_s=30, policy_cache_s=10, claims_every_s=60, no_reply_retry_s=30,
-               scheduled_gap_s=5, owners_stale_s=90, hold_recheck_s=30, stale_policy_s=6 * 3600)
+NORMAL = Timings(
+    refresh_s=600,
+    policy_cache_s=60,
+    claims_every_s=1800,
+    no_reply_retry_s=20 * 60,
+    scheduled_gap_s=60,
+    owners_stale_s=1800,
+    hold_recheck_s=600,
+    stale_policy_s=6 * 3600,
+)
+FAST = Timings(
+    refresh_s=30,
+    policy_cache_s=10,
+    claims_every_s=60,
+    no_reply_retry_s=30,
+    scheduled_gap_s=5,
+    owners_stale_s=90,
+    hold_recheck_s=30,
+    stale_policy_s=6 * 3600,
+)
 
 
 def timings() -> Timings:
@@ -76,7 +92,12 @@ LIMITS = {
 }
 # Fast mode drops the time floors to a minute so a bench run can use
 # few-minute windows.
-FAST_LIMITS = {**LIMITS, "direct_s": (60, 1440 * 60), "one_hop_s": (60, 1440 * 60), "grace_s": (60, 120 * 60)}
+FAST_LIMITS = {
+    **LIMITS,
+    "direct_s": (60, 1440 * 60),
+    "one_hop_s": (60, 1440 * 60),
+    "grace_s": (60, 120 * 60),
+}
 
 KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -107,14 +128,15 @@ def clamp(raw: dict | None, fast: bool | None = None) -> tuple[dict, list[dict]]
     out["paused"] = raw.get("paused") is True
     out["paused_reason"] = str(raw.get("paused_reason") or "")
     out["paused_until"] = str(raw.get("paused_until") or "")
-    out["excluded_nodes"] = sorted({str(k).lower() for k in raw.get("excluded_nodes") or []
-                                    if KEY_RE.match(str(k).lower())})
+    out["excluded_nodes"] = sorted(
+        {str(k).lower() for k in raw.get("excluded_nodes") or [] if KEY_RE.match(str(k).lower())}
+    )
     # A repeater's own window is a window like any other: never below the
     # direct floor, never above a day.
     lo, hi = limits["direct_s"]
     windows = {}
     nw = raw.get("node_windows")
-    for k, v in (nw.items() if isinstance(nw, dict) else []):
+    for k, v in nw.items() if isinstance(nw, dict) else []:
         k = str(k).lower()
         if not KEY_RE.match(k):
             continue
@@ -194,8 +216,13 @@ class Community:
         """A policy pull that didn't return one. The saved copy (and its
         switches) stays in force."""
         self.s["last_status"] = status
-        self.s["last_error"] = ("this CoreScope has no polling policy (404)" if status == 404
-                                else f"HTTP {status}" if status else "CoreScope unreachable")
+        self.s["last_error"] = (
+            "this CoreScope has no polling policy (404)"
+            if status == 404
+            else f"HTTP {status}"
+            if status
+            else "CoreScope unreachable"
+        )
 
     @property
     def fetched_at(self) -> float:
@@ -210,8 +237,11 @@ class Community:
         everyone polls at twice the window until it answers again. Not for a
         CoreScope that answers 404 (it simply has no policy) and not before
         any policy was ever fetched (the defaults apply as they are)."""
-        return (self.has_policy and int(self.s.get("last_status") or 0) not in (200, 404)
-                and now - self.fetched_at > timings().stale_policy_s)
+        return (
+            self.has_policy
+            and int(self.s.get("last_status") or 0) not in (200, 404)
+            and now - self.fetched_at > timings().stale_policy_s
+        )
 
     def policy(self) -> tuple[dict, list[dict]]:
         return clamp(self.s.get("policy") if self.has_policy else None)
@@ -245,9 +275,11 @@ class Community:
             return {"reason": "blocked", "text": "CoreScope has stopped this observer from polling"}
         if not self.version_ok():
             reason = f': "{p["min_version_reason"]}"' if p["min_version_reason"] else ""
-            return {"reason": "version_disabled",
-                    "text": f"This version ({self.plugin_version}) is disabled by CoreScope. "
-                            f"Upgrade to {p['min_plugin_version']} or later{reason}"}
+            return {
+                "reason": "version_disabled",
+                "text": f"This version ({self.plugin_version}) is disabled by CoreScope. "
+                f"Upgrade to {p['min_plugin_version']} or later{reason}",
+            }
         if self.paused(now):
             until = f" until {p['paused_until']}" if p["paused_until"] else ""
             why = f": {p['paused_reason']}" if p["paused_reason"] else ""

@@ -37,8 +37,12 @@ def load_or_create(data_dir: Path) -> sk.SharedKey:
     path = Path(data_dir) / KEY_FILE
     try:
         body = json.loads(path.read_text(encoding="utf-8"))
-        key = sk.SharedKey("own polling key", 1, bytes.fromhex(body["public_key"]),
-                           bytes.fromhex(body["private_key"]))
+        key = sk.SharedKey(
+            "own polling key",
+            1,
+            bytes.fromhex(body["public_key"]),
+            bytes.fromhex(body["private_key"]),
+        )
         if key.identity().get_public_key() == key.public_key:
             return key
     except (OSError, ValueError, KeyError, sk.SharedKeyError):
@@ -48,8 +52,14 @@ def load_or_create(data_dir: Path) -> sk.SharedKey:
     tmp = path.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump({"public_key": key.public_key.hex(), "private_key": key.private_key.hex(),
-                   "created_at": int(time.time())}, f)
+        json.dump(
+            {
+                "public_key": key.public_key.hex(),
+                "private_key": key.private_key.hex(),
+                "created_at": int(time.time()),
+            },
+            f,
+        )
     tmp.replace(path)
     return key
 
@@ -74,5 +84,10 @@ def registration_body(observer: LocalIdentity, key: sk.SharedKey, now: float | N
     # here first so a key that can't sign verifiably says so plainly.
     if not Identity(observer.get_public_key()).verify(msg, sig):
         raise ValueError("this repeater's key doesn't produce a verifiable signature")
-    return {"observer_id": observer_id, "public_key": key.public_key.hex(),
-            "private_key": key.private_key.hex(), "timestamp": ts, "signature": sig.hex()}
+    return {
+        "observer_id": observer_id,
+        "public_key": key.public_key.hex(),
+        "private_key": key.private_key.hex(),
+        "timestamp": ts,
+        "signature": sig.hex(),
+    }

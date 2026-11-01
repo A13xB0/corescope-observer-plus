@@ -15,7 +15,9 @@ def adv(key, path, snr):
 def nodes():
     return [
         Neighbour(WL, "West Lomond", -1.0, -110, 0, True),
-        Neighbour(GARVALD, "sco-edi-garvald", -4.0, -112, 0, False),  # latest advert came via a relay
+        Neighbour(
+            GARVALD, "sco-edi-garvald", -4.0, -112, 0, False
+        ),  # latest advert came via a relay
         Neighbour(DALGETY, "Dalgety Bay", None, None, 0, False),
         Neighbour(FAR, "Far Away", None, None, 0, False),
     ]
@@ -23,14 +25,17 @@ def nodes():
 
 def test_routes_from_adverts():
     ns = nodes()
-    attach_routes(ns, [
-        adv(GARVALD, [], -4.0),                     # garvald heard direct once
-        adv(DALGETY, ["4128A6"], -5.0),
-        adv(DALGETY, ["4128A6"], -3.0),
-        adv(DALGETY, ["02F1FE"], -8.0),
-        adv(FAR, ["4128A6", "02F1FE"], 1.0),       # two hops: no route
-        adv(WL, [], -1.0),
-    ])
+    attach_routes(
+        ns,
+        [
+            adv(GARVALD, [], -4.0),  # garvald heard direct once
+            adv(DALGETY, ["4128A6"], -5.0),
+            adv(DALGETY, ["4128A6"], -3.0),
+            adv(DALGETY, ["02F1FE"], -8.0),
+            adv(FAR, ["4128A6", "02F1FE"], 1.0),  # two hops: no route
+            adv(WL, [], -1.0),
+        ],
+    )
     by = {n.node_id: n for n in ns}
     d = by[DALGETY]
     assert d.hops == 1
@@ -46,10 +51,13 @@ def test_ambiguous_or_unknown_relay_is_skipped():
     ns = nodes()
     twin = Neighbour("41" + "ee" * 31, "Another 41", -2.0, -100, 0, True)
     ns.append(twin)
-    attach_routes(ns, [
-        adv(DALGETY, ["41"], -5.0),       # 1-byte hash: only the twin is heard direct here
-        adv(DALGETY, ["999999"], -5.0),   # nobody heard direct
-    ])
+    attach_routes(
+        ns,
+        [
+            adv(DALGETY, ["41"], -5.0),  # 1-byte hash: only the twin is heard direct here
+            adv(DALGETY, ["999999"], -5.0),  # nobody heard direct
+        ],
+    )
     d = next(n for n in ns if n.node_id == DALGETY)
     assert [r.relay_id for r in d.routes] == [twin.node_id]
     assert d.routes[0].hash_size == 1
@@ -64,6 +72,7 @@ def test_relay_must_not_be_the_target():
 
 def test_manual_repeater_counts_as_direct_and_can_relay():
     from openhop_corescope_observer_plus.openhop import OpenHopAPI
+
     RS = "d8dac32c" + "ab" * 28
     api = OpenHopAPI("http://x", "t")
     api.zero_hop_repeaters = lambda hours: nodes()
@@ -83,12 +92,24 @@ def test_search_corescope_keeps_repeaters(monkeypatch):
             pass
 
         def json(self):
-            return {"nodes": [
-                {"public_key": "d8" * 32, "name": "sco-edi-redstone rigg", "role": "repeater", "last_heard": "2026-10-25T11:45:52Z"},
-                {"public_key": "aa" * 32, "name": "redstone phone", "role": "companion"},
-            ]}
+            return {
+                "nodes": [
+                    {
+                        "public_key": "d8" * 32,
+                        "name": "sco-edi-redstone rigg",
+                        "role": "repeater",
+                        "last_heard": "2026-10-25T11:45:52Z",
+                    },
+                    {"public_key": "aa" * 32, "name": "redstone phone", "role": "companion"},
+                ]
+            }
+
     seen = {}
-    monkeypatch.setattr(openhop.requests, "get", lambda url, params, timeout: seen.update(url=url, params=params) or R())
+    monkeypatch.setattr(
+        openhop.requests,
+        "get",
+        lambda url, params, timeout: seen.update(url=url, params=params) or R(),
+    )
     out = openhop.search_corescope("https://cs.example", "redstone")
     assert seen["url"] == "https://cs.example/api/nodes" and seen["params"]["search"] == "redstone"
     assert [o["name"] for o in out] == ["sco-edi-redstone rigg"]
