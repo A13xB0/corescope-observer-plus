@@ -58,10 +58,51 @@ this observer's own key. The key is public by design.
   then a verifying login) and tells you.
 - Readings taken this way are published with `"key":"shared"`, which CoreScope
   credits as "shared key".
-- Before an unanswered shared-key repeater's early retry, the plugin asks
-  CoreScope whether it already has a fresh reading from any observer; if so it
-  skips the retry (a nearby observer's overhear covered it). Read-only, fails
-  open, and off for own-key polling. Toggle with `check_corescope`.
+- `check_corescope` turns on the wider antenna: a guest-key reply missed here
+  is looked for in the packets CoreScope's observers heard.
+
+### Community polling (0.8)
+
+CoreScope sets the limits for everyone polling a repeater and picks one
+observer to poll each one; the rest stand by. The plugin:
+
+- pulls `GET /api/guest-polling/policy?observer=…&plugin_version=…` and
+  `/api/guest-polling/owners` every 10 min, and the policy again before a send
+  if the saved copy is older than 60 s. The last good policy is kept in
+  `state.json`; with none ever fetched, the built-in defaults apply (60 min
+  direct, 120 min one hop, 30 min standby grace, 2 requests per window, take
+  over after 2 missed windows). Values are clamped (direct 30–1440 min, one hop
+  60–1440, grace 10–120, requests 1–3, takeover 1–6) and the page says "CoreScope
+  asked for X, using Y".
+- stops sending anything, Test and Check now included, while CoreScope has
+  paused polling, blocked this observer, or set a minimum version above this
+  one. These hold through a CoreScope outage (or a 404) until a fetched policy
+  clears them or the pause's end time passes. Excluded repeaters are never sent to.
+- never polls a repeater faster than its window (the repeater's own window
+  from CoreScope, else direct or one-hop by this observer's best route), and
+  sends at most `max_requests` requests per repeater per window, quick retries
+  included.
+- before each scheduled poll asks CoreScope for the newest reading from anyone
+  (`/api/nodes/{pk}/battery`): the poller skips if it is inside the window, a
+  standby if it is inside window + grace, and reschedules to then. If CoreScope
+  can't be reached the poller polls anyway and a standby holds; once owners
+  have been unanswered for 30 min the plugin polls on its own, and with a
+  policy over 6 h old (CoreScope unreachable) every window is doubled.
+- with `community` on (default), publishes a claim v2 for every polled
+  repeater (`…/polling`: key `shared`/`own`/`password`, route, SNR, policy
+  version) every 30 min and at once when a route changes, and stands by where
+  CoreScope picked another observer. With it off: no claims (one last claim
+  says so), owners ignored; the limits, the check, pause and exclusions still
+  apply.
+- Check now "Only stale" follows the check and standby; "All of them" ignores
+  both but keeps the request cap. Test ignores the check, standby and cap
+  (60 s cooldown) but not the pause, block, version minimum or exclusions.
+  Every skip is listed with its reason.
+
+Headless runs: `OPENHOP_CONFIG_PATH` overrides `openhop_config_path`.
+`OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST=1` is a bench-only fast mode (minute
+floors, 30 s policy refresh, 60 s claims, 30 s quick retry, interval = window);
+it logs a warning at startup and is never set from the page.
 
 ## Install
 

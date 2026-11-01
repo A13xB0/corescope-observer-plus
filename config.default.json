@@ -15,5 +15,6 @@
   "manual_repeaters": [],
   "corescope_url": "https://corescope.scotmesh.net",
   "shared_key_targets": [],
-  "check_corescope": true
+  "check_corescope": true,
+  "community": true
 }
