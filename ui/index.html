@@ -8,228 +8,258 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="shell">
+  <div class="page">
     <header class="top">
-      <div>
-        <div class="eyebrow">openHop plugin</div>
-        <h1>CoreScope Observer Plus <span id="version" class="version"></span></h1>
+      <div class="title">
+        <h1>CoreScope Observer Plus <span id="version" class="ver"></span></h1>
+        <span id="subtitle" class="muted small"></span>
       </div>
-      <span id="global-status" class="pill neutral">Loading</span>
+      <span id="global-status" class="status neutral"><i class="dot"></i><span id="global-status-text">Loading</span></span>
+      <button id="check-now" class="btn primary" type="button">Check now</button>
     </header>
 
     <div id="notice" class="notice" role="status" aria-live="polite"></div>
-    <div id="community-notice" class="notice community-notice" role="status" aria-live="polite" hidden></div>
+    <div id="community-notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div id="setup-notice" class="notice warn" hidden>
+      <b>Connect to openHop to start polling.</b>
+      <span class="small">Creates the API token and the plugin's companion once. This card goes away when both are done.</span>
+      <div class="actions"><button id="connect-top" class="btn primary sm" type="button">Connect</button></div>
+    </div>
+    <div id="check-progress" class="live check-progress" data-base="live check-progress" hidden></div>
 
-    <section class="card" aria-labelledby="conn-h">
-      <div class="card-head">
-        <h2 id="conn-h">Connection to openHop</h2>
-        <button id="connect" class="button" type="button">Connect</button>
-      </div>
-      <p class="muted">Connect creates an API token and the plugin's own companion identity in openHop. Nothing in openHop is changed beyond that.</p>
-      <ul id="checks" class="checks"></ul>
-      <div class="kv">
-        <div><span class="muted">Publishes as</span> <strong id="repeater-name">—</strong></div>
-        <div><span class="muted">Plugin companion key</span> <code id="companion-key">—</code>
-          <button id="show-key" class="button ghost small" type="button" aria-pressed="false">Show</button>
-          <button id="copy-key" class="button ghost small" type="button">Copy</button></div>
-      </div>
-      <p class="muted small">Repeater owners can add this key to their ACL instead of sharing a guest password.</p>
+    <section class="glance" aria-label="At a glance">
+      <div><b id="g-you">0</b><span>you poll</span></div>
+      <div><b id="g-others">0</b><span>others poll</span></div>
+      <div><b id="g-attention">0</b><span>need attention</span></div>
+      <div><b id="g-next">—</b><span>next request</span></div>
     </section>
 
-    <section class="card" aria-labelledby="shared-h">
-      <div class="card-head">
-        <h2 id="shared-h">Guest key</h2>
-        <span id="shared-state" class="pill neutral">Off</span>
-      </div>
-      <p class="muted small">A guest identity used to poll a repeater, so any observer that hears the reply can feed CoreScope. The plugin makes a separate polling key for this (never the repeater's own key, which is never shared) and registers it with CoreScope, which decodes the replies others overhear and credits them here; on a CoreScope without that, the public shared key is used instead. CoreScope also picks one observer to poll each repeater, so others don't repeat the request. The Poll with the guest key setting under Polling sets the default; a repeater's Details can override it. The key only ever logs in blank or with "hello", never as admin.</p>
-      <div id="shared-set" class="kv">
-        <div><span class="muted">Key</span> <strong id="shared-name">—</strong> <span id="shared-ver" class="muted small"></span> <code id="shared-pub" class="muted">—</code></div>
-        <div><span class="muted">From</span> <code id="shared-from">—</code></div>
-        <div id="shared-reg" class="small" style="color:var(--warn)"></div>
-      </div>
-      <label for="corescope_url" style="display:block;margin-top:12px">CoreScope address</label>
-      <input id="corescope_url" type="text" autocomplete="off" placeholder="https://corescope.example" class="mono" style="width:100%;max-width:480px;padding:8px;margin-top:4px;border:1px solid var(--line);border-radius:8px;background:var(--bg);box-sizing:border-box">
-      <p class="muted small">Where the plugin fetches the key, looks up repeaters, and checks whether a reading already arrived.</p>
-      <label class="option" style="margin-top:8px"><input id="check_corescope" type="checkbox"> <span><strong>Use CoreScope's observers as a wider antenna</strong>
-        <span class="muted small">When a guest-key reply isn't heard here, look for it in the packets CoreScope's observers heard and decrypt it, instead of asking again.</span></span></label>
-    </section>
+    <nav class="views" role="tablist" aria-label="Views">
+      <button type="button" role="tab" id="tab-repeaters" data-view="repeaters" aria-controls="v-repeaters" aria-selected="true">Repeaters</button>
+      <button type="button" role="tab" id="tab-activity" data-view="activity" aria-controls="v-activity" aria-selected="false" tabindex="-1">Activity</button>
+      <button type="button" role="tab" id="tab-settings" data-view="settings" aria-controls="v-settings" aria-selected="false" tabindex="-1">Settings</button>
+    </nav>
 
-    <section class="card" aria-labelledby="community-h">
-      <div class="card-head">
-        <h2 id="community-h">Community</h2>
-        <span id="community-state" class="pill neutral">—</span>
+    <section id="v-repeaters" class="view" role="tabpanel" aria-labelledby="tab-repeaters">
+      <div class="bar">
+        <span id="filters" class="bar" role="group" aria-label="Filter repeaters"></span>
+        <span class="grow"></span>
+        <input id="search" class="search" type="search" autocomplete="off" placeholder="Search repeaters" aria-label="Search repeaters by name or key">
+        <button id="add-toggle" class="btn sm" type="button" aria-expanded="false" aria-controls="add-form">Add repeater</button>
       </div>
-      <label class="option"><input id="community" type="checkbox"> <span><strong>Share polling with other observers</strong>
-        <span class="muted small">Tell CoreScope which repeaters this observer reaches, and how. CoreScope picks the closest observer to poll each one; the others wait on standby. Off: this observer polls on its own, still within CoreScope's limits.</span></span></label>
-      <div id="community-limits" class="limits"></div>
-      <p id="community-source" class="muted small"></p>
-      <p id="community-warn" class="small warn-text"></p>
-    </section>
 
-    <section class="card" aria-labelledby="poll-h">
-      <h2 id="poll-h">Polling</h2>
-      <div class="options">
-        <label class="option"><input id="enabled" type="checkbox"> <span><strong>Poll selected repeaters</strong>
-          <span class="muted small">Battery and temperature (telemetry) every
-          <select id="interval_minutes" aria-label="Telemetry interval">
-            <option value="30">30 minutes</option>
-            <option value="60">hour</option>
-            <option value="180">3 hours</option>
-            <option value="360">6 hours</option>
-          </select>; full status every
-          <select id="status_every_hours" aria-label="Status interval">
-            <option value="1">hour</option>
-            <option value="3">3 hours</option>
-            <option value="6">6 hours</option>
-            <option value="12">12 hours</option>
-            <option value="24">24 hours</option>
-          </select>
-          <span class="muted small" style="display:block">Status (uptime, noise floor, packet counts) is about four times the airtime of telemetry, and is never asked through a relay.</span></span></span></label>
-        <div class="option"><span></span><span><strong id="reach-label">Reach</strong>
-          <span class="segmented" role="radiogroup" aria-labelledby="reach-label">
-            <label><input type="radio" name="max_hops" value="0"> Direct only</label>
-            <label><input type="radio" name="max_hops" value="1"> Up to 1 hop</label>
-          </span>
-          <span class="muted small">One-hop requests go direct through a relay you hear directly. Each costs the relay two transmissions.</span></span></div>
-        <label class="option"><input id="guest_key_default" type="checkbox"> <span><strong>Poll with the guest key</strong>
-          <span class="muted small">The default for every repeater, so other observers can feed CoreScope its replies. A repeater set by hand in its Details keeps its own choice and shows Overridden; the rest follow this. One with a saved password stays on the companion key.
-          <button id="clear-overrides" class="button ghost small" type="button" hidden></button></span></span></label>
-        <label class="option"><input id="alternative_routes" type="checkbox"> <span><strong>Try an alternative route</strong>
-          <span class="muted small">If the best route gets no answer, the one retry uses the next route heard in adverts.</span></span></label>
-      </div>
-      <p class="muted small">Every packet the plugin sends goes direct; nothing it sends is flooded. A repeater floods its answer only when it has no route back, so the plugin sends it one before asking.</p>
-    </section>
-
-    <section class="card" aria-labelledby="brokers-h">
-      <h2 id="brokers-h">Publish to</h2>
-      <p class="muted small">Brokers already set up in openHop. Companion-key readings (repeaters with a saved password) go out under this repeater's key on its own short connection; openHop's connection is not touched. Guest-key readings aren't published here: openHop uploads the repeater's reply like any packet it hears, and CoreScope decrypts it with the polling key, so they never show in Last publish.</p>
-      <div class="table-wrap">
-      <table class="table">
-        <thead><tr><th scope="col"></th><th scope="col">Broker</th><th scope="col">openHop</th><th scope="col">Last publish</th></tr></thead>
-        <tbody id="brokers"></tbody>
-      </table>
-      </div>
-    </section>
-
-    <section class="card" aria-labelledby="nodes-h">
-      <div class="card-head">
-        <h2 id="nodes-h">Repeaters <span id="selected-count" class="muted small"></span></h2>
-        <button id="check-now" class="button ghost" type="button">Check now</button>
-      </div>
-      <div id="check-progress" class="live check-progress" data-base="live check-progress" hidden></div>
-      <div class="table-wrap">
-      <table class="table nodes-table">
-        <thead><tr><th scope="col"></th><th scope="col">Repeater</th><th scope="col">Route</th><th scope="col">Who polls</th><th scope="col">Heard</th><th scope="col">Login</th><th scope="col">Battery</th><th scope="col" class="temp-col">Temp</th><th scope="col"></th></tr></thead>
-        <tbody id="nodes"></tbody>
-      </table>
-      </div>
-      <p id="reach-note" class="muted small"></p>
-      <form id="add-form" class="add-row">
-        <label for="add-query"><strong>Add a repeater</strong> <span class="muted small">whose adverts this node hasn't heard: search CoreScope by name, or paste its public key</span></label>
-        <div class="row">
+      <form id="add-form" class="group add-form" hidden>
+        <label for="add-query"><strong>Add a repeater</strong> <span class="muted small">this node hasn't heard: search CoreScope by name, or paste its public key</span></label>
+        <div class="add-line">
           <input id="add-query" type="text" autocomplete="off" placeholder="Name or 64-character key">
-          <button class="button ghost" type="submit">Find</button>
+          <button class="btn sm" type="submit">Find</button>
         </div>
         <ul id="add-results" class="add-results"></ul>
       </form>
-    </section>
 
-    <section class="card" aria-labelledby="packets-h">
-      <h2 id="packets-h">Packet log <span class="muted small">last 20 sent, newest first</span></h2>
-      <div class="table-wrap">
-      <table class="table packets-table">
-        <thead><tr><th scope="col">When</th><th scope="col">Repeater</th><th scope="col">Sent</th><th scope="col">Route</th><th scope="col">Key</th><th scope="col">Answer</th></tr></thead>
-        <tbody id="packets"></tbody>
-      </table>
+      <div class="work" id="work">
+        <div class="stack">
+          <div class="list" id="nodes"></div>
+          <details id="others" class="others">
+            <summary>Not polled <span id="others-count" class="muted"></span></summary>
+            <div class="list" id="others-list"></div>
+          </details>
+          <p id="reach-note" class="muted small"></p>
+        </div>
+
+        <aside class="panel" id="details" aria-labelledby="details-title" hidden>
+          <form id="details-form" class="panel-form">
+            <div class="ph">
+              <div><h2 id="details-title" tabindex="-1">Repeater</h2><span id="details-id" class="mono muted"></span></div>
+              <button id="details-close" class="btn sm" type="button" aria-label="Close details">Close</button>
+            </div>
+            <dl class="kv" id="details-facts"></dl>
+
+            <div class="sec">
+              <h3>Who polls it</h3>
+              <div id="details-who" class="who-line"></div>
+              <div id="community-block" hidden>
+                <div id="monitors" class="obs-list"></div>
+                <p id="monitors-note" class="muted small"></p>
+              </div>
+            </div>
+
+            <div class="sec">
+              <h3>Key</h3>
+              <div id="shared-block" class="sec-body" hidden>
+                <label class="switch"><input id="shared-this" type="checkbox"><span><strong>Poll with the guest key</strong>
+                  <span id="guest-state" class="muted small"></span></span></label>
+                <div><button id="guest-use-default" class="btn sm" type="button" hidden>Use the default</button></div>
+                <p id="shared-admin-warn" class="notice bad small" hidden></p>
+                <p id="shared-pw-warn" class="muted small" hidden>This repeater has a saved password, so the guest key can't be used. Remove the password first.</p>
+                <details class="help"><summary>What does the guest key share?</summary>
+                  <p>Polls under a separate polling key the plugin made, so other observers can feed CoreScope the readings. CoreScope gets that polling key to decrypt them; this repeater's own key is never shared.</p>
+                  <ul class="consent">
+                    <li>Anyone can read its replies. That's the point: other observers feed CoreScope.</li>
+                    <li>It is only ever used with a <strong>blank</strong> or <strong>hello</strong> password.</li>
+                    <li><strong>Never give this key admin on any repeater.</strong> If it ever answers as admin, the plugin stops, removes the key's access and tells you.</li>
+                  </ul>
+                </details>
+              </div>
+              <div id="guest-pw-block" class="field" hidden>
+                <label for="guest-password">Guest password</label>
+                <select id="guest-password">
+                  <option value="auto">Find out: blank first, then hello</option>
+                  <option value="hello">hello</option>
+                  <option value="">Blank</option>
+                </select>
+                <p id="guest-pw-state" class="password-state small"></p>
+              </div>
+              <div id="companion-pw-block" class="field">
+                <label for="login-password">Login password <span class="muted small">for this plugin's companion key</span></label>
+                <input id="login-password" type="password" autocomplete="off" placeholder="Blank: guest or ACL">
+                <p id="password-state" class="password-state small"></p>
+                <label class="check"><input id="remove-password" type="checkbox"> Remove the saved password</label>
+                <details class="help"><summary>Which password should I use?</summary>
+                  <p>Blank logs in automatically: as a guest when the repeater has no guest password, or through its ACL if it lists this plugin's key. A password is kept on this observer only and never published. An admin password works but gives full control and makes the repeater write to flash at each login, so prefer a guest password or an ACL entry. Saving one stops the guest key here.</p>
+                </details>
+              </div>
+            </div>
+
+            <div class="sec">
+              <h3>Schedule</h3>
+              <div class="field">
+                <label for="node-interval">Poll every</label>
+                <select id="node-interval">
+                  <option value="default">Default</option>
+                  <option value="30">30 minutes</option>
+                  <option value="60">Hour</option>
+                  <option value="120">2 hours</option>
+                  <option value="180">3 hours</option>
+                  <option value="360">6 hours</option>
+                  <option value="720">12 hours</option>
+                  <option value="1440">24 hours</option>
+                </select>
+              </div>
+              <label class="switch"><input id="temp-this" type="checkbox"><span><strong>Read temperature</strong>
+                <span class="muted small"><span id="temp-last"></span> Arrives with the battery reading on ESP32 and nRF52 boards, at no extra airtime.</span></span></label>
+            </div>
+
+            <div class="actions">
+              <button value="save" class="btn primary" type="submit">Apply</button>
+              <button value="test" id="test-now" class="btn" type="submit">Test now</button>
+              <button value="remove" id="remove-manual" class="btn" type="submit" hidden>Remove</button>
+              <span id="apply-status" class="small" role="status" aria-live="polite"></span>
+            </div>
+            <p id="test-gate" class="muted small" hidden></p>
+            <div id="test-status" class="live test-status" data-base="live test-status" hidden></div>
+
+            <details class="fold">
+              <summary>Routes, best first</summary>
+              <div id="routes" class="obs-list"></div>
+              <p class="muted small">From adverts heard in the last day. At most 2 routes are tried per poll, and the route that last answered moves to the top.</p>
+            </details>
+            <details class="fold">
+              <summary>Recent packets</summary>
+              <div id="node-packets" class="packet-list"></div>
+            </details>
+          </form>
+        </aside>
       </div>
-      <p class="muted small">Every packet the plugin sends, and what came back: heard on this node's radio, or found in the packets CoreScope's observers heard. A flooded answer means the repeater had no route back to us.</p>
     </section>
 
-    <div class="actions">
-      <span id="save-status" class="small" role="status" aria-live="polite"></span>
-      <button id="save" class="button" type="button">Save</button>
+    <section id="v-activity" class="view" role="tabpanel" aria-labelledby="tab-activity" hidden>
+      <p class="muted">The last 20 requests this station sent, and what came back.</p>
+      <div class="tbl"><table>
+        <thead><tr><th scope="col">Time</th><th scope="col">Repeater</th><th scope="col">Sent</th><th scope="col">Route</th><th scope="col">Key</th><th scope="col">Answer</th></tr></thead>
+        <tbody id="packets"></tbody>
+      </table></div>
+      <details class="help"><summary>Reading the log</summary>
+        <p>An answer is either heard on this node's radio or found in the packets CoreScope's observers heard. A flooded answer means the repeater had no route back to this station.</p></details>
+    </section>
+
+    <section id="v-settings" class="view" role="tabpanel" aria-labelledby="tab-settings" hidden>
+      <div class="settings">
+        <div class="settings-col">
+          <div class="group">
+            <h2>Polling</h2>
+            <label class="switch"><input id="enabled" type="checkbox"><span><strong>Poll selected repeaters</strong><span class="muted small">Turn off to stop all requests from this station.</span></span></label>
+            <div class="field"><label for="interval_minutes">Battery and temperature</label>
+              <select id="interval_minutes">
+                <option value="30">Every 30 minutes</option>
+                <option value="60">Every hour</option>
+                <option value="180">Every 3 hours</option>
+                <option value="360">Every 6 hours</option>
+              </select></div>
+            <div class="field"><label for="status_every_hours">Full status</label>
+              <select id="status_every_hours">
+                <option value="1">Every hour</option>
+                <option value="3">Every 3 hours</option>
+                <option value="6">Every 6 hours</option>
+                <option value="12">Every 12 hours</option>
+                <option value="24">Every 24 hours</option>
+              </select>
+              <span class="muted small">About four times the airtime of a battery reading. Never sent through a relay.</span></div>
+            <div class="field"><label for="max_hops">Reach</label>
+              <select id="max_hops">
+                <option value="0">Direct only</option>
+                <option value="1">Direct and 1 hop</option>
+              </select>
+              <span class="muted small">A 1 hop request costs the relay two transmissions.</span></div>
+            <label class="switch"><input id="guest_key_default" type="checkbox"><span><strong>Poll with the guest key</strong><span class="muted small">The default for every repeater. Lets other observers feed CoreScope the replies they overhear. A repeater with a saved password stays on the companion key.</span></span></label>
+            <div class="bar"><span id="ov-text" class="muted small"></span><button id="clear-overrides" class="btn sm" type="button" hidden></button></div>
+            <label class="switch"><input id="alternative_routes" type="checkbox"><span><strong>Try an alternative route</strong><span class="muted small">If the best route gets no answer, the one retry uses the next route heard.</span></span></label>
+            <details class="help"><summary>Does the plugin flood?</summary>
+              <p>No. Every packet it sends goes direct. A repeater floods its answer only when it has no route back, so the plugin sends it one before asking.</p></details>
+          </div>
+
+          <div class="group">
+            <h2>Publish to</h2>
+            <div id="brokers" class="brokers"></div>
+            <p class="muted small">Brokers set up in openHop. Guest-key readings reach CoreScope through openHop's own uploads.</p>
+            <details class="help"><summary>Why is Last publish empty for guest-key readings?</summary>
+              <p>Readings under the companion key (repeaters with a saved password) go out under this repeater's key on their own short connection; openHop's connection is not touched. Guest-key readings aren't published here: openHop uploads the repeater's reply like any packet it hears, and CoreScope decrypts it with the polling key.</p></details>
+          </div>
+        </div>
+
+        <div class="settings-col">
+          <div class="group">
+            <div class="group-head"><h2>Community</h2><span id="community-state" class="pill neutral">—</span></div>
+            <label class="switch"><input id="community" type="checkbox"><span><strong>Share polling with other observers</strong><span class="muted small">CoreScope picks the closest observer for each repeater. The others are backups. Off: this observer polls on its own, still within CoreScope's limits.</span></span></label>
+            <div id="community-limits" class="limits"></div>
+            <p id="community-source" class="muted small"></p>
+            <p id="community-warn" class="small warn-text"></p>
+            <div class="field"><label for="corescope_url">CoreScope address</label>
+              <input id="corescope_url" type="text" autocomplete="off" placeholder="https://corescope.example" class="mono"></div>
+            <label class="switch"><input id="check_corescope" type="checkbox"><span><strong>Search CoreScope for missed replies</strong><span class="muted small">Decrypts a reply another observer heard, instead of asking again. A wider antenna for guest-key replies.</span></span></label>
+            <details class="help"><summary>What does the guest key share?</summary>
+              <p>Requests go out under a separate polling key the plugin makes. CoreScope gets that key so it can decode replies. The repeater's own key is never shared, and the guest key only logs in blank or with hello, never as admin. On a CoreScope that can't register the key, the public shared key is used instead.</p></details>
+          </div>
+
+          <div class="group">
+            <div class="group-head"><h2>Connection</h2><button id="connect" class="btn sm" type="button">Connect</button></div>
+            <div id="checks" class="obs-list"></div>
+            <div class="obs"><span class="muted">Publishes as</span><strong id="repeater-name">—</strong></div>
+            <div class="sub-block">
+              <div class="obs"><span class="muted">Companion key</span><code id="companion-key" class="mono key">—</code></div>
+              <div class="actions">
+                <button id="show-key" class="btn sm" type="button" aria-pressed="false">Show</button>
+                <button id="copy-key" class="btn sm" type="button">Copy key</button>
+              </div>
+              <p class="muted small">Repeater owners can add this key to their ACL instead of sharing a guest password.</p>
+            </div>
+            <div class="sub-block">
+              <div class="obs"><span class="muted">Guest key</span><span id="shared-state" class="pill neutral">Off</span></div>
+              <div class="small"><strong id="shared-name">—</strong> <span id="shared-ver" class="muted"></span></div>
+              <div class="obs small"><span class="muted">Key</span><code id="shared-pub" class="mono key">—</code></div>
+              <div class="obs small"><span class="muted">From</span><code id="shared-from" class="mono key">—</code></div>
+              <p id="shared-reg" class="small warn-text"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div id="savebar" class="savebar">
+      <span id="save-status" class="muted small" role="status" aria-live="polite">No unsaved changes</span>
+      <button id="save" class="btn primary sm" type="button" disabled>Save</button>
     </div>
   </div>
-
-  <dialog id="details-dialog" aria-labelledby="details-title">
-    <form method="dialog" id="details-form">
-      <h3 id="details-title">Repeater</h3>
-      <div id="guest-pw-block" hidden>
-        <label for="guest-password">Guest password <span class="muted small">(for the guest key)</span></label>
-        <select id="guest-password">
-          <option value="auto">Find out: blank first, then hello</option>
-          <option value="hello">hello</option>
-          <option value="">Blank</option>
-        </select>
-        <p id="guest-pw-state" class="password-state small"></p>
-      </div>
-      <div id="companion-pw-block">
-      <label for="login-password">Login password <span class="muted small">(for this plugin's companion key)</span></label>
-      <input id="login-password" type="password" autocomplete="off" placeholder="Blank: guest or ACL">
-      <p id="password-state" class="password-state small"></p>
-      <p class="muted small">Blank logs in automatically: as a guest when the repeater has no guest password, or through its ACL if it lists this plugin's key. A password is kept on this observer only and never published. An admin password works but gives full control and makes the repeater write to flash at each login, so prefer a guest password or an ACL entry. Saving one stops the guest key here.</p>
-      <label class="check"><input id="remove-password" type="checkbox"> Remove the saved password</label>
-      </div>
-      <label for="node-interval">Poll every</label>
-      <select id="node-interval">
-        <option value="default">Default</option>
-        <option value="30">30 minutes</option>
-        <option value="60">hour</option>
-        <option value="120">2 hours</option>
-        <option value="180">3 hours</option>
-        <option value="360">6 hours</option>
-        <option value="720">12 hours</option>
-        <option value="1440">24 hours</option>
-      </select>
-      <label class="check"><input id="temp-this" type="checkbox"> <span>Read temperature <span id="temp-last" class="muted small"></span>
-        <span class="muted small" style="display:block">The chip temperature arrives with the battery reading (ESP32 and nRF52 boards), so this costs no extra airtime.</span></span></label>
-      <div id="shared-block" hidden>
-        <label class="check"><input id="shared-this" type="checkbox"> <span><strong>Poll with the guest key</strong>
-          <button id="guest-use-default" class="button ghost small" type="button" hidden>Use the default</button>
-          <span class="muted small" style="display:block">Polls this repeater as a guest under a separate polling key the plugin made for this purpose, so other observers can feed CoreScope its readings. CoreScope gets that polling key to decrypt them; this repeater's own key is never shared.</span></span></label>
-        <ul class="consent muted small">
-          <li>Anyone can read its replies. That's the point: other observers feed CoreScope.</li>
-          <li>It is only ever used with a <strong>blank</strong> or <strong>hello</strong> password, set above.</li>
-          <li><strong>Never give this key admin on any repeater.</strong> If it ever answers as admin, the plugin stops, removes the key's access and tells you.</li>
-        </ul>
-        <p id="shared-admin-warn" class="notice bad small" hidden></p>
-        <p id="shared-pw-warn" class="muted small" hidden>This repeater has a saved password, so the guest key can't be used. Remove the password first.</p>
-      </div>
-      <div id="community-block" hidden>
-        <h4>Community <span class="muted small">who monitors this repeater, from CoreScope</span></h4>
-        <div class="table-wrap">
-        <table class="table">
-          <thead><tr><th scope="col">Observer</th><th scope="col">Route</th><th scope="col">Role</th><th scope="col">Last reading</th></tr></thead>
-          <tbody id="monitors"></tbody>
-        </table>
-        </div>
-        <p id="monitors-note" class="muted small"></p>
-      </div>
-      <h4>Routes, best first</h4>
-      <div class="table-wrap">
-      <table class="table">
-        <thead><tr><th scope="col"></th><th scope="col">Route</th><th scope="col">Adverts</th><th scope="col">Avg SNR</th><th scope="col">Last result</th></tr></thead>
-        <tbody id="routes"></tbody>
-      </table>
-      </div>
-      <p class="muted small">From adverts heard in the last day. At most 2 routes are tried per poll, and the route that last answered moves to the top.</p>
-      <h4>Recent packets <span class="muted small">this repeater's last 20, newest first</span></h4>
-      <div class="table-wrap packets-scroll">
-      <table class="table">
-        <thead><tr><th scope="col">When</th><th scope="col">Sent</th><th scope="col">Route</th><th scope="col">Key</th><th scope="col">Answer</th></tr></thead>
-        <tbody id="node-packets"></tbody>
-      </table>
-      </div>
-      <div id="test-status" class="live test-status" data-base="live test-status" hidden></div>
-      <p id="test-gate" class="small warn-text" hidden></p>
-      <div class="actions dialog-actions">
-        <button value="save" class="button" type="submit">Apply</button>
-        <button value="test" id="test-now" class="button ghost" type="submit">Test now</button>
-        <button value="cancel" class="button ghost" type="submit">Close</button>
-        <button value="remove" id="remove-manual" class="button ghost" type="submit" hidden>Remove repeater</button>
-      </div>
-    </form>
-  </dialog>
 
   <script src="app.js"></script>
 </body>

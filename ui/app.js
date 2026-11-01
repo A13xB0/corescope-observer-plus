@@ -12,8 +12,18 @@
   let dirty = false;
   let passwordUpdates = {};
   let tempTargets = null; // pending per-repeater temperature choices (a Set), null = unchanged
+  let pendingTargets = null; // repeaters ticked but not saved (a Set), null = unchanged
+  let pwApplied = {};  // passwords just saved, until the plugin's runtime catches up
   let detailsTarget = null;
-  let testRun = 0;  // bumped per Test (and when the dialog closes): stale runs stop updating
+  let testRun = 0;  // bumped per Test (and when the panel closes or changes): stale runs stop updating
+  let testBusy = false;  // a Test is being watched in the open panel
+  let checking = false;  // a Check now is being watched
+  let filter = "all";  // the repeater filter chip
+  let query = "";  // the repeater search box
+  let view = "repeaters";  // the open tab
+  let saveMsg = {};  // what the Save bar last reported
+  let saveMsgTimer = 0;
+  let othersOpened = false;  // Not polled opened itself once, with nothing selected
   let showKey = false; // the companion key is masked until asked for
 
   // maskKey keeps the first and last four characters, which is enough to
@@ -55,8 +65,8 @@
   // change made elsewhere (another tab, or the plugin itself) would undo it.
   // Per-repeater settings are therefore merged: only what this page changed
   // since it last loaded or saved is applied on top of the latest saved copy.
-  let guestShown = false;  // the Details checkbox as opened
-  let guestUseDefault = false;  // Use the default was pressed in Details
+  let guestShown = false;  // the panel's guest key switch as opened
+  let guestUseDefault = false;  // Use the default was pressed in the panel
   const LIST_KEYS = ["targets", "temperature_targets"];
   const MAP_KEYS = ["guest_passwords", "poll_intervals", "guest_key_overrides"];
   async function mergeLatest() {
@@ -162,10 +172,23 @@
     const via = x.via_corescope ? " (heard via CoreScope)" : "";
     if (x.code === "ok") return `${(x.battery_mv / 1000).toFixed(2)} V${role}${route}${temp}${via}`;
     if (x.code === "no_battery") return `no battery fitted${role}${route}${temp}`;
-    return (CODE_TEXT[x.code] || x.code || "no answer") + (x.message && x.message !== x.code ? ": " + x.message : "");
+    return (CODE_TEXT[x.code] || x.code || "no answer") + (x.message && x.message !== x.code ? ": " + skipText(x.message) : "");
   }
   function pollKind(x) {
     return x.code === "ok" || x.code === "no_battery" ? (x.role === "admin" ? "warn" : "good") : "bad";
+  }
+
+  // This station, as CoreScope names it: its reading is "you read it".
+  const isMe = (name) => {
+    const me = String((runtime.repeater || {}).name || "").trim().toLowerCase();
+    return !!me && String(name || "").trim().toLowerCase() === me;
+  };
+  // The plugin's skip reasons, in the page's words.
+  function skipText(text) {
+    let s = String(text || "").replace(/you're standby/g, "you're the backup").replace(/\bstandby\b/gi, "backup");
+    const me = (runtime.repeater || {}).name;
+    if (me) s = s.split(`${me} sent a reading`).join("you sent a reading");
+    return s;
   }
 
   // corescopeText turns a CoreScope confirmation (action.corescope / a
@@ -174,7 +197,7 @@
     if (!cs) return "";
     if (!cs.reachable) return "CoreScope unreachable";
     if (!cs.latest_ts) return "CoreScope has nothing for it yet";
-    const by = cs.by ? ` (${cs.by})` : "";
+    const by = cs.by ? ` (${isMe(cs.by) ? "you" : cs.by})` : "";
     return (cs.fresh ? "CoreScope has it" : "CoreScope last saw")
       + (cs.latest_mv != null ? ` ${(cs.latest_mv / 1000).toFixed(2)} V` : "")
       + by + " · " + ago(Date.parse(cs.latest_ts) / 1000);
@@ -194,8 +217,9 @@
     no_reply: "No reply", not_direct: "Not reachable", not_heard: "Not heard", error: "Error",
   };
 
-  const maxHops = () => Number((document.querySelector('input[name="max_hops"]:checked') || {}).value || 0);
+  const maxHops = () => Number($("max_hops").value || 0);
   const tempSet = () => tempTargets || new Set(config.temperature_targets || []);
+  const chosenSet = () => pendingTargets || new Set(config.targets || []);
   const reachable = (n) => (n.routes || []).some((r) => r.hops <= maxHops());
 
   // The routes in the order the plugin will try them: best first, the one that
@@ -217,73 +241,100 @@
   };
   const snrText = (snr) => (snr == null ? "" : `SNR ${snr > 0 ? "+" : ""}${Number(snr).toFixed(1)} dB`);
 
-  function routeCell(n) {
-    const all = n.routes || [];
-    if (!all.length) return '<span class="muted">2+ hops</span><div class="muted small">beyond reach</div>';
-    const routes = orderedRoutes(n);
-    if (!routes.length) return `<span class="muted">1 hop</span><div class="muted small">set Reach to "Up to 1 hop"</div>`;
-    const best = routes[0];
-    const notes = [];
-    if (n.retried && n.last_route_label && n.code === "ok") notes.push(`last answered ${esc(n.last_route_label)}`);
-    else if (snrText(best.snr)) notes.push(snrText(best.snr));
-    if (routes.length > 1) notes.push(`${routes.length - 1} other route${routes.length > 2 ? "s" : ""}`);
-    if (n.manual && !best.hops) notes.unshift("added by you");
-    return `<div class="route"><b>${routeName(best)}</b><div class="muted small">${notes.join(" · ")}</div></div>`;
-  }
-
-  function loginCell(n) {
-    if (n.code === "needs_password" || n.code === "password_rejected") return `<span class="pill bad">${esc(CODE_TEXT[n.code])}</span>`;
-    if (n.code === "no_reply" && n.no_reply_count >= 2) return `<span class="pill bad">no answer ×${n.no_reply_count}</span>`;
-    if (n.code === "ok" && n.retried) return '<span class="pill warn">retry used</span>';
+  // A password waiting to save, or just saved, beats the plugin's last report.
+  function pwSetFor(n) {
     const pending = passwordUpdates[n.node_id];
-    const pwSet = pending !== undefined ? !!pending : n.password_set;
-    if (n.role) return `<span class="pill good">${esc(n.role)}</span>${pwSet ? '<div class="muted small">password set</div>' : ""}`;
-    return `<span class="muted small">${pwSet ? "Password set" : "Automatic"}</span>`;
+    if (pending !== undefined) return !!pending;
+    const applied = pwApplied[n.node_id];
+    return applied ? applied.set : !!n.password_set;
   }
 
-  function batteryCell(n) {
+  // Route, as the row and panel name it.
+  function routeText(n) {
+    if (!(n.routes || []).length) return "2+ hops";
+    const best = orderedRoutes(n)[0];
+    return best ? routeName(best) : "1 hop";
+  }
+  const unreachableWhy = (n) => ((n.routes || []).length ? 'Set Reach to "Direct and 1 hop"' : "2+ hops, beyond reach");
+
+  const volts = (mv) => `${(mv / 1000).toFixed(2)} V`;
+  const gaugePct = (mv) => Math.max(0, Math.min(100, Math.round((mv - 3300) / 9)));
+
+  // The battery figure and gauge. A reading that isn't a fresh one of ours
+  // (another observer's, or an old one before a failed poll) is shown muted.
+  function battHtml(n) {
+    if (n.code === "no_battery") return '<span class="batt"><span class="muted small">No battery fitted</span></span>';
+    if (!n.battery_mv) return '<span class="batt"><span class="muted small">No reading</span></span>';
+    const mine = n.code === "ok" && !n.covered;
+    return `<span class="batt${mine ? "" : " old"}"><b>${volts(n.battery_mv)}</b>`
+      + `<span class="gauge"><i class="${n.battery_mv < 3600 ? "low" : ""}" style="width:${gaugePct(n.battery_mv)}%"></i></span></span>`;
+  }
+
+  function batteryFact(n) {
+    if (n.code === "no_battery") return "No battery fitted";
     if (n.covered && n.code === "ok") {
       // Not our reading: another observer overheard the answer to our request.
-      const v = n.battery_mv ? `${(n.battery_mv / 1000).toFixed(2)} V` : "—";
-      return `<span class="muted">${v}</span><div class="muted small">heard via another observer · ${ago(n.covered_at)}</div>`;
+      return `${n.battery_mv ? volts(n.battery_mv) : "—"} · heard via another observer · ${ago(n.covered_at)}`;
     }
     if (n.code === "ok" && n.battery_mv) {
-      const via = n.method === "telemetry" ? ' · <span title="This repeater ignores a guest\'s status request, so the battery comes from telemetry">telemetry</span>' : "";
-      return `<strong>${(n.battery_mv / 1000).toFixed(2)} V</strong><div class="muted small">${ago(n.last_success)}${via}</div>`;
+      return `${volts(n.battery_mv)} · ${ago(n.last_success)}${n.method === "telemetry" ? " · from telemetry, as this repeater ignores a guest's status request" : ""}`;
     }
-    if (n.code === "no_battery") return '<span class="pill neutral">No battery fitted</span>';
-    if (!n.code || n.code === "ok") return '<span class="muted">—</span>';
-    if (n.battery_mv) return `<span class="muted">${(n.battery_mv / 1000).toFixed(2)} V</span><div class="muted small">${ago(n.last_success)}</div>`;
-    return `<span class="pill warn">${esc(CODE_TEXT[n.code] || n.code)}</span>${n.detail ? `<div class="muted small">${esc(n.detail)}</div>` : ""}`;
+    if (!n.code || n.code === "ok") return "No reading";
+    const failed = esc(CODE_TEXT[n.code] || n.code) + (n.detail ? `: ${esc(n.detail)}` : "");
+    return n.battery_mv ? `${volts(n.battery_mv)} · ${ago(n.last_success)} · ${failed}` : failed;
   }
 
-  function tempCell(n) {
-    if (!tempSet().has(n.node_id)) return '<span class="muted small">off</span>';
+  function tempText(n) {
+    if (!tempSet().has(n.node_id)) return "Off";
     if (n.temp_code === "ok" || (n.temperature_c != null && n.temp_misses < 3)) {
-      return n.temperature_c == null ? '<span class="muted">—</span>'
-        : `${Number(n.temperature_c).toFixed(1)} °C<div class="muted small">${ago(n.temp_at)}</div>`;
+      return n.temperature_c == null ? "—" : `${Number(n.temperature_c).toFixed(1)} °C · ${ago(n.temp_at)}`;
     }
-    if (n.temp_misses >= 3) return '<span class="muted small">none reported</span>';
-    return '<span class="muted">—</span>';
+    return n.temp_misses >= 3 ? "None reported" : "—";
   }
 
-  // A small badge showing how a repeater is polled: under the shared key, or
-  // stopped because it answered the key as admin.
-  function keyBadge(n) {
-    const ov = (config.guest_key_overrides || {})[n.node_id];
-    if (ov === undefined) return keyState(n);
-    return keyState(n) + ` · <span class="pill warn" title="Set by hand in Details: guest key ${ov ? "on" : "off"}. The default doesn't change it until you press Use the default.">overridden</span>`;
+  function loginText(n) {
+    const pw = pwSetFor(n);
+    if (n.role) return esc(n.role) + (pw ? " · password set" : "");
+    return pw ? "Password set" : "Automatic";
   }
 
-  function keyState(n) {
-    if (n.shared_admin_seen) return ' · <span class="pill bad" title="Answered the guest key as admin; guest polling stopped here">admin!</span>';
-    if (n.flood_replies >= 2) return ' · <span class="pill bad" title="Its replies keep coming back flooded (our return route isn\'t taking), so it is polled only once a day until a reply comes back direct">floods · daily</span>';
+  // What's wrong with a polled repeater, if anything: drives its red tag, the
+  // Needs attention filter and the need attention figure.
+  function trouble(n) {
+    if (!reachable(n)) return { text: "Out of reach", title: unreachableWhy(n) };
+    if (n.shared_admin_seen) return { text: "Admin!", title: "Answered the guest key as admin; guest polling stopped here" };
+    if (n.flood_replies >= 2) return { text: "Floods · daily", title: "Its replies keep coming back flooded (our return route isn't taking), so it is polled only once a day until a reply comes back direct" };
+    if (n.code === "no_reply") {
+      if (n.no_reply_count < 2) return null;
+      return { text: n.no_reply_count === 2 ? "No answer twice" : `No answer ×${n.no_reply_count}`, title: n.detail || "" };
+    }
+    if (!n.code || n.code === "ok" || n.code === "no_battery") return null;
+    return { text: CODE_TEXT[n.code] || n.code, title: n.detail || "" };
+  }
+
+  function keyTag(n) {
     if (n.key_mode === "shared") {
       const own = (runtime.shared_key || {}).kind === "own";
-      return ` · <span class="pill good" title="${own ? "Polled under this plugin's separate polling key (not the repeater's key), registered with CoreScope" : "Polled under the public shared guest key"}">${own ? "guest key" : "shared"}</span>`;
+      return `<span class="pill" title="${own ? "Polled under this plugin's separate polling key (not the repeater's key), registered with CoreScope" : "Polled under the public shared guest key"}">${own ? "Guest key" : "Shared key"}</span>`;
     }
-    if (n.shared_opt_in) return ' · <span class="muted small" title="Set to use it, but the guest key is not usable here yet">shared (off)</span>';
-    return "";
+    if (pwSetFor(n)) return '<span class="pill">Password</span>';
+    if (n.shared_opt_in) return '<span class="pill" title="Set to use it, but the guest key is not usable here yet">Guest key off</span>';
+    return '<span class="pill">Companion key</span>';
+  }
+
+  function rowTags(n, polled) {
+    const tags = [];
+    const t = polled ? trouble(n) : null;
+    if (t) tags.push(`<span class="pill bad" title="${esc(t.title)}">${esc(t.text)}</span>`);
+    if (polled && n.code === "ok" && n.retried) tags.push('<span class="pill warn">Retry used</span>');
+    if (n.role === "admin") tags.push('<span class="pill warn">Admin login</span>');
+    if (polled) tags.push(keyTag(n));
+    const ov = (config.guest_key_overrides || {})[n.node_id];
+    if (ov !== undefined) tags.push(`<span class="pill warn" title="Set by hand in its details: guest key ${ov ? "on" : "off"}. The default doesn't change it until you press Use the default.">Overridden</span>`);
+    const own = (config.poll_intervals || {})[n.node_id];
+    if (own) tags.push(`<span class="pill">${esc(everyText(own).replace(/^./, (c) => c.toUpperCase()))}</span>`);
+    if (n.manual) tags.push('<span class="pill">Added by you</span>');
+    return tags.join("");
   }
 
   function everyText(min) {
@@ -305,7 +356,6 @@
     const t = Date.parse(iso);
     return Number.isNaN(t) ? String(iso) : new Date(t).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   };
-  const hopsText = (h) => (h === 0 ? " (direct)" : h === 1 ? " (1 hop)" : "");
   const community = () => runtime.community || {};
   const gate = () => community().gate || null;
   const GATE_LABEL = { paused: "Paused by CoreScope", blocked: "Stopped by CoreScope", version_disabled: "Upgrade needed" };
@@ -328,29 +378,40 @@
     return `CoreScope asked for ${v(c.asked)}, using ${v(c.using)}`;
   }
 
-  // The "Who polls" cell: you (and when), standby (and who polls), covered by
-  // someone's fresh reading, or not polled at all.
-  function whoCell(n) {
+  // Who polls a repeater, as [tag colour, tag, line under it]. Uses the backend's
+  // who values (you, standby, covered, capped, excluded); on the page the word
+  // is Backup.
+  function whoLine(n) {
+    const id = n.node_id;
+    const saved = (config.targets || []).includes(id);
+    const picked = chosenSet().has(id);
     const c = n.community;
-    if (!c) return '<span class="muted">—</span>';
+    const excluded = (c && c.who === "excluded") || ((community().policy || {}).excluded_nodes || []).includes(id);
+    if (saved && !picked) return ["", "Not selected", "Save to stop polling it"];
+    if (!saved && picked) return ["info", "Selected", "Save to start polling it"];
+    if (!saved) return ["", "Not polled", excluded ? "Excluded by CoreScope" : reachable(n) ? "Not selected" : unreachableWhy(n)];
+    if (!reachable(n)) return ["warn", "Not polled", unreachableWhy(n)];
     const g = gate();
     if (g) {
-      const part = c.who === "standby" ? "standby" : c.who === "excluded" ? "excluded" : "you poll this one";
-      return `<span class="pill ${gateKind(g)}">${esc(GATE_SHORT[g.reason] || "Stopped")}</span><div class="muted small">${part}</div>`;
+      return [gateKind(g), GATE_SHORT[g.reason] || "Stopped",
+        g.reason === "paused" ? "Nothing is sent until CoreScope lifts it"
+          : g.reason === "blocked" ? "Nothing is sent from this station" : "This version is turned off"];
     }
-    if (c.who === "excluded") return '<span class="pill neutral">Not polled</span><div class="muted small">CoreScope excludes it (owner\'s request)</div>';
-    if (c.who === "standby") {
-      return `<span class="pill neutral">Standby</span><div class="muted small">${esc(c.by || "another observer")} polls${hopsText(c.owner_hops)}</div>`;
-    }
+    if (excluded) return ["warn", "Not polled", "Excluded by CoreScope"];
+    if (!c) return ["", "Selected", "Waiting for the plugin"];
+    if (c.who === "standby") return ["info", `${c.by || "Another observer"} polls it`, "You're the backup if it goes quiet"];
+    const next = hhmm(Math.max(c.next_at || 0, Date.now() / 1000));
+    if (c.who === "capped") return ["warn", "Limit reached", `${skipText((c.skip || {}).text)}; next ${next}`];
+    if (!config.enabled) return ["good", "You poll it", "Polling is off"];
     if (c.who === "covered") {
-      return `<span class="pill good">Covered</span><div class="muted small">reading ${ago(c.fresh_at)}${c.fresh_by ? " by " + esc(c.fresh_by) : ""}, skip until ${hhmm(c.next_at)}</div>`;
+      const reader = !c.fresh_by ? "Another observer" : isMe(c.fresh_by) ? "you" : c.fresh_by;
+      return ["good", "You poll it", `${reader} read it ${ago(c.fresh_at)}, so next ${next}`];
     }
-    if (c.who === "capped") return `<span class="pill warn">Limit reached</span><div class="muted small">${esc((c.skip || {}).text || "")}; next ${hhmm(c.next_at)}</div>`;
-    const next = config.enabled ? `next ${hhmm(c.next_at)} · ${everyText(c.interval_s / 60)}` : "polling is off";
-    return `<span class="pill good">You</span><div class="muted small">${next}</div>`;
+    return ["good", "You poll it", `Next ${next}`];
   }
 
-  // The banner for CoreScope's switches: pause, block, version minimum.
+  // The banner for CoreScope's switches: pause, block, version minimum. Each
+  // says that Check now and Test are off, as a disabled button can't on a phone.
   function renderCommunityNotice() {
     const el = $("community-notice");
     const cm = community();
@@ -359,17 +420,17 @@
     if (!g) { el.hidden = true; el.innerHTML = ""; return; }
     let html;
     if (g.reason === "paused") {
-      html = `<b>Paused by CoreScope.${p.paused_reason ? " " + esc(p.paused_reason) : ""}</b>`
-        + `<span class="small">Nothing is sent ${p.paused_until ? `until ${esc(whenText(p.paused_until))}, or ` : ""}until CoreScope lifts the pause. Claims still go out, so CoreScope shows this observer as paused. Test and Check now are off.</span>`;
+      html = `<b>Paused by CoreScope${p.paused_reason ? ": " + esc(p.paused_reason) : ""}.</b>`
+        + `<span class="small">Nothing is sent ${p.paused_until ? `until ${esc(whenText(p.paused_until))}, or ` : ""}until CoreScope lifts the pause. You don't need to do anything. Claims still go out, so CoreScope shows this observer as paused. Check now and Test are off.</span>`;
     } else if (g.reason === "blocked") {
       html = "<b>CoreScope has stopped this observer from polling.</b>"
-        + `<span class="small">This observer's key is on ${esc(hostOf(cm.corescope_url))}'s blocked list, so the plugin sends nothing and CoreScope ignores its readings. Ask the CoreScope operator why; nothing on this side can lift it.</span>`;
+        + `<span class="small">This observer's key is on ${esc(hostOf(cm.corescope_url))}'s blocked list, so the plugin sends nothing and CoreScope ignores its readings. Ask the CoreScope operator why; nothing on this side can lift it. Check now and Test are off.</span>`;
     } else {
-      html = `<b>This version (${esc(runtime.plugin_version || "?")}) is disabled by CoreScope. Upgrade to ${esc(p.min_plugin_version || "a newer version")} or later to keep providing data.</b>`
-        + `<span class="small">${p.min_version_reason ? `CoreScope's note: "${esc(p.min_version_reason)}" ` : ""}Until you upgrade, nothing is sent and CoreScope ignores this observer's claims and readings. Your settings and passwords are kept.</span>`;
+      html = `<b>This version (${esc(runtime.plugin_version || "?")}) is turned off. Upgrade to ${esc(p.min_plugin_version || "a newer version")} or later to keep providing data.</b>`
+        + `<span class="small">${p.min_version_reason ? `CoreScope says: ${esc(p.min_version_reason)} ` : ""}Until you upgrade, nothing is sent and CoreScope ignores this observer's claims and readings. Your settings and passwords are kept. Check now and Test are off.</span>`;
     }
     el.hidden = false;
-    el.className = `notice community-notice ${gateKind(g)}`;
+    el.className = `notice ${gateKind(g)}`;
     el.innerHTML = html;
   }
 
@@ -384,14 +445,13 @@
     pill.className = "pill " + (g ? gateKind(g) : on ? "good" : "neutral");
     if (!dirty) $("community").checked = on;
     $("community-limits").innerHTML = p.direct_s ? [
-      [dur(p.direct_s), "direct"], [dur(p.one_hop_s), "1 hop"], [dur(p.grace_s), "standby grace"],
-      [String(p.max_requests), `request${p.max_requests === 1 ? "" : "s"} per window`],
-    ].map(([v, l]) => `<div><b>${esc(v)}</b>${esc(l)}</div>`).join("") : "";
+      [dur(p.direct_s), "direct"], [dur(p.one_hop_s), "1 hop"], [dur(p.grace_s), "backup wait"],
+      [String(p.max_requests), "per window"],
+    ].map(([v, l]) => `<div><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("") : "";
     const where = hostOf(cm.corescope_url);
-    const why = "They apply to every observer polling a repeater, counted from the newest reading anyone sent.";
-    $("community-source").textContent = !cm.corescope_url ? `Built-in defaults: no CoreScope address set. ${why}`
-      : cm.has_policy ? `Limits from ${where}${p.version ? " · policy " + p.version : ""} · checked ${ago(cm.fetched_at)}${cm.last_error ? ` (last try: ${cm.last_error}; using the saved copy)` : ""}. ${why}`
-      : `Built-in defaults: no policy from ${where} yet${cm.last_error ? ` (${cm.last_error})` : ""}. ${why}`;
+    $("community-source").textContent = !cm.corescope_url ? "Built-in limits: no CoreScope address set."
+      : cm.has_policy ? `Limits set by ${where}${p.version ? " · policy " + p.version : ""}. Checked ${ago(cm.fetched_at)}${cm.last_error ? ` (last try: ${cm.last_error}; using the saved copy)` : ""}.`
+      : `Built-in limits: no policy from ${where} yet${cm.last_error ? ` (${cm.last_error})` : ""}.`;
     const warn = [];
     if (cm.stale) warn.push("CoreScope hasn't answered for over 6 hours: every repeater is polled at twice its window until it does.");
     (cm.clamped || []).filter((c) => !c.node_id).forEach((c) => warn.push(clampText(c) + "."));
@@ -411,21 +471,56 @@
     const after = e.after_s != null ? ` · ${Number(e.after_s).toFixed(1)} s` : "";
     return `<span class="pill good">answered</span>${how}<div class="muted small">${esc(via)}${after}${e.what ? " · " + esc(e.what) : ""}</div>`;
   }
-  // Rows for a packet log, newest first; withName adds the Repeater column.
-  function packetRows(entries, withName) {
+  // Rows for the Activity table, newest first.
+  function packetRows(entries) {
     const log = (entries || []).slice().reverse();
-    const cols = withName ? 6 : 5;
     return log.length ? log.map((e) => `<tr>
-      <td class="small">${new Date(e.at * 1000).toLocaleTimeString()}<div class="muted small">${ago(e.at)}</div></td>
-      ${withName ? `<td>${esc(e.name || String(e.node_id || "").slice(0, 8))}</td>` : ""}
+      <td class="t">${new Date(e.at * 1000).toLocaleTimeString()}<div>${ago(e.at)}</div></td>
+      <td>${esc(e.name || String(e.node_id || "").slice(0, 8))}</td>
       <td><strong>${esc(e.kind)}</strong>${e.detail ? `<div class="muted small">${esc(e.detail)}</div>` : ""}${e.unconfirmed ? '<div class="muted small">openHop busy: sent unconfirmed</div>' : ""}</td>
       <td class="small">${esc(e.route || "")}</td>
       <td class="small">${esc(e.key || "")}</td>
-      <td>${packetAnswer(e)}</td></tr>`).join("")
-      : `<tr><td colspan="${cols}" class="muted">Nothing sent yet.</td></tr>`;
+      <td class="wrap">${packetAnswer(e)}</td></tr>`).join("")
+      : '<tr><td colspan="6" class="muted">Nothing sent yet.</td></tr>';
+  }
+  // One repeater's log for the details panel, too narrow for the table.
+  function packetItems(entries) {
+    const log = (entries || []).slice().reverse();
+    return log.map((e) => `<div>
+      <span><span class="mono muted">${new Date(e.at * 1000).toLocaleTimeString()}</span> <strong>${esc(e.kind)}</strong>${e.detail ? ` <span class="muted">${esc(e.detail)}</span>` : ""}</span>
+      <span class="muted">${esc([e.route, e.key].filter(Boolean).join(" · "))}${e.unconfirmed ? " · openHop busy: sent unconfirmed" : ""}</span>
+      <span>${packetAnswer(e)}</span></div>`).join("") || '<span class="muted">Nothing sent yet.</span>';
   }
   function renderPackets() {
-    $("packets").innerHTML = packetRows(runtime.packet_log, true);
+    $("packets").innerHTML = packetRows(runtime.packet_log);
+  }
+
+  // The status beside Check now, as [text, kind, tooltip].
+  function statusLine(checks, allOk) {
+    // The plugin rewrites runtime.json every few seconds while it runs; a
+    // stale one means it is stopped and nothing saved here is acted on yet.
+    const age = runtime.generated_at ? Date.now() / 1000 - Date.parse(runtime.generated_at) / 1000 : 0;
+    if (age > 20 * 60) {
+      return [`Not running (last seen ${ago(Date.parse(runtime.generated_at) / 1000)})`, "bad",
+        "The plugin isn't running. Changes are saved, but nothing is applied or polled until it starts."];
+    }
+    const g = gate();
+    if (g) return [GATE_LABEL[g.reason] || "Stopped by CoreScope", gateKind(g), g.text || ""];
+    if (!Object.keys(checks).length) return [runtime.token_configured ? "Starting" : "Needs setup", runtime.token_configured ? "neutral" : "warn", ""];
+    if (!allOk) return [needsSetup(checks) ? "Needs setup" : "Needs attention", "warn", ""];
+    return config.enabled ? ["Polling normally", "good", ""] : ["Polling is off", "neutral", ""];
+  }
+  const needsSetup = (checks) => !runtime.token_configured || !!(checks.companion && !checks.companion.ok);
+
+  function subtitleText() {
+    const r = runtime.repeater || {};
+    const cm = community();
+    const parts = [];
+    if (r.name) parts.push(`Publishing as ${r.name}${r.iata ? " · " + r.iata : ""}`);
+    if (!(runtime.corescope && runtime.corescope.url)) parts.push("No CoreScope set");
+    else if (cm.stale || (cm.last_error && !cm.has_policy)) parts.push("CoreScope not answering");
+    else parts.push("CoreScope connected");
+    return parts.join(" · ");
   }
 
   function render() {
@@ -433,24 +528,16 @@
     $("version").textContent = runtime.plugin_version ? `v${runtime.plugin_version}` : "";
     const checks = runtime.self_check || {};
     const allOk = Object.keys(checks).length && Object.values(checks).every((c) => c.ok);
-    const gs = $("global-status");
-    // The plugin rewrites runtime.json every few seconds while it runs; a
-    // stale one means it is stopped and nothing saved here is acted on yet.
-    const age = runtime.generated_at ? Date.now() / 1000 - Date.parse(runtime.generated_at) / 1000 : 0;
-    const stopped = age > 20 * 60;
-    gs.textContent = stopped ? `Not running (last seen ${ago(Date.parse(runtime.generated_at) / 1000)})`
-      : !Object.keys(checks).length ? "Starting" : allOk ? (config.enabled ? "Polling" : "Ready") : "Needs attention";
-    gs.className = "pill " + (stopped ? "bad" : !Object.keys(checks).length ? "neutral" : allOk ? "good" : "warn");
-    gs.title = stopped ? "The plugin isn't running. Changes are saved, but nothing is applied or polled until it starts." : "";
+    const [statusText, statusKind, statusTitle] = statusLine(checks, allOk);
+    $("global-status-text").textContent = statusText;
+    $("global-status").className = "status " + statusKind;
+    $("global-status").title = statusTitle;
+    $("subtitle").textContent = subtitleText();
+    $("setup-notice").hidden = !needsSetup(checks);
     const g = gate();
-    if (g && !stopped) {
-      gs.textContent = GATE_LABEL[g.reason] || "Stopped by CoreScope";
-      gs.className = "pill " + gateKind(g);
-      gs.title = g.text || "";
-    }
     renderCommunityNotice();
     renderCommunity();
-    $("check-now").disabled = !!g;
+    $("check-now").disabled = !!g || checking;
     $("check-now").title = g ? `${g.text}. Check now is off.` : "";
     // Telemetry intervals faster than CoreScope's direct window can't be used.
     const directMin = ((community().policy || {}).direct_s || 0) / 60;
@@ -462,7 +549,7 @@
     });
     const LABELS = { config: "openHop config", api: "openHop API", companion: "Plugin companion", publish: "Publishing key" };
     $("checks").innerHTML = Object.entries(checks).map(([k, c]) =>
-      `<li class="${c.ok ? "ok" : "bad"}"><span>${c.ok ? "✓" : "✗"}</span> <strong>${esc(LABELS[k] || k)}</strong> <span class="muted">${esc(c.message)}</span></li>`).join("");
+      `<div class="obs"><span>${esc(LABELS[k] || k)}<span class="sub">${esc(c.message)}</span></span><span class="pill ${c.ok ? "good" : "bad"}">${c.ok ? "ok" : "failed"}</span></div>`).join("");
     $("connect").textContent = runtime.token_configured && checks.companion && checks.companion.ok ? "Reconnect" : "Connect";
     const r = runtime.repeater || {};
     $("repeater-name").textContent = r.name ? `${r.name}${r.iata ? " · " + r.iata : ""}` : "—";
@@ -480,11 +567,8 @@
       $("alternative_routes").checked = !!config.alternative_routes;
       $("guest_key_default").checked = guestDefault();
       showClearOverrides();
-      const hops = String(config.max_hops ? 1 : 0);
-      document.querySelectorAll('input[name="max_hops"]').forEach((el) => { el.checked = el.value === hops; });
+      $("max_hops").value = String(config.max_hops ? 1 : 0);
     }
-    const showTemp = tempSet().size > 0;
-    document.querySelectorAll(".temp-col").forEach((el) => { el.hidden = !showTemp; });
 
     const sk = runtime.shared_key || {};
     const nTargets = (sk.targets || []).length;
@@ -510,50 +594,102 @@
       $("check_corescope").checked = config.check_corescope !== false;
     }
 
-    // While editing, keep what's ticked on screen rather than the saved lists.
-    const ticked = (attr, saved) => {
-      const els = [...document.querySelectorAll(`[data-${attr}]`)];
-      return new Set(dirty && els.length ? els.filter((el) => el.checked).map((el) => el.dataset[attr]) : saved || []);
-    };
-    const chosenBrokers = ticked("broker", config.brokers);
+    // While editing, keep what's ticked on screen rather than the saved list.
+    const brokerBoxes = [...document.querySelectorAll("[data-broker]")];
+    const chosenBrokers = new Set(dirty && brokerBoxes.length
+      ? brokerBoxes.filter((el) => el.checked).map((el) => el.dataset.broker) : config.brokers || []);
     $("brokers").innerHTML = (runtime.brokers || []).map((b) => {
-      const last = b.last_error ? `<span class="pill warn" title="${esc(b.last_error)}">Failed</span> <span class="muted small">${esc(b.last_error)}</span>`
-        : b.last_ok ? `${ago(b.last_ok)} · ${b.last_count} reading(s)` : '<span class="muted">—</span>';
-      return `<tr><td><input type="checkbox" data-broker="${esc(b.name)}" ${chosenBrokers.has(b.name) ? "checked" : ""} aria-label="Publish to ${esc(b.name)}"></td>
-        <td><strong>${esc(b.name)}</strong><div class="muted small">${esc(b.host)} · ${esc(b.format)}</div></td>
-        <td>${!b.enabled ? '<span class="muted">disabled</span>' : b.openhop_connected ? '<span class="pill good">connected</span>' : '<span class="pill warn">not connected</span>'}</td>
-        <td>${last}${b.queued ? ` <span class="muted small">· ${b.queued} queued</span>` : ""}</td></tr>`;
-    }).join("") || '<tr><td colspan="4" class="muted">No brokers configured in openHop.</td></tr>';
+      const state = !b.enabled ? '<span class="pill">disabled</span>' : b.openhop_connected ? '<span class="pill good">connected</span>' : '<span class="pill warn">not connected</span>';
+      const last = b.last_error ? `Last publish failed: ${esc(b.last_error)}`
+        : b.last_ok ? `Last publish ${ago(b.last_ok)} · ${b.last_count} reading(s)` : "Nothing published yet";
+      return `<label class="broker"><input type="checkbox" data-broker="${esc(b.name)}" ${chosenBrokers.has(b.name) ? "checked" : ""} aria-label="Publish to ${esc(b.name)}">
+        <strong>${esc(b.name)}</strong>${state}
+        <span class="sub">${esc(b.host)} · ${esc(b.format)}</span>
+        <span class="sub">${last}${b.queued ? ` · ${b.queued} queued` : ""}</span></label>`;
+    }).join("") || '<p class="muted small">No brokers configured in openHop.</p>';
 
-    const chosen = ticked("node", config.targets);
-    const hopsOf = (n) => (n.hops == null ? 9 : n.hops);
-    // Polled repeaters first, then the rest; reachable before unreachable,
-    // then nearest and strongest. Ordered by the saved selection, so a row
-    // doesn't jump away while it is being ticked.
+    renderRepeaters();
+    updateSaveBar();
+  }
+
+  const polledByYou = (n) => n.community && ["you", "covered", "capped"].includes(n.community.who);
+  const polledByOthers = (n) => n.community && n.community.who === "standby";
+
+  function rowHtml(n, picked, saved) {
+    const ok = reachable(n);
+    const id = esc(n.node_id);
+    const [kind, tag, line] = whoLine(n);
+    const when = saved
+      ? (n.covered && n.covered_at ? n.covered_at : n.code === "ok" || n.battery_mv ? n.last_success : n.last_seen)
+      : n.last_seen;
+    const parts = [routeText(n), when ? (saved && when !== n.last_seen ? ago(when) : `heard ${ago(when)}`) : ""];
+    if (saved && tempSet().has(n.node_id) && n.temperature_c != null) parts.push(`${Number(n.temperature_c).toFixed(1)} °C`);
+    return `<div class="row${ok ? "" : " dim"}${detailsTarget === n.node_id ? " current" : ""}">
+      <label class="tick"><input type="checkbox" data-node="${id}" ${picked ? "checked" : ""} ${ok ? "" : "disabled"} aria-label="Poll ${esc(n.name)}"></label>
+      <button type="button" class="row-main" data-details="${id}" aria-current="${detailsTarget === n.node_id}" ${ok ? "" : "disabled"}>
+        ${battHtml(n)}
+        <span><span class="name">${esc(n.name)}</span><span class="sub">${parts.filter(Boolean).join(" · ")}</span></span>
+        <span class="who"><span class="pill ${kind}">${esc(tag)}</span><span class="sub">${esc(line)}</span></span>
+        <span class="tags">${rowTags(n, saved)}</span>
+      </button></div>`;
+  }
+
+  // The repeater list: what's selected, then the rest under Not polled. Ordered
+  // by the saved selection, so a row doesn't jump away while it is being ticked.
+  // Ticks live in pendingTargets, so a filter hiding a row can't lose one.
+  function renderRepeaters() {
+    const focus = document.activeElement;
+    const refocus = focus && focus.dataset
+      ? ["node", "details", "f"].filter((k) => focus.dataset[k]).map((k) => `[data-${k}="${focus.dataset[k]}"]`)[0] : null;
+
+    const chosen = chosenSet();
     const saved = new Set(config.targets || []);
+    const hopsOf = (n) => (n.hops == null ? 9 : n.hops);
     const nodes = (runtime.nodes || []).slice().sort((a, b) =>
-      (saved.has(b.node_id) - saved.has(a.node_id)) || (reachable(b) - reachable(a))
-      || (hopsOf(a) - hopsOf(b)) || ((b.snr ?? -99) - (a.snr ?? -99)));
-    const firstOther = nodes.findIndex((n) => !saved.has(n.node_id));
-    $("selected-count").textContent = `${chosen.size} selected`;
-    $("nodes").innerHTML = nodes.map((n, i) => {
-      const ok = reachable(n);
-      const divider = i === firstOther && i > 0
-        ? '<tr class="group-row"><td colspan="9" class="muted small">Not polled</td></tr>' : "";
-      return `${divider}<tr class="${ok ? "" : "dim"}">
-        <td><input type="checkbox" data-node="${esc(n.node_id)}" ${chosen.has(n.node_id) ? "checked" : ""} ${ok ? "" : "disabled"} aria-label="Poll ${esc(n.name)}"></td>
-        <td><strong>${esc(n.name)}</strong><div class="muted small mono">${esc(n.node_id.slice(0, 8))}…${n.uptime_secs ? ` · up ${Math.floor(n.uptime_secs / 86400)} d` : ""}${(config.poll_intervals || {})[n.node_id] ? ` · ${everyText(config.poll_intervals[n.node_id])}` : ""}${keyBadge(n)}</div></td>
-        <td>${routeCell(n)}</td>
-        <td>${saved.has(n.node_id) && ok ? whoCell(n) : ""}</td>
-        <td>${ago(n.last_seen)}</td>
-        <td>${ok || n.role ? loginCell(n) : ""}</td>
-        <td>${ok ? batteryCell(n) : ""}</td>
-        <td class="temp-col" ${showTemp ? "" : "hidden"}>${ok ? tempCell(n) : ""}</td>
-        <td><button class="button ghost small" type="button" data-details="${esc(n.node_id)}" ${ok ? "" : "disabled"} aria-label="Details for ${esc(n.name)}">Details</button></td></tr>`;
-    }).join("") || '<tr><td colspan="9" class="muted">No repeaters heard yet.</td></tr>';
-    $("reach-note").textContent = maxHops()
+      (reachable(b) - reachable(a)) || (hopsOf(a) - hopsOf(b)) || ((b.snr ?? -99) - (a.snr ?? -99)));
+    const polled = nodes.filter((n) => saved.has(n.node_id));
+    const rest = nodes.filter((n) => !saved.has(n.node_id));
+    const usable = polled.filter(reachable);
+    const you = usable.filter(polledByYou), others = usable.filter(polledByOthers);
+    const attention = polled.filter(trouble);
+
+    const counts = { all: polled.length, you: you.length, other: others.length, attention: attention.length };
+    const names = { all: "All", you: "You poll", other: "Others poll", attention: "Needs attention" };
+    $("filters").innerHTML = Object.keys(names).map((k) =>
+      `<button type="button" class="chip" data-f="${k}" aria-pressed="${filter === k}">${names[k]} ${counts[k]}</button>`).join("");
+
+    const q = query.trim().toLowerCase();
+    const found = (n) => !q || String(n.name || "").toLowerCase().includes(q) || n.node_id.startsWith(q);
+    const inFilter = { all: polled, you, other: others, attention }[filter];
+    const shown = inFilter.filter(found);
+    const hidden = rest.filter(found);
+    $("nodes").innerHTML = shown.map((n) => rowHtml(n, chosen.has(n.node_id), true)).join("")
+      || `<p class="muted empty">${!nodes.length ? "No repeaters heard yet."
+        : q || polled.length ? "Nothing here right now."
+          : "No repeaters selected yet. Tick some under Not polled."}</p>`;
+
+    const box = $("others");
+    box.hidden = filter !== "all" || !hidden.length;
+    $("others-count").textContent = String(hidden.length);
+    $("others-list").innerHTML = hidden.map((n) => rowHtml(n, chosen.has(n.node_id), false)).join("");
+    if (q) box.open = true;
+    else if (!polled.length && !othersOpened && rest.length) { box.open = true; othersOpened = true; }
+
+    const stopped = !!gate() || !config.enabled;
+    const next = you.map((n) => n.community.next_at).filter(Boolean).sort((a, b) => a - b)[0];
+    $("g-you").textContent = stopped ? 0 : you.length;
+    $("g-others").textContent = stopped ? 0 : others.length;
+    $("g-attention").textContent = attention.length;
+    $("g-next").textContent = stopped || !next ? "—" : hhmm(Math.max(next, Date.now() / 1000));
+
+    $("reach-note").textContent = `${chosen.size} selected. ` + (maxHops()
       ? "Repeaters heard direct, or through one relay you hear directly."
-      : "Only repeaters heard directly (zero hops) can be selected. Set Reach to \"Up to 1 hop\" for more.";
+      : "Only repeaters heard directly (zero hops) can be selected. Set Reach to \"Direct and 1 hop\" for more.");
+
+    if (refocus) {
+      const el = document.querySelector(refocus);
+      if (el) el.focus({ preventScroll: true });
+    }
   }
 
   function collect() {
@@ -561,11 +697,7 @@
     config.interval_minutes = Number($("interval_minutes").value);
     config.status_every_hours = Number($("status_every_hours").value);
     config.brokers = [...document.querySelectorAll("[data-broker]")].filter((el) => el.checked).map((el) => el.dataset.broker);
-    // Targets with a row take its tick; one just added has no row until saved.
-    const boxes = [...document.querySelectorAll("[data-node]")];
-    const shown = new Set(boxes.map((el) => el.dataset.node));
-    config.targets = [...boxes.filter((el) => el.checked).map((el) => el.dataset.node),
-      ...(config.targets || []).filter((k) => !shown.has(k))];
+    config.targets = [...chosenSet()];
     config.alternative_routes = $("alternative_routes").checked;
     config.guest_key_default = $("guest_key_default").checked;
     config.max_hops = maxHops();
@@ -637,9 +769,8 @@
 
   const nodeName = (id) => (((runtime.nodes || []).find((x) => x.node_id === id)) || {}).name || id.slice(0, 8);
 
-  // Test one repeater, live in its dialog (the page's notice bar is hidden by
-  // the modal): each step the plugin takes, then the answer and whether it
-  // reached CoreScope.
+  // Test one repeater, live in its panel: each step the plugin takes, then the
+  // answer and whether it reached CoreScope.
   async function test(nodeId) {
     const run = ++testRun;
     const current = () => run === testRun;
@@ -647,6 +778,7 @@
     const v = liveView($("test-status"));
     const btn = $("test-now");
     btn.disabled = true;
+    testBusy = true;
     const t0 = Date.now();
     let last = { steps: [] };
     let finished = false;
@@ -668,7 +800,7 @@
       if (!current()) return;
       last = a;
       finished = true;
-      if (a.ok === false && a.message) { v.title(esc(a.message)); v.finish("warn"); return; }
+      if (a.ok === false && a.message) { v.title(esc(skipText(a.message))); v.finish("warn"); return; }
       draw();
       v.title(((a.code === "ok" || a.code === "no_battery") && !a.covered ? "Answered — " : "") + esc(pollText(a)));
       v.foot(corescopeText(a.corescope));
@@ -679,7 +811,7 @@
       v.finish(e.aborted ? "warn" : "bad");
     } finally {
       clearInterval(timer);
-      if (current()) btn.disabled = !!testBlock(nodeId);
+      if (current()) { testBusy = false; btn.disabled = !!testBlock(nodeId); }
     }
   }
 
@@ -691,7 +823,8 @@
   }
 
   // Check now first asks what to poll: just the stale repeaters (no reading in
-  // the last hour) or all of them; runCheck does the chosen one.
+  // the last hour) or all of them; runCheck does the chosen one. Its panel sits
+  // under the header, so it can be watched from any tab.
   function checkNow() {
     const panel = $("check-progress");
     if (dirty) { panelNote(panel, "Save first, so the check uses your selection.", "warn"); return; }
@@ -699,13 +832,14 @@
     if (gate()) { panelNote(panel, `${esc(gate().text)}. Check now is off.`, gateKind(gate())); return; }
     panelNote(panel, "<strong>Check which repeaters?</strong>");
     panel.insertAdjacentHTML("beforeend", '<div class="cp-choice">'
-      + '<button type="button" class="button ghost small" data-check="stale">Only stale <span class="muted small">(no fresh reading from anyone; standby left alone)</span></button>'
+      + '<button type="button" class="button ghost small" data-check="stale">Only stale <span class="muted small">(no fresh reading from anyone; backups left alone)</span></button>'
       + '<button type="button" class="button ghost small" data-check="all">All of them <span class="muted small">(within CoreScope\'s request limit)</span></button></div>');
   }
 
   async function runCheck(scope) {
     const nTargets = (config.targets || []).length;
     const v = liveView($("check-progress"));
+    checking = true;
     $("check-now").disabled = true;
     // Drawn from the plugin's snapshot: a row per repeater actually polled,
     // filled in (with CoreScope's confirmation) as each streams back.
@@ -715,7 +849,7 @@
       const nSkipped = prog.filter((p) => p.skipped).length;
       v.title(`<strong>Checking ${total} repeater${total === 1 ? "" : "s"}…</strong> <span class="muted small">${prog.length - nSkipped} asked · ${nSkipped} skipped · up to a minute each</span>`);
       v.body(prog.map((p) => {
-        if (p.skipped) return progressRow(p.name || nodeName(p.node_id), `Skipped: ${esc(p.message || p.skipped)}`, "skip");
+        if (p.skipped) return progressRow(p.name || nodeName(p.node_id), `Skipped: ${esc(skipText(p.message || p.skipped))}`, "skip");
         const cs = corescopeText(p.corescope);
         return progressRow(p.name || nodeName(p.node_id), esc(pollText(p)) + (cs ? ` <span class="muted small">· ${esc(cs)}</span>` : ""), pollKind(p));
       }).join(""));
@@ -727,14 +861,15 @@
       draw(a);
       const prog = a.progress || [];
       const nSkipped = prog.filter((p) => p.skipped).length;
-      v.title(a.skipped && !prog.length ? esc(a.message || "")
-        : `<strong>Checked ${prog.length} repeater${prog.length === 1 ? "" : "s"}.</strong> <span class="muted small">${prog.length - nSkipped} asked · ${nSkipped} skipped · ${esc(a.message || "")}</span>`);
+      v.title(a.skipped && !prog.length ? esc(skipText(a.message))
+        : `<strong>Checked ${prog.length} repeater${prog.length === 1 ? "" : "s"}.</strong> <span class="muted small">${prog.length - nSkipped} asked · ${nSkipped} skipped · ${esc(skipText(a.message))}</span>`);
       v.finish(a.ok === false ? (a.skipped ? gateKind({ reason: a.skipped }) : "bad") : "");
     } catch (e) {
       v.title(e.aborted ? "Stopped watching. Repeaters already queued finish in the background." : esc(e.message));
       v.finish(e.aborted ? "warn" : "bad");
     } finally {
-      $("check-now").disabled = false;
+      checking = false;
+      $("check-now").disabled = !!gate();
     }
   }
 
@@ -761,15 +896,15 @@
   }
 
   const ROLE_TEXT = {
-    polling: ["Polling", "good"], standby: ["Standby", "neutral"], independent: ["Independent", "neutral"],
+    polling: ["Polling", "good"], standby: ["Backup", "neutral"], independent: ["Independent", "neutral"],
     excluded: ["Excluded", "neutral"], paused: ["Paused", "bad"], version_disabled: ["Version disabled", "warn"],
     blocked: ["Blocked", "bad"], stale: ["Stale claim", "neutral"],
   };
   let monitorsRun = 0;
 
-  // The Details dialog's Community block: every observer that claims this
-  // repeater, from CoreScope's /api/nodes/{pk}/monitors (asked through the
-  // plugin, like the CoreScope search).
+  // The panel's Who polls it list: every observer that claims this repeater,
+  // from CoreScope's /api/nodes/{pk}/monitors (asked through the plugin, like
+  // the CoreScope search).
   async function loadMonitors(nodeId) {
     const run = ++monitorsRun;
     const block = $("community-block");
@@ -781,17 +916,17 @@
       note.textContent = "Save the page first to see who else monitors it.";
       return;
     }
-    body.innerHTML = '<tr><td colspan="4" class="muted">Asking CoreScope…</td></tr>';
+    body.innerHTML = '<span class="muted small">Asking CoreScope…</span>';
     note.textContent = "";
     try {
       const id = await request("monitors", nodeId);
       const a = await waitForAction("monitors", id, 30000, null, () => run !== monitorsRun);
       if (run !== monitorsRun || detailsTarget !== nodeId) return;
-      if (a.ok === false) { body.innerHTML = `<tr><td colspan="4" class="muted">${esc(a.message)}</td></tr>`; return; }
+      if (a.ok === false) { body.innerHTML = `<span class="muted small">${esc(a.message)}</span>`; return; }
       renderMonitors(nodeId, a.monitors || {});
     } catch (e) {
       if (run !== monitorsRun || e.aborted) return;
-      body.innerHTML = `<tr><td colspan="4" class="muted">${esc(e.message)}</td></tr>`;
+      body.innerHTML = `<span class="muted small">${esc(e.message)}</span>`;
     }
   }
 
@@ -805,18 +940,18 @@
       const route = hops ? `1 hop${via ? " via " + esc(via) : ""}` : "Direct";
       const [label, kind] = ROLE_TEXT[r.role] || [r.role || "—", "neutral"];
       const last = r.last_reading ? ago(Date.parse(r.last_reading) / 1000) : "never";
-      return `<tr><td>${esc(r.name || String(r.observer_id || "").slice(0, 8))}${mine ? ' <span class="muted small">(this one)</span>' : ""}</td>
-        <td>${route}</td><td><span class="pill ${kind}">${esc(label)}</span></td><td>${last}</td></tr>`;
-    }).join("") || '<tr><td colspan="4" class="muted">No observer claims this repeater yet.</td></tr>';
+      return `<div class="obs"><span>${mine ? "This station" : esc(r.name || String(r.observer_id || "").slice(0, 8))} <span class="muted small">${route}</span>
+        <span class="sub">Last reading ${last}</span></span><span class="pill ${kind}">${esc(label)}</span></div>`;
+    }).join("") || '<span class="muted small">No observer claims this repeater yet.</span>';
     const p = community().policy || {};
     const notes = [];
     const meRow = rows.find((r) => me && String(r.observer_id || "").toLowerCase() === me.toLowerCase());
     const poller = rows.find((r) => r.role === "polling");
     if (meRow && meRow.role === "standby" && poller) {
       const w = (m.window_s || 0) + (p.grace_s || 0);
-      notes.push(`This observer steps in if ${poller.name || "the poller"}'s newest reading is older than ${dur(w)} (window plus grace), or once ${poller.name || "it"} misses ${p.takeover_after || 2} windows in a row.`);
+      notes.push(`This observer steps in if ${poller.name || "the poller"}'s newest reading is older than ${dur(w)} (window plus backup wait), or once ${poller.name || "it"} misses ${p.takeover_after || 2} windows in a row.`);
     } else if (meRow && meRow.role === "polling") {
-      notes.push("This observer polls it; any others stand by.");
+      notes.push("This observer polls it; any others are backups.");
     }
     if (m.paused) notes.push("Polling is paused by CoreScope.");
     if (m.excluded) notes.push("CoreScope excludes this repeater.");
@@ -824,23 +959,52 @@
     $("monitors-note").textContent = notes.join(" ");
   }
 
-  function openDetails(nodeId) {
-    detailsTarget = nodeId;
-    const n = (runtime.nodes || []).find((x) => x.node_id === nodeId);
-    if (!n) return;
-    $("details-title").textContent = n.name;
-    $("test-status").hidden = true;  // clear any result from a previous test
+  // What the panel reports, refreshed with each runtime read. The form below it
+  // is left alone, so a refresh can't touch a half-made change.
+  function fillFacts(n) {
+    const best = orderedRoutes(n)[0];
+    const notes = [];
+    if (n.retried && n.last_route_label && n.code === "ok") notes.push(`last answered ${esc(n.last_route_label)}`);
+    const alt = orderedRoutes(n).length - 1;
+    if (alt > 0) notes.push(`${alt} other route${alt > 1 ? "s" : ""}`);
+    const facts = [["Battery", batteryFact(n)], ["Temperature", tempText(n)],
+      ["Route", routeText(n) + (notes.length ? ` · ${notes.join(" · ")}` : "")]];
+    if (best && snrText(best.snr)) facts.push(["Signal", `${Number(best.snr).toFixed(1)} dB SNR`]);
+    facts.push(["Login", loginText(n)], ["Last heard", ago(n.last_seen)]);
+    if (n.uptime_secs) facts.push(["Uptime", `${Math.floor(n.uptime_secs / 86400)} d`]);
+    $("details-facts").innerHTML = facts.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+    const [kind, tag, line] = whoLine(n);
+    $("details-who").innerHTML = `<span class="pill ${kind}">${esc(tag)}</span><span class="sub">${esc(line)}</span>`;
+    $("node-packets").innerHTML = packetItems(n.packets);
+    $("routes").innerHTML = orderedRoutes(n).map((r, i) => `<div class="obs"><span>${i + 1}. ${routeName(r)}
+        <span class="sub">${r.adverts} advert${r.adverts === 1 ? "" : "s"}${r.snr == null ? "" : ` · ${Number(r.snr).toFixed(1)} dB SNR`}</span></span>
+      <span>${routeResult(n, r, i)}</span></div>`).join("") || '<span class="muted small">No usable route.</span>';
+  }
+
+  function guestStateText(n) {
+    const el = $("guest-state");
+    if (pwSetFor(n)) el.textContent = "Off while a password is saved here.";
+    else if (n.shared_admin_seen) el.textContent = "Stopped: it answered as admin.";
+    else if (guestUseDefault || (config.guest_key_overrides || {})[n.node_id] === undefined) el.textContent = "Following the default.";
+    else el.textContent = "Overridden. The default no longer changes this repeater.";
+  }
+
+  // The panel's form, from what's saved. Used on opening, and after Apply or
+  // Clear overrides changed what's saved.
+  function fillForm(n) {
+    const nodeId = n.node_id;
     $("login-password").value = "";
     $("remove-password").checked = false;
     const pending = passwordUpdates[nodeId];
-    $("remove-password").disabled = !(pending !== undefined ? pending : n.password_set);
+    const pwSet = pwSetFor(n);
+    $("remove-password").disabled = !pwSet;
     // Show whether a password is saved: the field is write-only (always blank),
     // so without this the operator can't tell a save worked. "" pending is a
     // queued removal; a non-empty string is a queued new password.
     const pwState = $("password-state");
     if (pending === "") { pwState.textContent = "Removing the password didn't save — press Apply to retry."; pwState.className = "password-state small"; }
     else if (pending) { pwState.textContent = "The new password didn't save — press Apply to retry."; pwState.className = "password-state small"; }
-    else if (n.password_set) { pwState.textContent = "✓ A password is saved. Leave blank to keep it, type to replace it, or tick Remove."; pwState.className = "password-state small saved"; }
+    else if (pwSet) { pwState.textContent = "✓ A password is saved. Leave blank to keep it, type to replace it, or tick Remove."; pwState.className = "password-state small saved"; }
     else { pwState.textContent = "No password saved — logs in blank (guest or ACL)."; pwState.className = "password-state small muted"; }
     $("remove-manual").hidden = !n.manual;
     $("temp-this").checked = tempSet().has(nodeId);
@@ -860,27 +1024,25 @@
       if (!o.dataset.label) o.dataset.label = o.textContent;
       const tooFast = floorMin && Number(o.value) < floorMin;
       o.disabled = !!tooFast && o.value !== $("node-interval").value;
-      o.textContent = o.dataset.label + (tooFast ? " — faster than CoreScope allows" : "");
+      o.textContent = o.dataset.label + (tooFast ? " (faster than allowed)" : "");
     });
     const blocked = testBlock(nodeId);
-    $("test-now").disabled = !!blocked;
+    $("test-now").disabled = !!blocked || testBusy;
     $("test-gate").hidden = !blocked;
     $("test-gate").textContent = blocked ? `Test is off: ${blocked}.` : "";
-    loadMonitors(nodeId);
-    $("temp-last").textContent = n.temperature_c != null ? `Last: ${Number(n.temperature_c).toFixed(1)} °C, ${ago(n.temp_at)}`
-      : n.temp_misses >= 3 ? "None reported so far" : "";
+    $("temp-last").textContent = n.temperature_c != null ? `Last: ${Number(n.temperature_c).toFixed(1)} °C, ${ago(n.temp_at)}.`
+      : n.temp_misses >= 3 ? "None reported so far." : "";
 
     // Shared-key opt-in: offered whenever a CoreScope address is set. The key
     // is only fetched once a repeater is opted in, so this must not wait for a
     // fetched key — otherwise the first repeater could never be opted in. A
     // saved password blocks it; an earlier admin answer stops it until cleared.
-    const sk = runtime.shared_key || {};
-    const pwSet = pending !== undefined ? !!pending : n.password_set;
     $("shared-block").hidden = !(runtime.corescope && runtime.corescope.url);
     $("shared-this").checked = guestFor(nodeId);
     guestShown = guestFor(nodeId);
     guestUseDefault = false;
     $("guest-use-default").hidden = (config.guest_key_overrides || {})[nodeId] === undefined;
+    guestStateText(n);
     const gp = (config.guest_passwords || {})[nodeId];
     $("guest-password").value = gp === undefined ? "auto" : gp;
     $("guest-pw-state").textContent = n.guest_password === "hello" ? "✓ Last logged in with hello."
@@ -892,17 +1054,53 @@
     const adminWarn = $("shared-admin-warn");
     if (n.shared_admin_seen) {
       adminWarn.hidden = false;
-      adminWarn.textContent = `This repeater answered the shared key as ADMIN. The shared key is stopped here and the key's access was ${n.shared_admin_removed ? "removed automatically" : "NOT removed — ask the owner to run setperm 0"}.`;
+      adminWarn.textContent = `This repeater answered the guest key as ADMIN. The guest key is stopped here and the key's access was ${n.shared_admin_removed ? "removed automatically" : "NOT removed — ask the owner to run setperm 0"}.`;
     } else {
       adminWarn.hidden = true;
     }
-    $("node-packets").innerHTML = packetRows(n.packets, false);
-    const routes = orderedRoutes(n);
-    $("routes").innerHTML = routes.map((r, i) => {
-      const last = routeResult(n, r, i);
-      return `<tr><td class="muted">${i + 1}</td><td>${routeName(r)}</td><td>${r.adverts}</td><td>${r.snr == null ? "—" : `${Number(r.snr).toFixed(1)} dB`}</td><td>${last}</td></tr>`;
-    }).join("") || '<tr><td colspan="5" class="muted">No usable route.</td></tr>';
-    $("details-dialog").showModal();
+  }
+
+  function openDetails(nodeId) {
+    const n = (runtime.nodes || []).find((x) => x.node_id === nodeId);
+    if (!n) return;
+    detailsTarget = nodeId;
+    testRun++;  // a Test watched in the panel stops with the panel's repeater
+    testBusy = false;
+    $("details-title").textContent = n.name;
+    $("details-id").textContent = `${nodeId.slice(0, 8)}…`;
+    $("test-status").hidden = true;  // clear any result from a previous test
+    applyStatus("");
+    $("work").classList.add("open");
+    $("details").hidden = false;
+    fillForm(n);
+    fillFacts(n);
+    loadMonitors(nodeId);
+    renderRepeaters();
+    $("details").scrollTop = 0;
+    // Stacked on a phone, the panel is below a list that may be long.
+    if (window.matchMedia("(max-width: 900px)").matches) $("details").scrollIntoView({ block: "start" });
+    $("details-title").focus({ preventScroll: true });
+  }
+
+  // Closing the panel abandons a Test that is still being watched. Unapplied
+  // changes in it are dropped, as Close always did.
+  function closeDetails() {
+    const id = detailsTarget;
+    testRun++;
+    monitorsRun++;
+    testBusy = false;
+    detailsTarget = null;
+    $("details").hidden = true;
+    $("work").classList.remove("open");
+    renderRepeaters();
+    const row = id && document.querySelector(`[data-details="${id}"]`);
+    if (row) row.focus();
+  }
+
+  function applyStatus(text, kind) {
+    const el = $("apply-status");
+    el.textContent = text || "";
+    el.className = "small " + (kind || "");
   }
 
   // routeResult: the route's latest outcome and when.
@@ -922,17 +1120,20 @@
   }
 
   $("details-form").addEventListener("submit", (ev) => {
+    ev.preventDefault();
     // Enter in the password box submits with the first button, which is Apply.
     const action = (ev.submitter && ev.submitter.value) || "save";
-    if (!detailsTarget || action === "cancel") return;  // dialog closes, nothing saved
-    if (action === "test") { ev.preventDefault(); test(detailsTarget); return; }  // stays open for the live test
-    const node = (runtime.nodes || []).find((x) => x.node_id === detailsTarget) || {};
+    if (!detailsTarget) return;
+    if (action === "test") { test(detailsTarget); return; }
+    const id = detailsTarget;
+    const node = (runtime.nodes || []).find((x) => x.node_id === id) || {};
     if (action === "remove") {
-      if (!node.manual) { ev.preventDefault(); return; }  // only repeaters you added can be removed
-      const id = detailsTarget;
+      if (!node.manual) return;  // only repeaters you added can be removed
       config.manual_repeaters = manualList().filter((m) => m.node_id !== id);
-      config.targets = (config.targets || []).filter((k) => k !== id);
-      document.querySelectorAll(`[data-node="${id}"]`).forEach((el) => { el.checked = false; });
+      const left = new Set(chosenSet());
+      left.delete(id);
+      pendingTargets = left;
+      closeDetails();
     } else {  // Apply: stage this repeater's password / temperature / shared-key choices
       const guest = !$("shared-this").disabled && $("shared-this").checked;
       if (guest) {
@@ -940,32 +1141,43 @@
         // a plain setting; the companion password box is hidden and ignored.
         const gps = { ...(config.guest_passwords || {}) };
         const v = $("guest-password").value;
-        if (v === "auto") delete gps[detailsTarget]; else gps[detailsTarget] = v;
+        if (v === "auto") delete gps[id]; else gps[id] = v;
         config.guest_passwords = gps;
       } else {
         const pw = $("login-password").value;
-        if ($("remove-password").checked) passwordUpdates[detailsTarget] = "";
-        else if (pw) passwordUpdates[detailsTarget] = pw;
+        if ($("remove-password").checked) passwordUpdates[id] = "";
+        else if (pw) passwordUpdates[id] = pw;
       }
       const pis = { ...(config.poll_intervals || {}) };
       const iv = $("node-interval").value;
-      if (iv === "default") delete pis[detailsTarget]; else pis[detailsTarget] = Number(iv);
+      if (iv === "default") delete pis[id]; else pis[id] = Number(iv);
       config.poll_intervals = pis;
       const temps = new Set(tempSet());
-      if ($("temp-this").checked) temps.add(detailsTarget); else temps.delete(detailsTarget);
+      if ($("temp-this").checked) temps.add(id); else temps.delete(id);
       tempTargets = temps;
       // Only a choice made here becomes an override; opening and applying
-      // the dialog leaves a repeater following the default.
+      // the panel leaves a repeater following the default.
       const ovs = { ...(config.guest_key_overrides || {}) };
-      if (guestUseDefault) delete ovs[detailsTarget];
-      else if (!$("shared-this").disabled && $("shared-this").checked !== guestShown) ovs[detailsTarget] = $("shared-this").checked;
+      if (guestUseDefault) delete ovs[id];
+      else if (!$("shared-this").disabled && $("shared-this").checked !== guestShown) ovs[id] = $("shared-this").checked;
       config.guest_key_overrides = ovs;
       showClearOverrides();
+      applyStatus("Saving…");
     }
-    // Save straight away — the repeater's own dialog shouldn't need a second
-    // trip to the page's Save bar. The dialog closes (method="dialog"); a
-    // failure keeps the edits staged (dirty) and says so by the Save bar.
-    saveAll().catch((e) => { dirty = true; saveStatus(`Not saved: ${e.message}`, "bad"); });
+    // Save straight away — the repeater's own panel shouldn't need a second
+    // trip to the Save bar. The panel stays open; a failure keeps the edits
+    // staged (dirty) and says so here and in the Save bar.
+    saveAll().then(() => {
+      const open = (runtime.nodes || []).find((x) => x.node_id === id);
+      if (detailsTarget !== id || !open) return;
+      fillForm(open);
+      fillFacts(open);
+      applyStatus("Saved.", "good");
+    }).catch((e) => {
+      dirty = true;
+      saveStatus(`Not saved: ${e.message}`, "bad");
+      if (detailsTarget === id) applyStatus(`Not saved: ${e.message}`, "bad");
+    });
   });
   // A guest-key repeater uses the guest password (blank or hello); the
   // companion-key password only matters when the guest key is off.
@@ -979,43 +1191,89 @@
     const n = Object.keys(config.guest_key_overrides || {}).length;
     $("clear-overrides").hidden = !n;
     $("clear-overrides").textContent = `Clear overrides (${n})`;
+    $("ov-text").textContent = n ? `${n} repeater${n === 1 ? "" : "s"} overridden.` : "No repeaters overridden.";
   }
-  $("clear-overrides").addEventListener("click", (e) => {
-    e.preventDefault();  // it sits inside the setting's label
+  $("clear-overrides").addEventListener("click", () => {
     config.guest_key_overrides = {};
     showClearOverrides();
-    saveAll().catch((err) => { dirty = true; saveStatus(`Not saved: ${err.message}`, "bad"); });
+    saveAll().then(() => {
+      const open = (runtime.nodes || []).find((x) => x.node_id === detailsTarget);
+      if (open) fillForm(open);
+    }).catch((err) => { dirty = true; saveStatus(`Not saved: ${err.message}`, "bad"); });
   });
   $("guest-use-default").addEventListener("click", () => {
     guestUseDefault = true;
     $("shared-this").checked = guestDefault();
     $("guest-use-default").hidden = true;
+    const open = (runtime.nodes || []).find((x) => x.node_id === detailsTarget);
+    if (open) guestStateText(open);
     showPasswordBlock();
   });
-  // Closing the dialog abandons a Test that is still being watched.
-  $("details-dialog").addEventListener("close", () => { testRun++; monitorsRun++; });
+  $("details-close").addEventListener("click", closeDetails);
+  $("details").addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeDetails(); });
+
+  function showView(name) {
+    view = name;
+    document.querySelectorAll("[data-view]").forEach((b) => {
+      const on = b.dataset.view === name;
+      b.setAttribute("aria-selected", String(on));
+      b.tabIndex = on ? 0 : -1;
+      $(`v-${b.dataset.view}`).hidden = !on;
+    });
+    if (saveMsg.kind === "good") saveMsg = {};
+    updateSaveBar();
+  }
+  document.querySelector("nav.views").addEventListener("keydown", (ev) => {
+    if (ev.key !== "ArrowRight" && ev.key !== "ArrowLeft") return;
+    const tabs = [...document.querySelectorAll("[data-view]")];
+    const at = tabs.findIndex((b) => b.dataset.view === view);
+    const next = tabs[(at + (ev.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+    showView(next.dataset.view);
+    next.focus();
+  });
+  $("add-toggle").addEventListener("click", () => {
+    const form = $("add-form");
+    form.hidden = !form.hidden;
+    $("add-toggle").setAttribute("aria-expanded", String(!form.hidden));
+    if (!form.hidden) $("add-query").focus();
+  });
+  $("search").addEventListener("input", () => { query = $("search").value; renderRepeaters(); });
 
   document.addEventListener("click", (ev) => {
-    const t = ev.target;
-    if (t.dataset.details) openDetails(t.dataset.details);
+    const t = ev.target.closest("[data-details], [data-add], [data-f], [data-view]");
+    if (!t) return;
+    if (t.dataset.details) { if (t.dataset.details === detailsTarget) closeDetails(); else openDetails(t.dataset.details); }
     else if (t.dataset.add) addManual(t.dataset.add, t.dataset.name);
+    else if (t.dataset.f) { filter = t.dataset.f; renderRepeaters(); }
+    else showView(t.dataset.view);
   });
-  document.addEventListener("change", (ev) => {
-    if (ev.target.closest("dialog")) return;
-    if (ev.target.matches("input, select")) {
-      dirty = true;
-      if (ev.target.name === "max_hops") render();
+  // The panel saves by itself (Apply), and the two search boxes aren't settings.
+  function noteEdit(ev) {
+    const el = ev.target;
+    if (el.closest("#details, #add-query, #search") || !el.matches("input, select")) return;
+    dirty = true;
+    if (el.dataset.node) {
+      const picked = new Set(chosenSet());
+      if (el.checked) picked.add(el.dataset.node); else picked.delete(el.dataset.node);
+      pendingTargets = picked;
+      renderRepeaters();
+    } else if (el.id === "max_hops") {
+      render();
     }
-  });
+    updateSaveBar();
+  }
+  document.addEventListener("input", noteEdit);
+  document.addEventListener("change", noteEdit);
   function addManual(nodeId, name) {
     nodeId = String(nodeId || "").toLowerCase();
     if (!KEY_RE.test(nodeId)) { notice("That isn't a 64-character repeater key.", "warn"); return; }
     if (!manualList().some((m) => m.node_id === nodeId)) config.manual_repeaters = [...manualList(), { node_id: nodeId, name: name || nodeId.slice(0, 8) }];
-    if (!(config.targets || []).includes(nodeId)) config.targets = [...(config.targets || []), nodeId];
+    pendingTargets = new Set(chosenSet()).add(nodeId);
     $("add-results").innerHTML = "";
     $("add-query").value = "";
     dirty = true;
-    notice(`Save to add ${name || nodeId.slice(0, 8)}. It is treated as heard direct; Details shows its routes once saved.`, "good");
+    updateSaveBar();
+    notice(`Save to add ${name || nodeId.slice(0, 8)}. It is treated as heard direct; its details show its routes once saved.`, "good");
   }
 
   $("add-form").addEventListener("submit", async (ev) => {
@@ -1043,6 +1301,7 @@
   });
 
   $("connect").addEventListener("click", connect);
+  $("connect-top").addEventListener("click", connect);
   $("check-now").addEventListener("click", checkNow);
   $("check-progress").addEventListener("click", (e) => {
     const choice = e.target.closest("[data-check]");
@@ -1064,23 +1323,41 @@
     }
   });
   // A status line beside the Save button: the sticky bar is always on screen,
-  // unlike the notice at the top of the page.
+  // unlike the notice at the top of the page. Off the Settings tab the bar shows
+  // only while there's something to save or to say.
   function saveStatus(text, kind) {
+    saveMsg = { text, kind };
+    clearTimeout(saveMsgTimer);
+    if (kind === "good") {
+      saveMsgTimer = setTimeout(() => {
+        if (view !== "settings" && saveMsg.kind === "good") { saveMsg = {}; updateSaveBar(); }
+      }, 4000);
+    }
+    updateSaveBar();
+  }
+  function updateSaveBar() {
+    const busy = saveMsg.kind === "busy";
+    const said = saveMsg.text && (busy || saveMsg.kind === "bad" || !dirty);
     const el = $("save-status");
-    el.textContent = text || "";
-    el.className = "small " + (kind || "");
+    el.textContent = said ? saveMsg.text : dirty ? "Unsaved changes" : "No unsaved changes";
+    el.className = `small ${said ? saveMsg.kind : "muted"}`;
+    $("save").disabled = busy || (!dirty && saveMsg.kind !== "bad");
+    $("savebar").hidden = view !== "settings" && !dirty && !saveMsg.text;
   }
 
   // saveAll persists everything pending (page settings + any staged per-repeater
   // password/temperature/shared changes). Used by the page's Save bar and by
-  // the details dialog's Apply.
+  // the details panel's Apply.
   async function saveAll() {
     collect();
     const extra = Object.keys(passwordUpdates).length ? { password_updates: passwordUpdates } : {};
-    saveStatus("Saving…");
+    saveStatus("Saving…", "busy");
     await saveConfig(extra);
+    const at = Date.now();
+    Object.entries(passwordUpdates).forEach(([id, pw]) => { pwApplied[id] = { set: !!pw, at }; });
     passwordUpdates = {};
     tempTargets = null;
+    pendingTargets = null;
     dirty = false;
     saveStatus("Saved.", "good");
     refresh();  // show the saved state (e.g. "password set") straight away
@@ -1094,10 +1371,17 @@
     try {
       await loadRuntime();
       if (!dirty) await loadConfig();
+      // The plugin picks a saved password up shortly; give it a minute.
+      Object.keys(pwApplied).forEach((id) => {
+        const node = (runtime.nodes || []).find((x) => x.node_id === id);
+        if (!node || !!node.password_set === pwApplied[id].set || Date.now() - pwApplied[id].at > 60000) delete pwApplied[id];
+      });
       render();
-      // Keep an open repeater dialog's packet list current.
-      const open = $("details-dialog").open && (runtime.nodes || []).find((x) => x.node_id === detailsTarget);
-      if (open) $("node-packets").innerHTML = packetRows(open.packets, false);
+      // Keep an open repeater panel current; drop it if the repeater has gone.
+      if (detailsTarget) {
+        const open = (runtime.nodes || []).find((x) => x.node_id === detailsTarget);
+        if (open) fillFacts(open); else closeDetails();
+      }
     } catch (e) {
       notice(e.message, "bad");
     }

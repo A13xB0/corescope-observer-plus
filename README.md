@@ -28,7 +28,7 @@ repeater, and the others stand by.
   an hour), dropping to the normal interval after 9 misses in a row.
 - With "Try an alternative route" on, the tries go round the routes heard in
   adverts; the route that last answered goes first.
-- Temperature, switched on per repeater in its Details: a telemetry request
+- Temperature, switched on per repeater in its details panel: a telemetry request
   (type `0x03`) after status, reading the chip temperature guests get on ESP32
   and nRF52 boards. A repeater that reports none 3 times is asked once a day.
 - Every reading carries the status reply's counters (uptime, noise floor,
@@ -42,8 +42,8 @@ repeater, and the others stand by.
 
 A repeater can be polled under a shared, public guest identity instead of this
 observer's own key, so any observer that hears the reply can feed CoreScope.
-On by default (Poll with the guest key, under Polling); a repeater set by hand in its Details keeps
-its own choice and shows Overridden.
+On by default (Poll with the guest key, under Settings, Polling); a repeater set by hand in its
+details panel keeps its own choice and shows Overridden.
 
 The plugin keeps no key of its own: it fetches the shared key from CoreScope
 (`GET /api/shared-guest/key` on `corescope_url`). When CoreScope serves a key,
@@ -113,7 +113,21 @@ it logs a warning at startup and is never set from the page.
 ```
 
 Install the wheel from openHop's Plugins page, open **CoreScope Observer Plus**, press
-**Connect**, tick the repeaters and brokers, enable polling and save.
+**Connect**, tick repeaters under **Not polled**, then pick brokers and enable polling
+in **Settings** and save.
+
+## The page
+
+A header shows the plugin's status and **Check now**, with any pause, block or upgrade
+notice below it, then four figures: you poll, others poll, need attention, next request.
+
+- **Repeaters**: each selected repeater with its battery and who polls it, filtered by
+  All, You poll, Others poll or Needs attention. The rest wait under Not polled, with a
+  search box and tick boxes to select them; Add repeater finds one by CoreScope search
+  or key. Clicking a repeater opens its details beside the list (stacked on a phone):
+  who polls it, key and passwords, schedule, Test now, routes and recent packets.
+- **Activity**: the last 20 packets sent, and what came back.
+- **Settings**: Polling, Community, Publish to and Connection.
 
 ## Routes
 
