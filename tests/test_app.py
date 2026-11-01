@@ -6,7 +6,7 @@ import yaml
 
 from fake_companion import FakeCompanion
 from openhop_corescope_observer_plus import app as app_mod
-from openhop_corescope_observer_plus import corescope
+from openhop_corescope_observer_plus import corescope, guest_poll
 from openhop_corescope_observer_plus.app import App
 from openhop_corescope_observer_plus.models import Neighbour
 from openhop_corescope_observer_plus.openhop_config import load_openhop_config
@@ -529,11 +529,11 @@ def test_repeater_owned_by_another_observer_is_left_to_them(tmp_path, monkeypatc
 
     def fake_poll(*a, **k):
         calls.append(1)
-        from openhop_corescope_observer_plus.poller import OK, PollResult
+        from openhop_corescope_observer_plus.poll_result import OK, PollResult
 
         return PollResult(OK, battery_mv=4000, key_mode="shared")
 
-    monkeypatch.setattr(app_mod, "poll_one_shared", fake_poll)
+    monkeypatch.setattr(guest_poll, "poll_one_shared", fake_poll)
     try:
         a, _ = _app_with_shared_target(tmp_path, monkeypatch, fake)
         a.check = {"companion": {"ok": True}}
@@ -616,7 +616,7 @@ def test_the_default_never_restarts_a_repeater_that_answered_as_admin(tmp_path):
 
 
 def test_an_admin_answer_stays_off_with_the_default_on(tmp_path):
-    from openhop_corescope_observer_plus.poller import PollResult
+    from openhop_corescope_observer_plus.poll_result import PollResult
 
     fake = FakeCompanion()
     try:

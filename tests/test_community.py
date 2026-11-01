@@ -9,15 +9,16 @@ import pytest
 from fake_companion import FakeCompanion
 from openhop_corescope_observer_plus import app as app_mod
 from openhop_corescope_observer_plus import community as cm
-from openhop_corescope_observer_plus import corescope
+from openhop_corescope_observer_plus import corescope, guest_poll, own_key_poll
 from openhop_corescope_observer_plus.app import App
 
 # conftest replaces corescope.battery_check for every test; these use the real one.
 from openhop_corescope_observer_plus.corescope import battery_check as real_battery_check
 from openhop_corescope_observer_plus.models import Neighbour, Route
 from openhop_corescope_observer_plus.openhop_config import load_openhop_config
-from openhop_corescope_observer_plus.poller import OK, PollResult, utc_iso
+from openhop_corescope_observer_plus.poll_result import OK, PollResult
 from openhop_corescope_observer_plus.settings import parse
+from openhop_corescope_observer_plus.timeutil import utc_iso
 from test_app import NODE, make_app
 
 OTHER = "0aa0" + "cd" * 30
@@ -43,8 +44,8 @@ def sent(monkeypatch):
         calls.append(n.node_id)
         return PollResult(OK, battery_mv=4000, route=(k.get("routes") or [None])[0])
 
-    monkeypatch.setattr(app_mod, "poll_one", fake_poll)
-    monkeypatch.setattr(app_mod, "poll_one_shared", fake_poll)
+    monkeypatch.setattr(own_key_poll, "poll_one", fake_poll)
+    monkeypatch.setattr(guest_poll, "poll_one_shared", fake_poll)
     monkeypatch.setattr(app_mod, "CORESCOPE_SETTLE_S", 0)
     monkeypatch.setattr(corescope, "battery_snapshot", lambda *a, **k: None)
     return calls
@@ -498,7 +499,7 @@ def test_quick_retries_count_toward_the_cap(tmp_path, fake, monkeypatch):
         calls.append(1)
         return PollResult("no_reply", route=(k.get("routes") or [None])[0])
 
-    monkeypatch.setattr(app_mod, "poll_one", no_reply)
+    monkeypatch.setattr(own_key_poll, "poll_one", no_reply)
     a, _ = ready(tmp_path, fake, monkeypatch)
     a.community.apply({"max_requests": 1}, time.time())
     st = a.state.node(NODE)
@@ -515,7 +516,7 @@ def test_quick_retries_count_toward_the_cap(tmp_path, fake, monkeypatch):
 
 
 def test_fast_mode_quick_retry_is_30_s(tmp_path, fake, monkeypatch):
-    from openhop_corescope_observer_plus.poller import is_due
+    from openhop_corescope_observer_plus.schedule import is_due
 
     st = {"code": "no_reply", "last_attempt": 1000.0, "last_success": 900.0, "no_reply_count": 1}
     assert is_due(st, 3600, False, 1031) is False  # normal: 20 min

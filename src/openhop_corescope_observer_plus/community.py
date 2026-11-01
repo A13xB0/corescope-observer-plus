@@ -15,7 +15,8 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+
+from .timeutil import iso_ts
 
 LOG = logging.getLogger("openhop.corescope_observer_plus")
 
@@ -170,15 +171,6 @@ def version_at_least(mine: str, minimum: str) -> bool:
     if want is None:
         return True
     return (parse_version(mine) or (0, 0, 0)) >= want
-
-
-def iso_ts(iso: str | None) -> float | None:
-    if not iso:
-        return None
-    try:
-        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
 
 
 class Community:

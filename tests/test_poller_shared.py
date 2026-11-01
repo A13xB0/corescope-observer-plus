@@ -29,8 +29,15 @@ from openhop_core.protocol.identity import Identity, LocalIdentity
 from openhop_core.protocol.packet import Packet
 from openhop_core.protocol.packet_builder import PacketBuilder
 
+from openhop_corescope_observer_plus import (
+    admin_drill,
+    guest_poll,
+    outbox,
+    poll_result,
+    poll_state,
+    schedule,
+)
 from openhop_corescope_observer_plus import companion as c
-from openhop_corescope_observer_plus import poller
 from openhop_corescope_observer_plus import shared_key as sk
 from openhop_corescope_observer_plus.models import Neighbour, Route
 
@@ -217,10 +224,10 @@ VIA = Route(
 
 def test_direct_status_under_shared_key(shared):
     rep = FakeRepeater(shared, battery_mv=4012)
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, {}, routes=[DIRECT], sleep=lambda s: None
     )
-    assert res.code == poller.OK
+    assert res.code == poll_result.OK
     assert res.battery_mv == 4012
     assert res.key_mode == "shared"
     assert res.method == "status"
@@ -228,7 +235,7 @@ def test_direct_status_under_shared_key(shared):
 
 def test_one_hop_uses_telemetry_under_shared_key(shared):
     rep = FakeRepeater(shared, battery_mv=4040)
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep,
         _neighbour(rep, zero_hop=False),
         shared,
@@ -237,7 +244,7 @@ def test_one_hop_uses_telemetry_under_shared_key(shared):
         read_temperature=True,
         sleep=lambda s: None,
     )
-    assert res.code == poller.OK
+    assert res.code == poll_result.OK
     assert res.method == "telemetry"
     assert res.battery_mv == 4040
     assert res.temperature_c == 15.5
@@ -245,20 +252,20 @@ def test_one_hop_uses_telemetry_under_shared_key(shared):
 
 def test_no_reply_under_shared_key(shared):
     rep = FakeRepeater(shared, answer_status=False, answer_login=False)
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, {}, routes=[DIRECT], sleep=lambda s: None
     )
-    assert res.code == poller.NO_REPLY
+    assert res.code == poll_result.NO_REPLY
     assert res.key_mode == "shared"
 
 
 def test_admin_answer_stops_and_runs_removal_drill(shared):
     rep = FakeRepeater(shared, admin=True)
     state: dict = {}
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None
     )
-    assert res.code == poller.ADMIN_STOP
+    assert res.code == poll_result.ADMIN_STOP
     assert res.admin_seen is True
     assert res.admin_removed is True  # the drill cleared it and the re-login was guest
     assert res.battery_mv is None  # the battery is never read when the key is admin
@@ -266,7 +273,7 @@ def test_admin_answer_stops_and_runs_removal_drill(shared):
     assert len(rep.cli_commands) == 1
     assert rep.cli_commands[0] == f"setperm {shared.public_key.hex()} 0"
     # record() should mark the node so it is not polled under the key again.
-    poller.record(state, res, password_set=False, now=1000.0)
+    poll_state.record(state, res, password_set=False, now=1000.0)
     assert state["shared_admin_seen"] is True
     assert state["shared_admin_removed"] is True
 
@@ -282,18 +289,18 @@ def test_admin_removal_drill_reports_failure_when_still_admin(shared):
         rep.admin = True  # refuse to give up admin
 
     rep._handle = stubborn
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, {}, routes=[DIRECT], sleep=lambda s: None
     )
-    assert res.code == poller.ADMIN_STOP
+    assert res.code == poll_result.ADMIN_STOP
     assert res.admin_removed is False
 
 
 def test_reading_marks_shared_key(shared):
     rep = FakeRepeater(shared, battery_mv=4012)
     n = _neighbour(rep)
-    res = poller.poll_one_shared(rep, n, shared, {}, routes=[DIRECT], sleep=lambda s: None)
-    payload = poller.reading(n, res, 1000.0)
+    res = guest_poll.poll_one_shared(rep, n, shared, {}, routes=[DIRECT], sleep=lambda s: None)
+    payload = outbox.reading(n, res, 1000.0)
     assert payload["key"] == "shared"
     assert payload["battery_mv"] == 4012
 
@@ -308,10 +315,10 @@ def test_skips_login_when_already_in_acl(shared):
         "logged_in_at": now - 60,
         "login_checked_at": now - 60,
     }
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None, now=now
     )
-    assert res.code == poller.OK
+    assert res.code == poll_result.OK
     assert rep.logins == 0
 
 
@@ -325,12 +332,12 @@ def test_logs_in_when_acl_entry_is_gone(shared):
         "acl_key": shared.public_key.hex(),
         "logged_in_at": now - 60,
         "login_checked_at": now - 60,
-        "no_reply_count": poller.FORGET_LOGIN_AFTER - 1,
+        "no_reply_count": guest_poll.FORGET_LOGIN_AFTER - 1,
     }
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None, now=now
     )
-    assert res.code == poller.OK
+    assert res.code == poll_result.OK
     assert rep.logins >= 1
 
 
@@ -346,11 +353,11 @@ def test_a_missed_reply_is_asked_again_not_logged_in(shared):
         "login_checked_at": now - 60,
         "status_checked_at": now,
     }
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None, now=now
     )
-    assert res.code == poller.NO_REPLY and rep.logins == 0
-    poller.record(state, res, password_set=False, now=now)
+    assert res.code == poll_result.NO_REPLY and rep.logins == 0
+    poll_state.record(state, res, password_set=False, now=now)
     assert state.get("logged_in_at")
 
 
@@ -375,7 +382,7 @@ def test_reply_heard_only_by_other_observers_is_taken_from_corescope(shared):
         "login_checked_at": now - 60,
         "status_checked_at": now,
     }
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep,
         _neighbour(rep),
         shared,
@@ -385,10 +392,10 @@ def test_reply_heard_only_by_other_observers_is_taken_from_corescope(shared):
         now=now,
         antenna=_antenna(rep),
     )
-    assert res.code == poller.OK and res.battery_mv == 4010
+    assert res.code == poll_result.OK and res.battery_mv == 4010
     assert res.via_corescope is True
     assert rep.logins == 0
-    poller.record(state, res, password_set=False, now=now)
+    poll_state.record(state, res, password_set=False, now=now)
     assert state["via_corescope"] is True and state["battery_mv"] == 4010
 
 
@@ -396,7 +403,7 @@ def test_login_answer_heard_only_by_other_observers_stops_more_logins(shared, mo
     # The login was answered but only other observers heard it: one login, then
     # the route and the request — never a second login.
     rep = FakeRepeater(shared, battery_mv=4012, deaf=True, require_login=True)
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep,
         _neighbour(rep),
         shared,
@@ -406,7 +413,7 @@ def test_login_answer_heard_only_by_other_observers_stops_more_logins(shared, mo
         now=2e6,
         antenna=_antenna(rep),
     )
-    assert res.code == poller.OK
+    assert res.code == poll_result.OK
     assert rep.logins == 1
     assert rep.paths_taught == 1
 
@@ -422,10 +429,10 @@ def test_route_goes_before_a_no_login_request(shared, monkeypatch):
         "logged_in_at": now - 60,
         "login_checked_at": now - 60,
     }
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None, now=now
     )
-    assert res.code == poller.OK and rep.logins == 0
+    assert res.code == poll_result.OK and rep.logins == 0
     assert rep.paths_taught == 1
     assert "flood_replies" not in state
 
@@ -436,11 +443,11 @@ def test_flooded_login_answer_waits_before_the_route(shared):
     rep = FakeRepeater(shared, battery_mv=4012)
     slept = []
     state: dict = {}
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=slept.append
     )
-    assert res.code == poller.OK
-    assert poller.FLOOD_CLEAR_SECONDS in slept
+    assert res.code == poll_result.OK
+    assert guest_poll.FLOOD_CLEAR_SECONDS in slept
     assert rep.route_known and "flood_replies" not in state
 
 
@@ -458,13 +465,13 @@ def test_replies_that_keep_flooding_drop_to_daily(shared):
     state: dict = {}
     now = 2_000_000.0
     for i in range(2):
-        res = poller.poll_one_shared(
+        res = guest_poll.poll_one_shared(
             rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None, now=now + i
         )
-        poller.record(state, res, password_set=False, now=now + i)
+        poll_state.record(state, res, password_set=False, now=now + i)
     assert state["flood_replies"] == 2
-    assert not poller.is_due(state, 3600, False, now + 2 * 3600)
-    assert poller.is_due(state, 3600, False, now + 25 * 3600)
+    assert not schedule.is_due(state, 3600, False, now + 2 * 3600)
+    assert schedule.is_due(state, 3600, False, now + 25 * 3600)
 
 
 def test_telemetry_reply_is_never_read_as_a_login(shared):
@@ -485,10 +492,10 @@ def test_admin_recheck_forces_a_login(shared):
         "logged_in_at": now - 60,
         "login_checked_at": now - (25 * 3600),
     }
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None, now=now
     )
-    assert res.code == poller.ADMIN_STOP
+    assert res.code == poll_result.ADMIN_STOP
     assert rep.logins >= 1
 
 
@@ -497,25 +504,23 @@ def test_blank_success_is_not_remembered(shared):
     # the shared key in the ACL, so it proves nothing: don't remember blank.
     rep = FakeRepeater(shared, battery_mv=4012)
     state: dict = {}
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None
     )
-    assert res.code == poller.OK
+    assert res.code == poll_result.OK
     assert "shared_password" not in state
 
 
 def test_known_hello_is_sent_alone(shared, monkeypatch):
     sent = []
-    real = poller.sk.build_login
-    monkeypatch.setattr(
-        poller.sk, "build_login", lambda *a, **k: (sent.append(a[4]), real(*a, **k))[1]
-    )
+    real = sk.build_login
+    monkeypatch.setattr(sk, "build_login", lambda *a, **k: (sent.append(a[4]), real(*a, **k))[1])
     rep = FakeRepeater(shared, battery_mv=4012)
     state = {"acl_key": shared.public_key.hex(), "shared_password": "hello"}
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None
     )
-    assert res.code == poller.OK
+    assert res.code == poll_result.OK
     assert sent == [
         "hello"
     ]  # never a blank try for a repeater known to want hello (answered first time)
@@ -525,10 +530,8 @@ def test_hello_tried_after_blank_unanswered(shared, monkeypatch):
     # Unknown repeater whose guest password is "hello": the blank login gets no
     # answer, so "hello" goes next — and is remembered.
     sent = []
-    real = poller.sk.build_login
-    monkeypatch.setattr(
-        poller.sk, "build_login", lambda *a, **k: (sent.append(a[4]), real(*a, **k))[1]
-    )
+    real = sk.build_login
+    monkeypatch.setattr(sk, "build_login", lambda *a, **k: (sent.append(a[4]), real(*a, **k))[1])
     rep = FakeRepeater(shared, battery_mv=4012, require_login=True)
     first = {"done": False}
     orig = rep._handle
@@ -541,10 +544,10 @@ def test_hello_tried_after_blank_unanswered(shared, monkeypatch):
 
     rep._handle = guarded
     state: dict = {}
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None
     )
-    assert res.code == poller.OK
+    assert res.code == poll_result.OK
     assert sent == ["", "hello"]
     assert state["shared_password"] == "hello"
 
@@ -554,19 +557,19 @@ def test_unanswered_login_is_not_followed_by_a_request(shared):
     # accepted, so no request follows it, and the admin re-check stays due.
     rep = FakeRepeater(shared, battery_mv=4012, answer_login=False, require_login=True)
     state: dict = {}
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None
     )
-    assert res.code == poller.NO_REPLY
+    assert res.code == poll_result.NO_REPLY
     assert "login_checked_at" not in state
     assert rep.logins == 2  # blank, then hello: one each
 
 
 def test_route_retaught_after_unanswered_fast_path(shared, monkeypatch):
     taught = []
-    real = poller.sk.build_route_update
+    real = sk.build_route_update
     monkeypatch.setattr(
-        poller.sk, "build_route_update", lambda *a, **k: (taught.append(1), real(*a, **k))[1]
+        sk, "build_route_update", lambda *a, **k: (taught.append(1), real(*a, **k))[1]
     )
     rep = FakeRepeater(shared, battery_mv=4012, require_login=True)  # bare request ignored
     now = 2_000_000.0
@@ -574,18 +577,20 @@ def test_route_retaught_after_unanswered_fast_path(shared, monkeypatch):
         "acl_key": shared.public_key.hex(),
         "logged_in_at": now - 60,
         "login_checked_at": now - 60,
-        "no_reply_count": poller.FORGET_LOGIN_AFTER - 1,
+        "no_reply_count": guest_poll.FORGET_LOGIN_AFTER - 1,
     }
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None, now=now
     )
-    assert res.code == poller.OK
+    assert res.code == poll_result.OK
     assert taught, "the login after a lapsed ACL entry must re-teach the return path"
 
 
 def test_any_answer_stops_the_backoff_clock():
     st = {"unheard_since": 1.0}
-    poller.record(st, poller.PollResult(poller.NEEDS_PASSWORD), password_set=False, now=100.0)
+    poll_state.record(
+        st, poll_result.PollResult(poll_result.NEEDS_PASSWORD), password_set=False, now=100.0
+    )
     assert "unheard_since" not in st
 
 
@@ -593,12 +598,12 @@ def test_shared_uses_telemetry_between_status_reads(shared):
     rep = FakeRepeater(shared, battery_mv=4012)
     now = 2_000_000.0
     state = {"status_checked_at": now - 3600}  # status read an hour ago
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None, now=now
     )
-    assert res.code == poller.OK and res.method == "telemetry"
+    assert res.code == poll_result.OK and res.method == "telemetry"
     state2 = {"status_checked_at": now - 7 * 3600}
-    res2 = poller.poll_one_shared(
+    res2 = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state2, routes=[DIRECT], sleep=lambda s: None, now=now
     )
     assert res2.method == "status" and state2["status_checked_at"] == now
@@ -616,7 +621,7 @@ def test_unconfirmed_send_keeps_listening(shared):
 
     rep.send_raw_packet = slow
     steps = []
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep,
         _neighbour(rep),
         shared,
@@ -625,7 +630,7 @@ def test_unconfirmed_send_keeps_listening(shared):
         sleep=lambda s: None,
         on_step=steps.append,
     )
-    assert res.code == poller.OK
+    assert res.code == poll_result.OK
     assert any("busy" in s for s in steps)
 
 
@@ -638,10 +643,10 @@ def test_key_change_starts_the_acl_state_over(shared):
         "login_checked_at": 1.0,
         "shared_password": "hello",
     }
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None
     )
-    assert res.code == poller.OK
+    assert res.code == poll_result.OK
     assert state["acl_key"] == shared.public_key.hex()
     assert rep.logins >= 1  # logged in afresh rather than trusting the old entry
     assert "shared_password" not in state or state["shared_password"] != "hello"
@@ -650,24 +655,24 @@ def test_key_change_starts_the_acl_state_over(shared):
 def test_own_key_remembers_a_blank_login(shared):
     rep = FakeRepeater(shared, battery_mv=4012)
     state: dict = {}
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None, personal=True
     )
-    assert res.code == poller.OK and state["shared_password"] == ""
-    assert poller.shared_password_order(state, 0, personal=True) == [""]
+    assert res.code == poll_result.OK and state["shared_password"] == ""
+    assert guest_poll.shared_password_order(state, 0, personal=True) == [""]
     # The shared key never trusts a blank success; a first contact tries each once.
-    assert poller.shared_password_order(state, 0, personal=False) == ["", "hello"]
+    assert guest_poll.shared_password_order(state, 0, personal=False) == ["", "hello"]
     # Failing: one login per poll, blank and hello on alternate days.
-    assert poller.shared_password_order({"key_login_fails": 2}, 0) == [""]
-    assert poller.shared_password_order({"key_login_fails": 2}, 86400) == ["hello"]
-    assert poller.shared_password_order({"shared_password": "hello"}, 0) == ["hello"]
+    assert guest_poll.shared_password_order({"key_login_fails": 2}, 0) == [""]
+    assert guest_poll.shared_password_order({"key_login_fails": 2}, 86400) == ["hello"]
+    assert guest_poll.shared_password_order({"shared_password": "hello"}, 0) == ["hello"]
 
 
 def test_admin_removal_builds_for_a_one_hop_route(shared):
     # Earl, 26 Oct: the removal command couldn't be built for a relayed route.
     rep = FakeRepeater(shared)
     body = sk.build_admin_removal(
-        shared, rep.pub, VIA.path, poller.path_len_byte(VIA.path, VIA.hash_size)
+        shared, rep.pub, VIA.path, c.path_len_byte(VIA.path, VIA.hash_size)
     )
     assert body[0] == sk.PRIORITY_NORMAL
 
@@ -678,30 +683,38 @@ def test_admin_answer_recorded_even_if_removal_fails(shared, monkeypatch):
     def broken(*a, **k):
         raise ValueError("boom")
 
-    monkeypatch.setattr(poller, "_admin_removal_drill", broken)
-    res = poller.poll_one_shared(
+    monkeypatch.setattr(admin_drill, "remove_admin", broken)
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, {}, routes=[DIRECT], sleep=lambda s: None
     )
-    assert res.code == poller.ADMIN_STOP and res.admin_seen is True and res.admin_removed is False
+    assert (
+        res.code == poll_result.ADMIN_STOP and res.admin_seen is True and res.admin_removed is False
+    )
 
 
 def test_admin_drill_over_one_hop(shared):
     rep = FakeRepeater(shared, admin=True)
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep, zero_hop=False), shared, {}, routes=[VIA], sleep=lambda s: None
     )
-    assert res.code == poller.ADMIN_STOP and res.admin_removed is True
+    assert res.code == poll_result.ADMIN_STOP and res.admin_removed is True
     assert rep.cli_commands == [f"setperm {shared.public_key.hex()} 0"]
 
 
 def test_known_password_survives_an_outage():
     st = {"shared_password": "hello", "no_reply_count": 5, "unheard_since": 1_000_000.0}
-    poller.record(
-        st, poller.PollResult(poller.NO_REPLY), password_set=False, now=1_000_000.0 + 2 * 86400
+    poll_state.record(
+        st,
+        poll_result.PollResult(poll_result.NO_REPLY),
+        password_set=False,
+        now=1_000_000.0 + 2 * 86400,
     )
     assert st["shared_password"] == "hello"
-    poller.record(
-        st, poller.PollResult(poller.NO_REPLY), password_set=False, now=1_000_000.0 + 8 * 86400
+    poll_state.record(
+        st,
+        poll_result.PollResult(poll_result.NO_REPLY),
+        password_set=False,
+        now=1_000_000.0 + 8 * 86400,
     )
     assert "shared_password" not in st
 
@@ -715,7 +728,7 @@ def test_status_interval_is_a_setting(shared):
     rep = FakeRepeater(shared, battery_mv=4012)
     now = 2_000_000.0
     state = {"status_checked_at": now - 2 * 3600}
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep,
         _neighbour(rep),
         shared,
@@ -734,7 +747,7 @@ def test_packet_log_records_each_send_and_its_answer(shared):
     entries: list = []
     log = packet_log.PacketLog(entries)
     rep = FakeRepeater(shared, battery_mv=4010, deaf=True, require_login=True)
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep,
         _neighbour(rep),
         shared,
@@ -745,7 +758,7 @@ def test_packet_log_records_each_send_and_its_answer(shared):
         antenna=_antenna(rep),
         plog=log.for_node(rep.pub.hex(), "West Lomond", "guest key"),
     )
-    assert res.code == poller.OK
+    assert res.code == poll_result.OK
     kinds = [(e["kind"], e["reply"], e.get("via"), e.get("flooded")) for e in entries]
     assert kinds == [
         ("login", "answered", "CoreScope", True),  # a new entry's answer floods
@@ -775,12 +788,10 @@ def test_operator_set_guest_password_is_used_alone(shared, monkeypatch):
         key: "hello"
     }
     sent = []
-    real = poller.sk.build_login
-    monkeypatch.setattr(
-        poller.sk, "build_login", lambda *a, **k: (sent.append(a[4]), real(*a, **k))[1]
-    )
+    real = sk.build_login
+    monkeypatch.setattr(sk, "build_login", lambda *a, **k: (sent.append(a[4]), real(*a, **k))[1])
     rep = FakeRepeater(shared, battery_mv=4012)
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep,
         _neighbour(rep),
         shared,
@@ -790,7 +801,7 @@ def test_operator_set_guest_password_is_used_alone(shared, monkeypatch):
         guest_password="hello",
         personal=True,
     )
-    assert res.code == poller.OK and sent == ["hello"]
+    assert res.code == poll_result.OK and sent == ["hello"]
 
 
 def test_per_repeater_poll_interval():
@@ -829,7 +840,7 @@ def test_corescope_is_asked_again_before_giving_up(shared):
         calls.append(since)
         return [] if len(calls) == 1 else list(rep.air)
 
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep,
         _neighbour(rep),
         shared,
@@ -839,7 +850,7 @@ def test_corescope_is_asked_again_before_giving_up(shared):
         now=2e6,
         antenna=antenna,
     )
-    assert res.code == poller.OK and rep.logins == 1
+    assert res.code == poll_result.OK and rep.logins == 1
 
 
 def test_route_not_resent_while_fresh(shared):
@@ -851,14 +862,14 @@ def test_route_not_resent_while_fresh(shared):
         "logged_in_at": now - 60,
         "login_checked_at": now - 60,
         "route_sent_at": now - 3600,
-        "code": poller.OK,
+        "code": poll_result.OK,
     }
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None, now=now
     )
-    assert res.code == poller.OK and rep.paths_taught == 0  # 1 packet, not 2
+    assert res.code == poll_result.OK and rep.paths_taught == 0  # 1 packet, not 2
     state.update(route_sent_at=now - 25 * 3600)
-    poller.poll_one_shared(
+    guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None, now=now
     )
     assert rep.paths_taught == 1  # refreshed once a day
@@ -867,20 +878,20 @@ def test_route_not_resent_while_fresh(shared):
 def test_quick_retries_only_for_recently_heard_repeaters():
     now = 2_000_000.0
     heard = {
-        "code": poller.NO_REPLY,
+        "code": poll_result.NO_REPLY,
         "no_reply_count": 1,
         "last_attempt": now - 1500,
         "last_success": now - 3600,
     }
-    silent = {"code": poller.NO_REPLY, "no_reply_count": 1, "last_attempt": now - 1500}
-    assert poller.is_due(heard, 3600, False, now)
-    assert not poller.is_due(silent, 3600, False, now)
+    silent = {"code": poll_result.NO_REPLY, "no_reply_count": 1, "last_attempt": now - 1500}
+    assert schedule.is_due(heard, 3600, False, now)
+    assert not schedule.is_due(silent, 3600, False, now)
 
 
 def test_first_contact_flood_is_not_held_against_the_repeater(shared):
     rep = FakeRepeater(shared, battery_mv=4012)  # new entry: the login answer floods
     state: dict = {}
-    poller.poll_one_shared(
+    guest_poll.poll_one_shared(
         rep, _neighbour(rep), shared, state, routes=[DIRECT], sleep=lambda s: None
     )
     assert "flood_replies" not in state
@@ -889,7 +900,7 @@ def test_first_contact_flood_is_not_held_against_the_repeater(shared):
 
 def test_polls_are_spread_across_the_interval():
     ids = [f"{i:02x}" * 32 for i in range(4)]
-    phases = poller.spread_phases(ids, lambda k: 7200)
+    phases = schedule.spread_phases(ids, lambda k: 7200)
     assert sorted(phases.values()) == [0, 1800, 3600, 5400]  # 2 h shared by 4: every 30 min
     # Each repeater comes due only at its own slot, not all at once.
     base = 1_000_000 * 7200.0
@@ -898,8 +909,8 @@ def test_polls_are_spread_across_the_interval():
         nid: next(
             t
             for t in range(0, 7200, 60)
-            if poller.is_due(
-                {"code": poller.OK, "last_attempt": base - 7200 + phases[nid]},
+            if schedule.is_due(
+                {"code": poll_result.OK, "last_attempt": base - 7200 + phases[nid]},
                 7200,
                 False,
                 base + t,
@@ -914,9 +925,9 @@ def test_polls_are_spread_across_the_interval():
 def test_slot_skips_a_poll_just_after_a_test():
     # Tested 10 min before its slot: the scheduled poll waits for the next one.
     base = 1_000_000 * 3600.0
-    st = {"code": poller.OK, "last_attempt": base - 600}
-    assert not poller.is_due(st, 3600, False, base, 0.0)
-    assert poller.is_due(st, 3600, False, base + 3600, 0.0)
+    st = {"code": poll_result.OK, "last_attempt": base - 600}
+    assert not schedule.is_due(st, 3600, False, base, 0.0)
+    assert schedule.is_due(st, 3600, False, base + 3600, 0.0)
 
 
 def test_retry_goes_by_the_alternative_route_and_is_logged(shared):
@@ -940,7 +951,7 @@ def test_retry_goes_by_the_alternative_route_and_is_logged(shared):
         "last_success": now - 3600,
         "status_checked_at": now,
     }
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep,
         _neighbour(rep),
         shared,
@@ -951,16 +962,16 @@ def test_retry_goes_by_the_alternative_route_and_is_logged(shared):
         alternative_routes=True,
         plog=packet_log.PacketLog(entries).for_node(rep.pub.hex(), "G", "guest key"),
     )
-    assert res.code == poller.OK and res.alternative and res.route.key == VIA.key
+    assert res.code == poll_result.OK and res.alternative and res.route.key == VIA.key
     assert any("alternative route" in e["detail"] for e in entries)
     assert rep.logins == 0
     assert state["route_results"][DIRECT.key][1] == "no answer"
     # With the setting off, the retry stays on the best route.
     rep2 = FakeRepeater(shared, answer_login=False, answer_status=False, answer_telemetry=False)
-    res2 = poller.poll_one_shared(
+    res2 = guest_poll.poll_one_shared(
         rep2, _neighbour(rep2), shared, {}, routes=[DIRECT, VIA], sleep=lambda s: None
     )
-    assert res2.code == poller.NO_REPLY and "alternative route not tried" in res2.detail
+    assert res2.code == poll_result.NO_REPLY and "alternative route not tried" in res2.detail
 
 
 def test_retry_same_route_then_alternative_and_never_rests(shared):
@@ -986,7 +997,7 @@ def test_retry_same_route_then_alternative_and_never_rests(shared):
     }
     for i in range(5):  # silent for days and failing every time: still the retry
         sent.clear()
-        res = poller.poll_one_shared(
+        res = guest_poll.poll_one_shared(
             rep,
             _neighbour(rep),
             shared,
@@ -1007,12 +1018,12 @@ def test_retry_same_route_then_alternative_and_never_rests(shared):
 
 def test_route_results_record_best_and_alternative():
     st = {}
-    poller.note_route_result(st, "best", False, 100.0)
-    poller.note_route_result(st, "alt", True, 101.0)
+    poll_state.note_route_result(st, "best", False, 100.0)
+    poll_state.note_route_result(st, "alt", True, 101.0)
     assert st["route_results"] == {"best": [100.0, "no answer"], "alt": [101.0, "answered"]}
-    for i in range(poller.ROUTE_RESULTS_KEPT + 3):
-        poller.note_route_result(st, f"r{i}", True, 200.0 + i)
-    assert len(st["route_results"]) == poller.ROUTE_RESULTS_KEPT
+    for i in range(poll_state.ROUTE_RESULTS_KEPT + 3):
+        poll_state.note_route_result(st, f"r{i}", True, 200.0 + i)
+    assert len(st["route_results"]) == poll_state.ROUTE_RESULTS_KEPT
     assert "best" not in st["route_results"]
 
 
@@ -1038,7 +1049,7 @@ def test_rebooted_repeater_on_a_broken_route_logs_in_by_the_alternative(shared):
         "no_reply_count": 2,
         "shared_password": "",
     }
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep,
         _neighbour(rep),
         shared,
@@ -1048,7 +1059,7 @@ def test_rebooted_repeater_on_a_broken_route_logs_in_by_the_alternative(shared):
         now=now,
         alternative_routes=True,
     )
-    assert res.code == poller.OK and res.alternative and res.route.key == VIA.key
+    assert res.code == poll_result.OK and res.alternative and res.route.key == VIA.key
     assert state["route_results"][DIRECT.key][1] == "no answer"
 
 
@@ -1056,7 +1067,7 @@ def test_new_repeater_logs_in_by_the_alternative_when_the_best_is_dead(shared):
     rep = FakeRepeater(shared, battery_mv=4030)
     rep._handle_orig = rep._handle
     rep._handle = lambda pkt: rep._handle_orig(pkt) if pkt.path_len else None
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep,
         _neighbour(rep),
         shared,
@@ -1066,12 +1077,12 @@ def test_new_repeater_logs_in_by_the_alternative_when_the_best_is_dead(shared):
         now=2e6,
         alternative_routes=True,
     )
-    assert res.code == poller.OK and res.route.key == VIA.key
+    assert res.code == poll_result.OK and res.route.key == VIA.key
 
 
 def test_silent_repeater_login_round_covers_both_routes_once(shared):
     rep = FakeRepeater(shared, answer_login=False, answer_status=False, answer_telemetry=False)
-    res = poller.poll_one_shared(
+    res = guest_poll.poll_one_shared(
         rep,
         _neighbour(rep),
         shared,
@@ -1081,10 +1092,10 @@ def test_silent_repeater_login_round_covers_both_routes_once(shared):
         now=2e6,
         alternative_routes=True,
     )
-    assert res.code == poller.NO_REPLY and res.alternative
+    assert res.code == poll_result.NO_REPLY and res.alternative
     assert rep.logins == 4  # blank and hello on each route, nothing more
     off = FakeRepeater(shared, answer_login=False, answer_status=False, answer_telemetry=False)
-    poller.poll_one_shared(
+    guest_poll.poll_one_shared(
         off, _neighbour(off), shared, {}, routes=[DIRECT, VIA], sleep=lambda s: None, now=2e6
     )
     assert off.logins == 2  # setting off: best route only

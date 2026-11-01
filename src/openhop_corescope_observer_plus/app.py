@@ -10,29 +10,21 @@ from pathlib import Path
 from openhop_core import LocalIdentity
 from openhop_core.protocol.packet_builder import PacketBuilder
 
-from . import __version__, corescope, guest_key, packet_log
+from . import __version__, corescope, guest_key, guest_poll, own_key_poll, packet_log
 from . import shared_key as sk
 from .community import Community, fast_mode, iso_ts, timings
 from .companion import CompanionClient
 from .models import Neighbour, OpenHopError, Route
 from .openhop import OpenHopAPI
 from .openhop_config import OpenHopConfig, companion_port, load_openhop_config
-from .poller import (
-    ADMIN_STOP,
-    NO_BATTERY,
-    OK,
-    is_due,
-    next_slot,
-    poll_one,
-    poll_one_shared,
-    reading,
-    record,
-    spread_phases,
-    utc_iso,
-)
+from .outbox import reading
+from .poll_result import ADMIN_STOP, NO_BATTERY, OK
+from .poll_state import record
 from .publisher import Publisher
+from .schedule import is_due, next_slot, spread_phases
 from .settings import TRANSIENT_KEYS, Settings, parse, read_raw, write_raw
 from .storage import Secrets, State
+from .timeutil import utc_iso
 
 LOG = logging.getLogger("openhop.corescope_observer_plus")
 
@@ -727,7 +719,7 @@ class App:
                     if self.settings.check_corescope and self.settings.corescope_url:
                         url = self.settings.corescope_url
                         antenna = lambda since, u=url: corescope.responses(u, utc_iso(since))
-                    result = poll_one_shared(
+                    result = guest_poll.poll_one_shared(
                         client,
                         n,
                         shared,
@@ -743,7 +735,7 @@ class App:
                         alternative_routes=s.alternative_routes,
                     )
                 else:
-                    result = poll_one(
+                    result = own_key_poll.poll_one(
                         client,
                         n,
                         pw,
