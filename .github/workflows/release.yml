@@ -1,0 +1,53 @@
+name: Release
+
+# Push a tag like v0.10.2 to test, build the wheel and publish it as a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to release, e.g. v0.10.1
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Check the tag matches the plugin version
+        run: |
+          version=$(python -c "import json; print(json.load(open('openhop-plugin.json'))['version'])")
+          if [ "v$version" != "$TAG" ]; then
+            echo "Tag $TAG does not match plugin version $version" >&2
+            exit 1
+          fi
+      - name: Test
+        run: |
+          pip install -e ".[dev]"
+          pytest -q
+      - name: Build the wheel
+        run: |
+          pip install build
+          python -m build --wheel
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Install from openHop: Plugins, Install wheel, then choose the .whl below."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.whl --clobber
+          else
+            gh release create "$TAG" dist/*.whl --title "CoreScope Observer Plus ${TAG#v}" --notes "$notes" --generate-notes
+          fi

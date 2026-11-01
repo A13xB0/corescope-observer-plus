@@ -112,7 +112,7 @@ it logs a warning at startup and is never set from the page.
 ./build_wheel.sh
 ```
 
-Install the wheel from openHop's Plugins page, open **CoreScope Observer Plus**, press
+Download the `.whl` from the latest GitHub release, then install the wheel from openHop's Plugins page, open **CoreScope Observer Plus**, press
 **Connect**, tick repeaters under **Not polled**, then pick brokers and enable polling
 in **Settings** and save.
 
@@ -156,3 +156,14 @@ only" unless you set "Up to 1 hop".
 - `reply_hops` 1 and `via` (the relay's 64-hex key) mark a reading taken through a relay; `snr` is then the advert SNR on that route and `rssi` is left out.
 - `temperature_c` is present only when temperature is on for that repeater and it reported one.
 - `stats` holds the fields the repeater's firmware sent; an older, shorter reply leaves later ones out.
+
+## Releasing
+
+Set the version in `openhop-plugin.json`, `pyproject.toml` and
+`src/openhop_corescope_observer_plus/__init__.py`, commit, then push a matching tag:
+
+```
+git tag v0.10.2 && git push origin v0.10.2
+```
+
+The Release workflow runs the tests, builds the wheel and attaches it to a GitHub release.
