@@ -710,3 +710,15 @@ def test_no_sensor_temperature_is_no_reading():
     lpp = lambda c: bytes([1, 103]) + struct.pack(">h", int(c * 10))
     assert lpp_temperature(lpp(-128.0)) is None
     assert lpp_temperature(lpp(16.5)) == 16.5
+
+
+def test_freshness_uses_the_newest_reading_of_any_source(monkeypatch):
+    # CoreScope's latest_ts is the shown (best heard) source's; a newer
+    # reading from another observer is what counts for the window.
+    from openhop_neighbour_battery import openhop as oh
+    body = {"latest_ts": "2026-11-01T15:24:13Z", "selected": {"observer_name": "CP-Station-C"},
+            "sources": [{"observer_name": "CP-Station-C", "latest_ts": "2026-11-01T15:24:13Z"},
+                        {"observer_name": "CP-Station-A", "latest_ts": "2026-11-01T15:28:03Z"}]}
+    monkeypatch.setattr(oh, "corescope_get", lambda *a, **k: (200, body))
+    assert oh.corescope_battery_check("https://cs.example", NODE) == (
+        True, {"latest_ts": "2026-11-01T15:28:03Z", "by": "CP-Station-A"})

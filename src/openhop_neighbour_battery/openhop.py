@@ -595,7 +595,13 @@ def corescope_battery_check(base_url: str, node_id: str, *, timeout: float = 5.0
         return True, {"latest_ts": None, "by": ""}  # CoreScope has no such node: nothing fresh
     if status != 200 or not isinstance(body, dict):
         return False, {}
+    # latest_ts is the newest reading of the source CoreScope shows (the best
+    # heard), not the newest reading: that is the newest of all the sources.
     sel = body.get("selected") if isinstance(body.get("selected"), dict) else {}
-    ts = body.get("latest_ts")
-    return True, {"latest_ts": ts if isinstance(ts, str) and ts else None,
-                  "by": str(sel.get("observer_name") or "")}
+    newest = (body.get("latest_ts"), sel.get("observer_name"))
+    for src in body.get("sources") or []:
+        ts = src.get("latest_ts") if isinstance(src, dict) else None
+        if isinstance(ts, str) and ts and (not isinstance(newest[0], str) or ts > newest[0]):
+            newest = (ts, src.get("observer_name"))
+    ts, by = newest
+    return True, {"latest_ts": ts if isinstance(ts, str) and ts else None, "by": str(by or "")}
