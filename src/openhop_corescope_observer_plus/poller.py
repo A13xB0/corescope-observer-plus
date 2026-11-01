@@ -26,7 +26,7 @@ from .companion import (
     parse_stats,
     path_len_byte,
 )
-from .openhop import Neighbour, Route
+from .models import Neighbour, Route
 
 OK = "ok"
 NO_BATTERY = "no_battery"

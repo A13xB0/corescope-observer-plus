@@ -20,7 +20,7 @@ import paho.mqtt.client as mqtt
 from openhop_core import LocalIdentity
 
 from . import __version__
-from .openhop import MC2MQTT_FORMATS, Broker, OpenHopConfig
+from .openhop_config import MC2MQTT_FORMATS, Broker, OpenHopConfig
 
 PLUGIN_TAG = f"openhop.corescope_observer_plus/{__version__}"
 JWT_MINUTES = 10

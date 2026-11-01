@@ -7,7 +7,7 @@ from nacl.signing import VerifyKey
 from openhop_core import LocalIdentity
 
 from openhop_corescope_observer_plus import publisher as pub
-from openhop_corescope_observer_plus.openhop import Broker, OpenHopConfig
+from openhop_corescope_observer_plus.openhop_config import Broker, OpenHopConfig
 
 KEY = os.urandom(32)
 

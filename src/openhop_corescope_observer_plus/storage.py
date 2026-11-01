@@ -60,9 +60,6 @@ class Secrets:
         self._value["passwords"] = passwords
         self._save()
 
-    def nodes_with_passwords(self) -> list[str]:
-        return sorted(k for k, v in (self._value.get("passwords") or {}).items() if v)
-
     def _save(self) -> None:
         _write(self.path, self._value, mode=0o600)
 
@@ -77,10 +74,6 @@ class State:
 
     def node(self, node_id: str) -> dict:
         return self.value["nodes"].setdefault(node_id, {})
-
-    @property
-    def queue(self) -> list[dict]:
-        return self.value["queue"]
 
     def broker(self, name: str) -> dict:
         return self.value["brokers"].setdefault(name, {})

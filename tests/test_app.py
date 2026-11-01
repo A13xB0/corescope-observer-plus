@@ -6,8 +6,10 @@ import yaml
 
 from fake_companion import FakeCompanion
 from openhop_corescope_observer_plus import app as app_mod
+from openhop_corescope_observer_plus import corescope
 from openhop_corescope_observer_plus.app import App
-from openhop_corescope_observer_plus.openhop import Neighbour, load_openhop_config
+from openhop_corescope_observer_plus.models import Neighbour
+from openhop_corescope_observer_plus.openhop_config import load_openhop_config
 from openhop_corescope_observer_plus.settings import parse
 
 NODE = "02f1" + "ab" * 30
@@ -174,8 +176,8 @@ def test_check_now_polls_every_target_and_publishes(tmp_path, monkeypatch):
     # No network and no delay in the CoreScope confirmation pass.
     monkeypatch.setattr(app_mod, "CORESCOPE_SETTLE_S", 0)
     monkeypatch.setattr(
-        app_mod,
-        "corescope_battery_snapshot",
+        corescope,
+        "battery_snapshot",
         lambda url, nid, **k: {
             "latest_ts": "2026-10-26T09:00:00Z",
             "latest_mv": 3240,
@@ -212,7 +214,7 @@ def test_check_now_polls_every_target_and_publishes(tmp_path, monkeypatch):
 
 
 def test_one_hop_targets_need_max_hops(tmp_path, monkeypatch):
-    from openhop_corescope_observer_plus.openhop import Route
+    from openhop_corescope_observer_plus.models import Route
 
     fake = FakeCompanion()
     try:
@@ -279,7 +281,7 @@ def _serve_key(monkeypatch):
         calls.append(url)
         return {k2: v for k2, v in key.items() if k2 != "_calls"}
 
-    monkeypatch.setattr(app_mod, "fetch_shared_guest_key", fake_fetch)
+    monkeypatch.setattr(corescope, "shared_guest_key", fake_fetch)
     return key
 
 
@@ -304,7 +306,7 @@ def test_shared_key_fetched_from_corescope(tmp_path, monkeypatch):
 def test_no_shared_key_when_corescope_serves_none(tmp_path, monkeypatch):
     fake = FakeCompanion()
     try:
-        monkeypatch.setattr(app_mod, "fetch_shared_guest_key", lambda url, **k: None)
+        monkeypatch.setattr(corescope, "shared_guest_key", lambda url, **k: None)
         a, _ = make_app(tmp_path, fake, shared_key_targets=[NODE])
         assert a.shared_key() is None
         assert a.uses_shared_key(NODE) is False  # opted in, but no key to use
@@ -355,7 +357,7 @@ def test_test_login_reports_live_steps(tmp_path, monkeypatch):
     # live console of what the poll is doing (login, status…).
     fake = FakeCompanion()
     monkeypatch.setattr(app_mod, "CORESCOPE_SETTLE_S", 0)
-    monkeypatch.setattr(app_mod, "corescope_battery_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(corescope, "battery_snapshot", lambda *a, **k: None)
     try:
         a, _ = make_app(
             tmp_path,
@@ -384,7 +386,7 @@ def test_check_now_stale_scope_skips_fresh(tmp_path, monkeypatch):
 
     fake = FakeCompanion()
     monkeypatch.setattr(app_mod, "CORESCOPE_SETTLE_S", 0)
-    monkeypatch.setattr(app_mod, "corescope_battery_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(corescope, "battery_snapshot", lambda *a, **k: None)
 
     class P:
         def __init__(self, cfg):
@@ -469,7 +471,7 @@ def test_own_key_is_registered_signed_and_used(tmp_path, monkeypatch):
     fake = FakeCompanion()
     sent = []
     monkeypatch.setattr(
-        app_mod,
+        corescope,
         "register_guest_key",
         lambda url, body, **k: (
             sent.append(body),
@@ -503,7 +505,7 @@ def test_own_key_is_registered_signed_and_used(tmp_path, monkeypatch):
 def test_shared_key_when_corescope_takes_no_own_keys(tmp_path, monkeypatch):
     fake = FakeCompanion()
     key = _serve_key(monkeypatch)
-    monkeypatch.setattr(app_mod, "register_guest_key", lambda url, body, **k: (404, {}))
+    monkeypatch.setattr(corescope, "register_guest_key", lambda url, body, **k: (404, {}))
     try:
         a, _ = _app_with_shared_target(tmp_path, monkeypatch, fake)
         got = a.polling_key(now=1_000_000.0)
@@ -515,10 +517,10 @@ def test_shared_key_when_corescope_takes_no_own_keys(tmp_path, monkeypatch):
 
 def test_repeater_owned_by_another_observer_is_left_to_them(tmp_path, monkeypatch):
     fake = FakeCompanion()
-    monkeypatch.setattr(app_mod, "register_guest_key", lambda url, body, **k: (200, {"ok": True}))
+    monkeypatch.setattr(corescope, "register_guest_key", lambda url, body, **k: (200, {"ok": True}))
     monkeypatch.setattr(
-        app_mod,
-        "corescope_owners",
+        corescope,
+        "owners",
         lambda url, obs, **k: {
             "nodes": {NODE: {"owner": "cc" * 32, "owner_name": "Cadham Village", "mine": False}}
         },

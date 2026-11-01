@@ -9,8 +9,13 @@ import pytest
 from fake_companion import FakeCompanion
 from openhop_corescope_observer_plus import app as app_mod
 from openhop_corescope_observer_plus import community as cm
+from openhop_corescope_observer_plus import corescope
 from openhop_corescope_observer_plus.app import App
-from openhop_corescope_observer_plus.openhop import Neighbour, Route, load_openhop_config
+
+# conftest replaces corescope.battery_check for every test; these use the real one.
+from openhop_corescope_observer_plus.corescope import battery_check as real_battery_check
+from openhop_corescope_observer_plus.models import Neighbour, Route
+from openhop_corescope_observer_plus.openhop_config import load_openhop_config
 from openhop_corescope_observer_plus.poller import OK, PollResult, utc_iso
 from openhop_corescope_observer_plus.settings import parse
 from test_app import NODE, make_app
@@ -41,7 +46,7 @@ def sent(monkeypatch):
     monkeypatch.setattr(app_mod, "poll_one", fake_poll)
     monkeypatch.setattr(app_mod, "poll_one_shared", fake_poll)
     monkeypatch.setattr(app_mod, "CORESCOPE_SETTLE_S", 0)
-    monkeypatch.setattr(app_mod, "corescope_battery_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(corescope, "battery_snapshot", lambda *a, **k: None)
     return calls
 
 
@@ -77,13 +82,13 @@ def serve_policy(monkeypatch, policy=None, status=200, calls=None):
             calls.append(ver)
         return (status, dict(policy or {}) if status == 200 else None)
 
-    monkeypatch.setattr(app_mod, "corescope_policy", fake)
+    monkeypatch.setattr(corescope, "policy", fake)
 
 
 def serve_latest(monkeypatch, ts, by="Kirkcaldy East", reachable=True):
     monkeypatch.setattr(
-        app_mod,
-        "corescope_battery_check",
+        corescope,
+        "battery_check",
         lambda url, nid, **k: (reachable, {"latest_ts": ts, "by": by} if reachable else {}),
     )
 
@@ -97,7 +102,7 @@ def serve_owners(monkeypatch, nodes, policy=None, calls=None):
             body["policy"] = policy
         return body
 
-    monkeypatch.setattr(app_mod, "corescope_owners", fake)
+    monkeypatch.setattr(corescope, "owners", fake)
 
 
 def requests_for(a, *reqs):
@@ -399,7 +404,7 @@ def test_owner_logic_applies_to_own_key_and_shared_key_targets(tmp_path, fake, m
     from test_app import _serve_key
 
     _serve_key(monkeypatch)
-    monkeypatch.setattr(app_mod, "register_guest_key", lambda url, body, **k: (404, {}))
+    monkeypatch.setattr(corescope, "register_guest_key", lambda url, body, **k: (404, {}))
     serve_latest(monkeypatch, None)  # CoreScope reachable, nothing fresh
     owners = {
         NODE: {
@@ -617,7 +622,7 @@ def test_claims_cover_every_target_with_key_route_and_snr(tmp_path, fake, monkey
     from test_app import _serve_key
 
     _serve_key(monkeypatch)
-    monkeypatch.setattr(app_mod, "register_guest_key", lambda url, body, **k: (404, {}))
+    monkeypatch.setattr(corescope, "register_guest_key", lambda url, body, **k: (404, {}))
     third = "77" * 32
     claims = Claims()
     monkeypatch.setattr(app_mod, "Publisher", claims)
@@ -688,7 +693,7 @@ def test_claims_still_go_out_while_paused(tmp_path, fake, monkeypatch):
 def test_policy_404_uses_defaults_and_still_polls(tmp_path, fake, monkeypatch, sent):
     calls = []
     serve_policy(monkeypatch, status=404, calls=calls)
-    monkeypatch.setattr(app_mod, "corescope_owners", lambda url, obs, **k: None)  # 404 -> None
+    monkeypatch.setattr(corescope, "owners", lambda url, obs, **k: None)  # 404 -> None
     serve_latest(monkeypatch, None)
     a, _ = ready(tmp_path, fake, monkeypatch)
     a.poll([NODE])
@@ -733,7 +738,7 @@ def test_owners_unreachable_forgets_roles_after_a_while(tmp_path, fake, monkeypa
     a, _ = ready(tmp_path, fake, monkeypatch)
     now = time.time()
     assert a.role_for(NODE, now)["role"] == "standby"
-    monkeypatch.setattr(app_mod, "corescope_owners", lambda url, obs, **k: None)
+    monkeypatch.setattr(corescope, "owners", lambda url, obs, **k: None)
     assert a.role_for(NODE, now + 601)["role"] == "standby"  # one miss: kept
     assert (
         a.role_for(NODE, now + 1900)["role"] == "poller"
@@ -748,8 +753,8 @@ def test_monitors_request_proxies_corescope(tmp_path, fake, monkeypatch):
     }
     seen = []
     monkeypatch.setattr(
-        app_mod,
-        "corescope_monitors",
+        corescope,
+        "monitors",
         lambda url, nid, ver, **k: (seen.append((url, nid, ver)), (200, body))[1],
     )
     a, _ = ready(tmp_path, fake, monkeypatch)
@@ -757,13 +762,13 @@ def test_monitors_request_proxies_corescope(tmp_path, fake, monkeypatch):
     act = a.actions["monitors"]
     assert act["ok"] and act["monitors"] == body and act["node_id"] == NODE
     assert seen == [("https://cs.example", NODE, app_mod.__version__)]
-    monkeypatch.setattr(app_mod, "corescope_monitors", lambda url, nid, ver, **k: (404, None))
+    monkeypatch.setattr(corescope, "monitors", lambda url, nid, ver, **k: (404, None))
     requests_for(a, {"id": "m2", "type": "monitors", "node_id": NODE})
     assert (
         a.actions["monitors"]["ok"] is False
         and "doesn't list monitors" in a.actions["monitors"]["message"]
     )
-    monkeypatch.setattr(app_mod, "corescope_monitors", lambda url, nid, ver, **k: (0, None))
+    monkeypatch.setattr(corescope, "monitors", lambda url, nid, ver, **k: (0, None))
     requests_for(a, {"id": "m3", "type": "monitors", "node_id": NODE})
     assert a.actions["monitors"]["message"] == "CoreScope unreachable"
 
@@ -794,24 +799,22 @@ def test_runtime_shows_community_state(tmp_path, fake, monkeypatch):
 
 
 def test_battery_check_helper_tells_down_from_empty(monkeypatch):
-    from openhop_corescope_observer_plus import openhop
-
-    monkeypatch.setattr(openhop, "corescope_get", lambda *a, **k: (0, None))
-    assert openhop.corescope_battery_check("https://cs", NODE) == (False, {})
-    monkeypatch.setattr(openhop, "corescope_get", lambda *a, **k: (404, None))
-    assert openhop.corescope_battery_check("https://cs", NODE) == (
+    monkeypatch.setattr(corescope, "get", lambda *a, **k: (0, None))
+    assert real_battery_check("https://cs", NODE) == (False, {})
+    monkeypatch.setattr(corescope, "get", lambda *a, **k: (404, None))
+    assert real_battery_check("https://cs", NODE) == (
         True,
         {"latest_ts": None, "by": ""},
     )
     monkeypatch.setattr(
-        openhop,
-        "corescope_get",
+        corescope,
+        "get",
         lambda *a, **k: (
             200,
             {"latest_ts": "2026-11-01T10:00:00Z", "selected": {"observer_name": "Montrave"}},
         ),
     )
-    assert openhop.corescope_battery_check("https://cs", NODE) == (
+    assert real_battery_check("https://cs", NODE) == (
         True,
         {"latest_ts": "2026-11-01T10:00:00Z", "by": "Montrave"},
     )
@@ -916,8 +919,6 @@ def test_no_sensor_temperature_is_no_reading():
 def test_freshness_uses_the_newest_reading_of_any_source(monkeypatch):
     # CoreScope's latest_ts is the shown (best heard) source's; a newer
     # reading from another observer is what counts for the window.
-    from openhop_corescope_observer_plus import openhop as oh
-
     body = {
         "latest_ts": "2026-11-01T15:24:13Z",
         "selected": {"observer_name": "CP-Station-C"},
@@ -926,8 +927,8 @@ def test_freshness_uses_the_newest_reading_of_any_source(monkeypatch):
             {"observer_name": "CP-Station-A", "latest_ts": "2026-11-01T15:28:03Z"},
         ],
     }
-    monkeypatch.setattr(oh, "corescope_get", lambda *a, **k: (200, body))
-    assert oh.corescope_battery_check("https://cs.example", NODE) == (
+    monkeypatch.setattr(corescope, "get", lambda *a, **k: (200, body))
+    assert real_battery_check("https://cs.example", NODE) == (
         True,
         {"latest_ts": "2026-11-01T15:28:03Z", "by": "CP-Station-A"},
     )

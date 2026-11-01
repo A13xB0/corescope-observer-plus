@@ -1,6 +1,7 @@
 import json
 
-from openhop_corescope_observer_plus.openhop import Neighbour, attach_routes
+from openhop_corescope_observer_plus.models import Neighbour
+from openhop_corescope_observer_plus.openhop import attach_routes
 
 WL = "02f1fe" + "aa" * 29
 GARVALD = "4128a6" + "bb" * 29
@@ -85,7 +86,7 @@ def test_manual_repeater_counts_as_direct_and_can_relay():
 
 
 def test_search_corescope_keeps_repeaters(monkeypatch):
-    from openhop_corescope_observer_plus import openhop
+    from openhop_corescope_observer_plus import corescope
 
     class R:
         def raise_for_status(self):
@@ -106,10 +107,10 @@ def test_search_corescope_keeps_repeaters(monkeypatch):
 
     seen = {}
     monkeypatch.setattr(
-        openhop.requests,
+        corescope.requests,
         "get",
         lambda url, params, timeout: seen.update(url=url, params=params) or R(),
     )
-    out = openhop.search_corescope("https://cs.example", "redstone")
+    out = corescope.search_nodes("https://cs.example", "redstone")
     assert seen["url"] == "https://cs.example/api/nodes" and seen["params"]["search"] == "redstone"
     assert [o["name"] for o in out] == ["sco-edi-redstone rigg"]

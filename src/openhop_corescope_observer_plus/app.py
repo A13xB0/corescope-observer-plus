@@ -10,28 +10,13 @@ from pathlib import Path
 from openhop_core import LocalIdentity
 from openhop_core.protocol.packet_builder import PacketBuilder
 
-from . import __version__, guest_key, packet_log
+from . import __version__, corescope, guest_key, packet_log
 from . import shared_key as sk
 from .community import Community, fast_mode, iso_ts, timings
 from .companion import CompanionClient
-from .openhop import (
-    Neighbour,
-    OpenHopAPI,
-    OpenHopConfig,
-    OpenHopError,
-    Route,
-    companion_port,
-    corescope_battery_check,
-    corescope_battery_snapshot,
-    corescope_monitors,
-    corescope_owners,
-    corescope_policy,
-    corescope_responses,
-    fetch_shared_guest_key,
-    load_openhop_config,
-    register_guest_key,
-    search_corescope,
-)
+from .models import Neighbour, OpenHopError, Route
+from .openhop import OpenHopAPI
+from .openhop_config import OpenHopConfig, companion_port, load_openhop_config
 from .poller import (
     ADMIN_STOP,
     NO_BATTERY,
@@ -265,7 +250,7 @@ class App:
         line. fresh is True when CoreScope's newest reading is from after the
         poll started, i.e. this poll (or an observer's overhear of it) reached
         CoreScope. Always a dict so the UI can show "checked, nothing yet"."""
-        snap = corescope_battery_snapshot(self.settings.corescope_url, node_id)
+        snap = corescope.battery_snapshot(self.settings.corescope_url, node_id)
         if not snap:
             return {"reachable": False}
         ts = snap.get("latest_ts")
@@ -295,7 +280,7 @@ class App:
             self._shared_cache = {
                 "url": url,
                 "at": now,
-                "key": sk.SharedKey.from_api(fetch_shared_guest_key(url)),
+                "key": sk.SharedKey.from_api(corescope.shared_guest_key(url)),
             }
         return self._shared_cache.get("key")
 
@@ -349,7 +334,7 @@ class App:
             reg["error"] = str(exc)
             LOG.warning("can't register the polling key: %s", exc)
             return
-        status, resp = register_guest_key(self.settings.corescope_url, body)
+        status, resp = corescope.register_guest_key(self.settings.corescope_url, body)
         if status == 200 and resp.get("ok"):
             reg.update(
                 ok=True, ok_at=now, unsupported=False, error="", expires_at=resp.get("expires_at")
@@ -376,7 +361,7 @@ class App:
         t = timings()
         if self.ohcfg and self.settings.corescope_url and now - c["at"] >= t.refresh_s:
             c["at"] = now
-            body = corescope_owners(
+            body = corescope.owners(
                 self.settings.corescope_url, self.observer_id, plugin_version=__version__
             )
             if body is not None:
@@ -398,7 +383,7 @@ class App:
         if now - max(self._policy_tried, self.community.fetched_at) < max_age:
             return
         self._policy_tried = now
-        status, body = corescope_policy(self.settings.corescope_url, self.observer_id, __version__)
+        status, body = corescope.policy(self.settings.corescope_url, self.observer_id, __version__)
         if status == 200 and isinstance(body, dict):
             self.community.apply(body, now)
         else:
@@ -547,7 +532,7 @@ class App:
         # Standbys queue, each a grace period behind the last, so one steps in
         # for a silent poller and its reading stands the others down.
         wait = window + (self.community.grace_s() * role["rank"] if standby else 0)
-        reachable, snap = corescope_battery_check(self.settings.corescope_url, node_id)
+        reachable, snap = corescope.battery_check(self.settings.corescope_url, node_id)
         if not reachable:
             if standby:
                 # Standby holds through an outage (the poller is probably fine);
@@ -741,7 +726,7 @@ class App:
                     antenna = None
                     if self.settings.check_corescope and self.settings.corescope_url:
                         url = self.settings.corescope_url
-                        antenna = lambda since, u=url: corescope_responses(u, utc_iso(since))
+                        antenna = lambda since, u=url: corescope.responses(u, utc_iso(since))
                     result = poll_one_shared(
                         client,
                         n,
@@ -1006,7 +991,7 @@ class App:
                     query = str(req.get("query") or "").strip()
                     if len(query) < 3:
                         raise RuntimeError("type at least 3 characters")
-                    result["results"] = search_corescope(self.settings.corescope_url, query)
+                    result["results"] = corescope.search_nodes(self.settings.corescope_url, query)
                     result["message"] = f"{len(result['results'])} found in CoreScope"
                 elif kind == "monitors":
                     self._run_monitors(req, result)
@@ -1187,7 +1172,7 @@ class App:
         if not self.settings.corescope_url:
             result.update(ok=False, message="No CoreScope address set")
             return
-        status, body = corescope_monitors(self.settings.corescope_url, node_id, __version__)
+        status, body = corescope.monitors(self.settings.corescope_url, node_id, __version__)
         if status == 200 and isinstance(body, dict):
             result["monitors"] = body
             return

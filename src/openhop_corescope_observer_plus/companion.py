@@ -23,7 +23,7 @@ from dataclasses import dataclass
 CMD_APP_START = 1
 CMD_ADD_UPDATE_CONTACT = 9
 CMD_SEND_LOGIN = 26
-CMD_SEND_STATUS_REQ = 27
+CMD_SEND_STATUS_REQ = 27  # never sent: openHop resends a slow one as a flood
 CMD_GET_CONTACT_BY_KEY = 30
 CMD_SEND_BINARY_REQ = 50
 CMD_SEND_RAW_PACKET = 65
@@ -36,14 +36,11 @@ RESP_CODE_SENT = 6
 
 PUSH_CODE_LOGIN_SUCCESS = 0x85
 PUSH_CODE_LOGIN_FAIL = 0x86
-PUSH_CODE_STATUS_RESPONSE = 0x87
 PUSH_CODE_BINARY_RESPONSE = 0x8C
 PUSH_CODE_LOG_RX_DATA = 0x88  # a raw packet heard off the air: [0x88][snr][rssi][packet]
 
 REQ_TYPE_GET_STATUS = 0x01
 REQ_TYPE_GET_TELEMETRY = 0x03
-
-ERR_CODE_NOT_FOUND = 2
 
 FRAME_TO_SERVER = 0x3C  # '<'
 FRAME_FROM_SERVER = 0x3E  # '>'
@@ -119,11 +116,6 @@ def contact_route(frame: bytes) -> tuple[int, bytes]:
     return value, frame[36 : 36 + nbytes]
 
 
-def contact_out_path_len(frame: bytes) -> int:
-    """out_path_len from a RESP_CODE_CONTACT frame; -1 means unknown (flood)."""
-    return contact_route(frame)[0]
-
-
 # RepeaterStats (MeshCore examples/simple_repeater/MyMesh.h), in order. Older
 # firmware sends a shorter struct; fields past its end are left out.
 STATS_FIELDS = (
@@ -165,11 +157,6 @@ def parse_stats(data: bytes) -> dict:
         else:
             out[name] = value
     return out
-
-
-def stats_battery_mv(stats: bytes) -> int:
-    """batt_milli_volts, the first RepeaterStats field."""
-    return parse_stats(stats)["battery_mv"]
 
 
 # CayenneLPP as MeshCore writes it (src/helpers/sensors/LPPDataHelpers.h):
@@ -355,20 +342,12 @@ class CompanionClient:
         got = self.route(pubkey)
         return got == (path_len_byte(path, hash_size), path)
 
-    def pin_direct(self, pubkey: bytes, name: str) -> bool:
-        """Set the contact's path to direct, zero hops, and read it back."""
-        return self.pin_route(pubkey, name)
-
     def route(self, pubkey: bytes) -> tuple[int, bytes] | None:
         self._send(bytes([CMD_GET_CONTACT_BY_KEY]) + pubkey)
         frame = self._wait({RESP_CODE_CONTACT, RESP_CODE_ERR}, self.timeout)
         if frame is None or frame[0] != RESP_CODE_CONTACT:
             return None
         return contact_route(frame)
-
-    def out_path_len(self, pubkey: bytes) -> int | None:
-        got = self.route(pubkey)
-        return None if got is None else got[0]
 
     def login(self, pubkey: bytes, password: str) -> LoginResult:
         self._send(bytes([CMD_SEND_LOGIN]) + pubkey + password.encode("utf-8"))
@@ -400,11 +379,6 @@ class CompanionClient:
         """Ask for status; the RepeaterStats fields, or None if no answer came."""
         data = self.binary_request(pubkey, bytes([REQ_TYPE_GET_STATUS]))
         return None if data is None else parse_stats(data)
-
-    def battery_mv(self, pubkey: bytes) -> int | None:
-        """Ask for status; the battery in mV, or None if no answer came."""
-        stats = self.status(pubkey)
-        return None if stats is None else stats["battery_mv"]
 
     def telemetry(self, pubkey: bytes) -> bytes | None:
         """Ask for telemetry; the CayenneLPP bytes, or None if no answer came."""

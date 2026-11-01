@@ -32,7 +32,7 @@ from openhop_core.protocol.packet_builder import PacketBuilder
 from openhop_corescope_observer_plus import companion as c
 from openhop_corescope_observer_plus import poller
 from openhop_corescope_observer_plus import shared_key as sk
-from openhop_corescope_observer_plus.openhop import Neighbour, Route
+from openhop_corescope_observer_plus.models import Neighbour, Route
 
 
 def _identity() -> LocalIdentity:
