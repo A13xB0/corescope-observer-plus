@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "openhop.corescope_observer_plus",
   "name": "CoreScope Observer Plus",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Polls repeater batteries and status for CoreScope, sharing the work with other observers so each repeater is polled once, by the closest.",
   "runtime": {
     "type": "python",

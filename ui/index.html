@@ -164,7 +164,16 @@
     </section>
 
     <section id="v-activity" class="view" role="tabpanel" aria-labelledby="tab-activity" hidden>
-      <p class="muted">The last 20 requests this station sent, and what came back.</p>
+      <section class="glance" aria-label="Today">
+        <div><b id="a-answered">0</b><span>successful requests today</span></div>
+        <div><b id="a-none">0</b><span>no answer today</span></div>
+        <div><b id="a-rate">—</b><span>answered today</span></div>
+        <div><b id="a-floods">0</b><span>floods today</span></div>
+      </section>
+      <p class="muted small" id="a-floodby" hidden></p>
+      <p class="muted small" id="a-history"></p>
+      <h2 class="activity-h">Last 20 packets</h2>
+      <p class="muted">What this station sent, and what came back.</p>
       <div class="tbl"><table>
         <thead><tr><th scope="col">Time</th><th scope="col">Repeater</th><th scope="col">Sent</th><th scope="col">Route</th><th scope="col">Key</th><th scope="col">Answer</th></tr></thead>
         <tbody id="packets"></tbody>

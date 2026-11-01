@@ -513,3 +513,21 @@ def test_an_admin_answer_stays_off_with_the_default_on(tmp_path):
         assert a.settings.shared_key_targets == [] and a.settings.guest_key_overrides == {NODE: False}
     finally:
         fake.close()
+
+
+def test_activity_counts_answers_no_answers_and_floods_by_day():
+    from openhop_corescope_observer_plus import packet_log as pl
+    stats = {}
+    log = pl.PacketLog([], stats=stats)
+    n = log.for_node(NODE, "West Lomond", "guest key")
+    a = n.sent("telemetry request", "direct"); n.answered(a, "radio", flooded=False)
+    b = n.sent("telemetry request", "direct"); n.answered(b, "radio", flooded=True)
+    c = n.sent("telemetry request", "direct"); n.unanswered(c)
+    n.none_expected(n.sent("route", "direct"))
+    # A reply CoreScope finds later turns the no answer into a success, once.
+    n.answered(c, "CoreScope", flooded=False)
+    n.answered(c, "CoreScope", flooded=False)
+    t = log.summary()["today"]
+    assert (t["answered"], t["no_answer"], t["flooded"]) == (3, 0, 1)
+    assert t["flooded_by"] == [{"name": "West Lomond", "count": 1}]
+    assert pl.PacketLog([], stats=stats).summary()["week"]["answered"] == 3  # survives a restart

@@ -493,6 +493,23 @@
   }
   function renderPackets() {
     $("packets").innerHTML = packetRows(runtime.packet_log);
+    renderActivity();
+  }
+  // Counts for the station's day. A flood is an answer that came back flooded
+  // because the repeater had no route to us.
+  function renderActivity() {
+    const a = runtime.activity;
+    if (!a) return;
+    const t = a.today, y = a.yesterday, w = a.week;
+    const asked = t.answered + t.no_answer + t.refused;
+    $("a-answered").textContent = t.answered;
+    $("a-none").textContent = t.no_answer + t.refused;
+    $("a-rate").textContent = asked ? `${Math.round(t.answered * 100 / asked)}%` : "—";
+    $("a-floods").textContent = t.flooded;
+    const by = (t.flooded_by || []).map((n) => `${n.name || "Unknown"} ×${n.count}`).join(", ");
+    $("a-floodby").hidden = !by;
+    $("a-floodby").textContent = by ? `Flooded back today: ${by}` : "";
+    $("a-history").textContent = `Yesterday: ${y.answered} successful, ${y.flooded} flood${y.flooded === 1 ? "" : "s"}. Last 7 days: ${w.answered} successful, ${w.flooded} flood${w.flooded === 1 ? "" : "s"}.`;
   }
 
   // The status beside Check now, as [text, kind, tooltip].
@@ -677,8 +694,8 @@
 
     const stopped = !!gate() || !config.enabled;
     const next = you.map((n) => n.community.next_at).filter(Boolean).sort((a, b) => a - b)[0];
-    $("g-you").textContent = stopped ? 0 : you.length;
-    $("g-others").textContent = stopped ? 0 : others.length;
+    $("g-you").textContent = you.length;
+    $("g-others").textContent = others.length;
     $("g-attention").textContent = attention.length;
     $("g-next").textContent = stopped || !next ? "—" : hhmm(Math.max(next, Date.now() / 1000));
 
@@ -1072,6 +1089,7 @@
     applyStatus("");
     $("work").classList.add("open");
     $("details").hidden = false;
+    if (window.innerWidth <= 900) $("details").scrollIntoView({ block: "start" });  // it sits below the list here
     fillForm(n);
     fillFacts(n);
     loadMonitors(nodeId);

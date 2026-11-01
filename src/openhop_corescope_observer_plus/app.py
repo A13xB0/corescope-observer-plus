@@ -76,7 +76,8 @@ class App:
         self.companion_key = ""
         self.actions: dict[str, dict] = self.state.value.setdefault("actions", {})
         # The last packets sent and what answered them (packet_log.py).
-        self.packets = packet_log.PacketLog(self.state.value.setdefault("packet_log", []))
+        self.packets = packet_log.PacketLog(self.state.value.setdefault("packet_log", []),
+                                            stats=self.state.value.setdefault("packet_stats", {}))
         self._last_refresh = 0.0
         self._shared_cache: dict = {}  # the shared key fetched from CoreScope, cached by URL
         self._own_key: sk.SharedKey | None = None  # this observer's polling key (guest_key.py)
@@ -1117,6 +1118,7 @@ class App:
             "brokers": brokers,
             "actions": self.actions,
             "packet_log": self.packets.entries,
+            "activity": self.packets.summary(),
             "shared_key": self._shared_key_runtime(),
             "corescope": {
                 "url": self.settings.corescope_url,
