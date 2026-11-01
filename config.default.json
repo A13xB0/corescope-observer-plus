@@ -14,7 +14,8 @@
   "temperature_targets": [],
   "manual_repeaters": [],
   "corescope_url": "https://corescope.scotmesh.net",
-  "shared_key_targets": [],
+  "guest_key_default": true,
+  "guest_key_overrides": {},
   "check_corescope": true,
   "community": true
 }

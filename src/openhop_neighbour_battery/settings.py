@@ -30,7 +30,8 @@ DEFAULTS = {
     "corescope_url": "https://corescope.scotmesh.net",
     "max_hops": 0,
     "alternative_routes": False,
-    "shared_key_targets": [],
+    "guest_key_default": True,
+    "guest_key_overrides": {},
     "check_corescope": True,
     "guest_passwords": {},
     "poll_intervals": {},
@@ -65,9 +66,13 @@ class Settings:
     corescope_url: str = "https://corescope.scotmesh.net"
     max_hops: int = 0  # 0 = direct neighbours only, 1 = also through one relay
     alternative_routes: bool = False
-    # Repeaters opted in to the shared guest key (polled under the key CoreScope
+    # Repeaters on the shared guest key (polled under the key CoreScope
     # serves, if it serves one, and if they have no saved password).
+    # Repeaters polled under the guest key: every target, on the default, except
+    # what guest_key_overrides sets by hand. Worked out by parse().
     shared_key_targets: list[str] = field(default_factory=list)
+    guest_key_default: bool = True
+    guest_key_overrides: dict[str, bool] = field(default_factory=dict)
     # Before a shared-key repeater's early retry, ask CoreScope whether it
     # already has a fresh reading (from any observer); if so, skip the retry.
     check_corescope: bool = True
@@ -137,8 +142,20 @@ def parse(raw: dict) -> Settings:
         s.corescope_url = url
     elif "corescope_url" in raw and url == "":
         s.corescope_url = ""  # cleared on purpose: no CoreScope (no shared key, no checks)
-    s.shared_key_targets = sorted({str(k).lower() for k in raw.get("shared_key_targets") or []
-                                   if KEY_RE.match(str(k).lower())})
+    s.guest_key_default = bool(raw.get("guest_key_default", True))
+    ov = raw.get("guest_key_overrides")
+    s.guest_key_overrides = {str(k).lower(): bool(v) for k, v in (ov.items() if isinstance(ov, dict) else [])
+                             if KEY_RE.match(str(k).lower())}
+    if "guest_key_default" not in raw and "shared_key_targets" in raw:
+        # Saved before the default existed: repeaters on the guest key follow
+        # the default, and a selected one that wasn't stays off by hand.
+        was = {str(k).lower() for k in raw.get("shared_key_targets") or []}
+        s.guest_key_overrides = {k: False for k in s.targets if k not in was}
+        s.guest_key_overrides.update({k: True for k in was
+                                      if KEY_RE.match(k) and k not in s.targets})
+    s.shared_key_targets = sorted(
+        k for k in {*s.targets, *s.guest_key_overrides}
+        if s.guest_key_overrides.get(k, s.guest_key_default))
     gp = raw.get("guest_passwords")
     s.guest_passwords = {str(k).lower(): v for k, v in (gp.items() if isinstance(gp, dict) else [])
                          if KEY_RE.match(str(k).lower()) and v in ("", "hello")}

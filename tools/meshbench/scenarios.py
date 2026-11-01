@@ -138,6 +138,8 @@ def takeover():
     check(first is not None and first[1] != who, f"a standby stepped in ({first})")
     check(first is not None and secs(first[0]) - last >= WINDOW + GRACE - 15,
           f"not before window plus grace ({secs(first[0]) - last if first else '-'} s after the last reading)")
+    near = [x for x in rows if first and x[1] != first[1] and secs(x[0]) - secs(first[0]) < GRACE]
+    check(not near, f"only one standby stepped in ({rows})")
     r = roles("CP_WLOMOND")
     check(r.get(who) != "polling" and "polling" in r.values(), f"the poller changed ({r})")
     b.start_plugin(who)

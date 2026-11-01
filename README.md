@@ -45,7 +45,7 @@ Off by default; turned on per repeater from its Details.
 
 The plugin keeps no key of its own: it fetches the shared key from CoreScope
 (`GET /api/shared-guest/key` on `corescope_url`). When CoreScope serves a key,
-opted-in repeaters are polled under it; when it serves none, they fall back to
+repeaters using it (all of them by default; see Poll with the guest key) are polled under it; when it serves none, they fall back to
 this observer's own key. The key is public by design.
 
 - Requests, logins and the route update are built and encrypted by the plugin

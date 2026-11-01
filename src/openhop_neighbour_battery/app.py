@@ -135,6 +135,11 @@ class App:
             write_raw(self.data_dir, raw)
             self.state.save()
         self.settings = parse(raw)
+        if "guest_key_default" not in raw and "shared_key_targets" in raw:
+            raw.pop("shared_key_targets")
+            raw.update(guest_key_default=self.settings.guest_key_default,
+                       guest_key_overrides=self.settings.guest_key_overrides)
+            write_raw(self.data_dir, raw)
         self.community.reset_for_url(self.settings.corescope_url)
         # Re-opting a repeater into the shared key (adding it back to the list
         # after an admin answer disabled it) clears the admin stop, so it can
@@ -501,7 +506,7 @@ class App:
     def uses_shared_key(self, node_id: str) -> bool:
         """Whether this repeater is polled under the shared key.
 
-        Only if the operator opted it in, the key is set up, and — the safety
+        Only if the default or the repeater's own setting says so, the key is set up, and — the safety
         gate — it has no saved password and has never answered the key as
         admin. A repeater with a password can't be polled with a key that only
         ever logs in blank, and one that handed the key admin is never polled
@@ -680,9 +685,10 @@ class App:
         the node state for the UI and CoreScope alert.
         """
         raw = read_raw(self.data_dir)
-        targets = [t for t in (raw.get("shared_key_targets") or []) if str(t).lower() != n.node_id]
-        raw["shared_key_targets"] = targets
+        # An override, so a guest key default of on can't turn it back on.
+        raw["guest_key_overrides"] = {**(raw.get("guest_key_overrides") or {}), n.node_id: False}
         write_raw(self.data_dir, raw)
+        self.settings.guest_key_overrides[n.node_id] = False
         self.settings.shared_key_targets = [t for t in self.settings.shared_key_targets if t != n.node_id]
         LOG.warning("%s (%s) answered the shared guest key as ADMIN: shared key disabled for it, "
                     "removal %s", n.name, n.node_id[:8],
@@ -1063,7 +1069,9 @@ class App:
                 "uptime_secs": st.get("uptime_secs"), "method": st.get("method"),
                 "status_ignored": bool(st.get("status_ignored")),
                 "key_mode": "shared" if self.uses_shared_key(n.node_id) else "own",
-                "shared_opt_in": n.node_id in self.settings.shared_key_targets,
+                "shared_opt_in": (n.node_id in self.settings.shared_key_targets
+                                  and not self.secrets.has_password(n.node_id)),
+                "guest_overridden": n.node_id in self.settings.guest_key_overrides,
                 "shared_admin_seen": bool(st.get("shared_admin_seen")),
                 "shared_admin_removed": st.get("shared_admin_removed"),
                 "shared_admin_at": st.get("shared_admin_at"),

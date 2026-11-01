@@ -55,8 +55,10 @@
   // change made elsewhere (another tab, or the plugin itself) would undo it.
   // Per-repeater settings are therefore merged: only what this page changed
   // since it last loaded or saved is applied on top of the latest saved copy.
-  const LIST_KEYS = ["targets", "shared_key_targets", "temperature_targets"];
-  const MAP_KEYS = ["guest_passwords", "poll_intervals"];
+  let guestShown = false;  // the Details checkbox as opened
+  let guestUseDefault = false;  // Use the default was pressed in Details
+  const LIST_KEYS = ["targets", "temperature_targets"];
+  const MAP_KEYS = ["guest_passwords", "poll_intervals", "guest_key_overrides"];
   async function mergeLatest() {
     let latest;
     try {
@@ -208,7 +210,11 @@
   const routeName = (r) => (r.hops ? `1 hop ${esc(r.label)}` : "Direct");
   const KEY_RE = /^[0-9a-f]{64}$/;
   const manualList = () => config.manual_repeaters || [];
-  const sharedTargets = () => new Set(config.shared_key_targets || []);
+  const guestDefault = () => config.guest_key_default !== false;
+  const guestFor = (id) => {
+    const ov = (config.guest_key_overrides || {})[id];
+    return ov === undefined ? guestDefault() : ov;
+  };
   const snrText = (snr) => (snr == null ? "" : `SNR ${snr > 0 ? "+" : ""}${Number(snr).toFixed(1)} dB`);
 
   function routeCell(n) {
@@ -264,13 +270,19 @@
   // A small badge showing how a repeater is polled: under the shared key, or
   // stopped because it answered the key as admin.
   function keyBadge(n) {
+    const ov = (config.guest_key_overrides || {})[n.node_id];
+    if (ov === undefined) return keyState(n);
+    return keyState(n) + ` · <span class="pill warn" title="Set by hand in Details: guest key ${ov ? "on" : "off"}. The default doesn't change it until you press Use the default.">overridden</span>`;
+  }
+
+  function keyState(n) {
     if (n.shared_admin_seen) return ' · <span class="pill bad" title="Answered the guest key as admin; guest polling stopped here">admin!</span>';
     if (n.flood_replies >= 2) return ' · <span class="pill bad" title="Its replies keep coming back flooded (our return route isn\'t taking), so it is polled only once a day until a reply comes back direct">floods · daily</span>';
     if (n.key_mode === "shared") {
       const own = (runtime.shared_key || {}).kind === "own";
       return ` · <span class="pill good" title="${own ? "Polled under this plugin's separate polling key (not the repeater's key), registered with CoreScope" : "Polled under the public shared guest key"}">${own ? "guest key" : "shared"}</span>`;
     }
-    if (n.shared_opt_in) return ' · <span class="muted small" title="Opted in, but the shared key is not usable here yet">shared (off)</span>';
+    if (n.shared_opt_in) return ' · <span class="muted small" title="Set to use it, but the guest key is not usable here yet">shared (off)</span>';
     return "";
   }
 
@@ -466,6 +478,7 @@
       $("interval_minutes").value = String(config.interval_minutes || 60);
       $("status_every_hours").value = String(config.status_every_hours || 6);
       $("alternative_routes").checked = !!config.alternative_routes;
+      $("guest_key_default").checked = guestDefault();
       const hops = String(config.max_hops ? 1 : 0);
       document.querySelectorAll('input[name="max_hops"]').forEach((el) => { el.checked = el.value === hops; });
     }
@@ -481,7 +494,7 @@
     // only honest once a repeater is opted in and the fetch came back empty.
     skPill.textContent = sk.configured ? (nTargets ? `${nTargets} repeater${nTargets === 1 ? "" : "s"}${sk.kind === "own" ? " · polling key" : " · shared key"}` : "ready")
       : nTargets ? "No key from CoreScope"
-      : corescopeSet ? "Opt a repeater in to use it"
+      : corescopeSet ? "Not in use"
       : "No CoreScope set";
     skPill.className = "pill " + (sk.configured ? "good" : nTargets ? "warn" : "neutral");
     $("shared-name").textContent = sk.kind === "own" ? "This plugin's polling key (separate from the repeater's key)"
@@ -553,6 +566,7 @@
     config.targets = [...boxes.filter((el) => el.checked).map((el) => el.dataset.node),
       ...(config.targets || []).filter((k) => !shown.has(k))];
     config.alternative_routes = $("alternative_routes").checked;
+    config.guest_key_default = $("guest_key_default").checked;
     config.max_hops = maxHops();
     config.temperature_targets = [...tempSet()];
     const url = $("corescope_url").value.trim().replace(/\/+$/, "");
@@ -862,7 +876,10 @@
     const sk = runtime.shared_key || {};
     const pwSet = pending !== undefined ? !!pending : n.password_set;
     $("shared-block").hidden = !(runtime.corescope && runtime.corescope.url);
-    $("shared-this").checked = sharedTargets().has(nodeId);
+    $("shared-this").checked = guestFor(nodeId);
+    guestShown = guestFor(nodeId);
+    guestUseDefault = false;
+    $("guest-use-default").hidden = (config.guest_key_overrides || {})[nodeId] === undefined;
     const gp = (config.guest_passwords || {})[nodeId];
     $("guest-password").value = gp === undefined ? "auto" : gp;
     $("guest-pw-state").textContent = n.guest_password === "hello" ? "✓ Last logged in with hello."
@@ -936,11 +953,12 @@
       const temps = new Set(tempSet());
       if ($("temp-this").checked) temps.add(detailsTarget); else temps.delete(detailsTarget);
       tempTargets = temps;
-      if (!$("shared-this").disabled) {
-        const targets = sharedTargets();
-        if ($("shared-this").checked) targets.add(detailsTarget); else targets.delete(detailsTarget);
-        config.shared_key_targets = [...targets];
-      }
+      // Only a choice made here becomes an override; opening and applying
+      // the dialog leaves a repeater following the default.
+      const ovs = { ...(config.guest_key_overrides || {}) };
+      if (guestUseDefault) delete ovs[detailsTarget];
+      else if (!$("shared-this").disabled && $("shared-this").checked !== guestShown) ovs[detailsTarget] = $("shared-this").checked;
+      config.guest_key_overrides = ovs;
     }
     // Save straight away — the repeater's own dialog shouldn't need a second
     // trip to the page's Save bar. The dialog closes (method="dialog"); a
@@ -954,7 +972,13 @@
     $("guest-pw-block").hidden = !guest;
     $("companion-pw-block").hidden = guest;
   }
-  $("shared-this").addEventListener("change", showPasswordBlock);
+  $("shared-this").addEventListener("change", () => { guestUseDefault = false; showPasswordBlock(); });
+  $("guest-use-default").addEventListener("click", () => {
+    guestUseDefault = true;
+    $("shared-this").checked = guestDefault();
+    $("guest-use-default").hidden = true;
+    showPasswordBlock();
+  });
   // Closing the dialog abandons a Test that is still being watched.
   $("details-dialog").addEventListener("close", () => { testRun++; monitorsRun++; });
 

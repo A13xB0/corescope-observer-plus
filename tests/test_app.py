@@ -45,7 +45,7 @@ def write_openhop_config(tmp_path, port):
 def make_app(tmp_path, fake, **cfg):
     data = tmp_path / "data"
     data.mkdir()
-    conf = {"openhop_config_path": str(write_openhop_config(tmp_path, fake.port)), **cfg}
+    conf = {"openhop_config_path": str(write_openhop_config(tmp_path, fake.port)), "shared_key_targets": [], **cfg}
     (data / "config.json").write_text(json.dumps(conf))
     a = App(data)
     a.load_settings()
@@ -459,3 +459,41 @@ def test_never_uploads_the_repeaters_own_key():
     same = sk.SharedKey("x", 1, ident.get_public_key(), ident.get_signing_key_bytes())
     with pytest.raises(ValueError):
         guest_key.registration_body(ident, same)
+
+
+GK_OTHER = "cd" * 32
+
+
+def test_guest_key_default_covers_new_repeaters_unless_overridden():
+    s = parse({"targets": [NODE, GK_OTHER], "guest_key_default": True, "guest_key_overrides": {GK_OTHER: False}})
+    assert s.shared_key_targets == [NODE]
+    s = parse({"targets": [NODE, GK_OTHER], "guest_key_default": False, "guest_key_overrides": {GK_OTHER: True}})
+    assert s.shared_key_targets == [GK_OTHER]
+    assert parse({"targets": [NODE]}).shared_key_targets == [NODE]  # on by default
+
+
+def test_settings_from_before_the_default_keep_what_they_did(tmp_path):
+    fake = FakeCompanion()
+    try:
+        a, data = make_app(tmp_path, fake, targets=[NODE, GK_OTHER], shared_key_targets=[NODE])
+        assert a.settings.shared_key_targets == [NODE]
+        saved = json.loads((data / "config.json").read_text())
+        assert "shared_key_targets" not in saved and saved["guest_key_default"] is True
+        assert saved["guest_key_overrides"] == {GK_OTHER: False}
+        a.load_settings()
+        assert a.settings.shared_key_targets == [NODE]
+    finally:
+        fake.close()
+
+
+def test_an_admin_answer_stays_off_with_the_default_on(tmp_path):
+    from openhop_neighbour_battery.poller import PollResult
+    fake = FakeCompanion()
+    try:
+        a, data = make_app(tmp_path, fake, targets=[NODE], guest_key_default=True)
+        assert a.settings.shared_key_targets == [NODE]
+        a._disable_shared_key(Neighbour(NODE, "West Lomond", 1.0, -100, 0, True), PollResult("admin_stop"))
+        a.load_settings()
+        assert a.settings.shared_key_targets == [] and a.settings.guest_key_overrides == {NODE: False}
+    finally:
+        fake.close()

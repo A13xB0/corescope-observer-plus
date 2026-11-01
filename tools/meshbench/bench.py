@@ -24,7 +24,7 @@ NATIVE = PROJ / "meshcore-native"
 CRYPTO = HOME / "msim/arduinolibs/libraries/Crypto"
 MB_BIN = os.environ.get("MESHBENCH", str(HOME / ".local/bin/meshbench-nb"))
 SOCK = "/tmp/claude-1000/nbbench.sock"
-IMAGE = os.environ.get("NB_CORESCOPE_IMAGE", "corescope-local:cpbench-f66eb54e")
+IMAGE = os.environ.get("NB_CORESCOPE_IMAGE", "corescope-local:cpbench-f10a4fef")
 VENV = BENCH / "venv"
 CS_URL = "http://127.0.0.1:13000"
 TAG = "repeater-v1.18.0"
@@ -237,6 +237,7 @@ def start_plugin(st):
     cfg = {"openhop_api_url": f"http://127.0.0.1:{http}", "openhop_config_path": str(d / "config.yaml"),
            "companion_name": "NeighbourBattery", "enabled": True, "targets": list(reps.values()),
            "brokers": ["LocalScope"], "corescope_url": CS_URL, "max_hops": 1, "community": True, "spacing_seconds": 5}
+    cfg["guest_key_default"] = os.environ.get("NB_GUEST") == "1"  # as most real stations do
     if not (pd / "secrets.json").exists():
         cfg["api_token_input"] = (d / "token").read_text().strip()
     (pd / "config.json").write_text(json.dumps(cfg, indent=1))
@@ -267,7 +268,7 @@ def manager(st="A"):
 
 
 def up():
-    stop("plugin"); stop("openhop"); stop("socat")
+    stop("plugin"); stop("manager"); stop("openhop"); stop("socat")
     time.sleep(2)
     BENCH.mkdir(parents=True, exist_ok=True)
     venv()
@@ -349,7 +350,7 @@ if __name__ == "__main__":
     if cmd == "up":
         up()
     elif cmd == "down":
-        stop("plugin"); stop("openhop"); stop("socat"); stop("meshbench")
+        stop("plugin"); stop("manager"); stop("openhop"); stop("socat"); stop("meshbench")
         sh("docker rm -f nbbench-corescope", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         Path(SOCK).unlink(missing_ok=True)
     elif cmd == "plugins":

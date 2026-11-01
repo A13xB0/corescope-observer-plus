@@ -17,6 +17,8 @@ direct 3 min, one hop 6 min, grace 1 min.
 python3 bench.py up             # start it all (builds firmware on first use)
 python3 scenarios.py            # every scenario, about 50 min
 python3 scenarios.py kill_switch takeover
+NB_GUEST=1 python3 bench.py up  # the same, polling under the guest key
+python3 bench.py manager A      # run A through the plugin manager, for the real page
 python3 bench.py status         # who polls what
 python3 bench.py policy paused=true
 python3 bench.py down

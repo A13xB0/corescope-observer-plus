@@ -41,7 +41,7 @@
         <h2 id="shared-h">Guest key</h2>
         <span id="shared-state" class="pill neutral">Off</span>
       </div>
-      <p class="muted small">A guest identity used to poll a repeater, so any observer that hears the reply can feed CoreScope. The plugin makes a separate polling key for this (never the repeater's own key, which is never shared) and registers it with CoreScope, which decodes the replies others overhear and credits them here; on a CoreScope without that, the public shared key is used instead. CoreScope also picks one observer to poll each repeater, so others don't repeat the request. Opt a repeater in from its Details. The key only ever logs in blank or with "hello", never as admin.</p>
+      <p class="muted small">A guest identity used to poll a repeater, so any observer that hears the reply can feed CoreScope. The plugin makes a separate polling key for this (never the repeater's own key, which is never shared) and registers it with CoreScope, which decodes the replies others overhear and credits them here; on a CoreScope without that, the public shared key is used instead. CoreScope also picks one observer to poll each repeater, so others don't repeat the request. The Poll with the guest key setting under Polling sets the default; a repeater's Details can override it. The key only ever logs in blank or with "hello", never as admin.</p>
       <div id="shared-set" class="kv">
         <div><span class="muted">Key</span> <strong id="shared-name">—</strong> <span id="shared-ver" class="muted small"></span> <code id="shared-pub" class="muted">—</code></div>
         <div><span class="muted">From</span> <code id="shared-from">—</code></div>
@@ -91,6 +91,8 @@
             <label><input type="radio" name="max_hops" value="1"> Up to 1 hop</label>
           </span>
           <span class="muted small">One-hop requests go direct through a relay you hear directly. Each costs the relay two transmissions.</span></span></div>
+        <label class="option"><input id="guest_key_default" type="checkbox"> <span><strong>Poll with the guest key</strong>
+          <span class="muted small">The default for every repeater, so other observers can feed CoreScope its replies. A repeater set by hand in its Details keeps its own choice and shows Overridden. One with a saved password stays on the companion key.</span></span></label>
         <label class="option"><input id="alternative_routes" type="checkbox"> <span><strong>Try an alternative route</strong>
           <span class="muted small">If the best route gets no answer, the one retry uses the next route heard in adverts.</span></span></label>
       </div>
@@ -182,6 +184,7 @@
         <span class="muted small" style="display:block">The chip temperature arrives with the battery reading (ESP32 and nRF52 boards), so this costs no extra airtime.</span></span></label>
       <div id="shared-block" hidden>
         <label class="check"><input id="shared-this" type="checkbox"> <span><strong>Poll with the guest key</strong>
+          <button id="guest-use-default" class="button ghost small" type="button" hidden>Use the default</button>
           <span class="muted small" style="display:block">Polls this repeater as a guest under a separate polling key the plugin made for this purpose, so other observers can feed CoreScope its readings. CoreScope gets that polling key to decrypt them; this repeater's own key is never shared.</span></span></label>
         <ul class="consent muted small">
           <li>Anyone can read its replies. That's the point: other observers feed CoreScope.</li>
