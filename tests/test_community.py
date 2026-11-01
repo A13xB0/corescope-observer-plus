@@ -54,6 +54,7 @@ def ready(tmp_path, fake, monkeypatch, **cfg):
                               routes=[Route(relay_id=RELAY, relay_name="West Lomond", hash_size=3,
                                             adverts=4, snr=2.0)])]
     a.settings.max_hops = 1
+    a.settings.spacing_seconds = 0  # no on-air spacing to wait out in tests
     return a, data
 
 
