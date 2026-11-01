@@ -92,7 +92,8 @@
           </span>
           <span class="muted small">One-hop requests go direct through a relay you hear directly. Each costs the relay two transmissions.</span></span></div>
         <label class="option"><input id="guest_key_default" type="checkbox"> <span><strong>Poll with the guest key</strong>
-          <span class="muted small">The default for every repeater, so other observers can feed CoreScope its replies. A repeater set by hand in its Details keeps its own choice and shows Overridden. One with a saved password stays on the companion key.</span></span></label>
+          <span class="muted small">The default for every repeater, so other observers can feed CoreScope its replies. A repeater set by hand in its Details keeps its own choice and shows Overridden; the rest follow this. One with a saved password stays on the companion key.
+          <button id="clear-overrides" class="button ghost small" type="button" hidden></button></span></span></label>
         <label class="option"><input id="alternative_routes" type="checkbox"> <span><strong>Try an alternative route</strong>
           <span class="muted small">If the best route gets no answer, the one retry uses the next route heard in adverts.</span></span></label>
       </div>

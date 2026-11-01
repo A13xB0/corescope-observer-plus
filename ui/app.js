@@ -479,6 +479,7 @@
       $("status_every_hours").value = String(config.status_every_hours || 6);
       $("alternative_routes").checked = !!config.alternative_routes;
       $("guest_key_default").checked = guestDefault();
+      showClearOverrides();
       const hops = String(config.max_hops ? 1 : 0);
       document.querySelectorAll('input[name="max_hops"]').forEach((el) => { el.checked = el.value === hops; });
     }
@@ -959,6 +960,7 @@
       if (guestUseDefault) delete ovs[detailsTarget];
       else if (!$("shared-this").disabled && $("shared-this").checked !== guestShown) ovs[detailsTarget] = $("shared-this").checked;
       config.guest_key_overrides = ovs;
+      showClearOverrides();
     }
     // Save straight away — the repeater's own dialog shouldn't need a second
     // trip to the page's Save bar. The dialog closes (method="dialog"); a
@@ -973,6 +975,17 @@
     $("companion-pw-block").hidden = guest;
   }
   $("shared-this").addEventListener("change", () => { guestUseDefault = false; showPasswordBlock(); });
+  function showClearOverrides() {
+    const n = Object.keys(config.guest_key_overrides || {}).length;
+    $("clear-overrides").hidden = !n;
+    $("clear-overrides").textContent = `Clear overrides (${n})`;
+  }
+  $("clear-overrides").addEventListener("click", (e) => {
+    e.preventDefault();  // it sits inside the setting's label
+    config.guest_key_overrides = {};
+    showClearOverrides();
+    saveAll().catch((err) => { dirty = true; saveStatus(`Not saved: ${err.message}`, "bad"); });
+  });
   $("guest-use-default").addEventListener("click", () => {
     guestUseDefault = true;
     $("shared-this").checked = guestDefault();

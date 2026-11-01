@@ -146,13 +146,6 @@ def parse(raw: dict) -> Settings:
     ov = raw.get("guest_key_overrides")
     s.guest_key_overrides = {str(k).lower(): bool(v) for k, v in (ov.items() if isinstance(ov, dict) else [])
                              if KEY_RE.match(str(k).lower())}
-    if "guest_key_default" not in raw and "shared_key_targets" in raw:
-        # Saved before the default existed: repeaters on the guest key follow
-        # the default, and a selected one that wasn't stays off by hand.
-        was = {str(k).lower() for k in raw.get("shared_key_targets") or []}
-        s.guest_key_overrides = {k: False for k in s.targets if k not in was}
-        s.guest_key_overrides.update({k: True for k in was
-                                      if KEY_RE.match(k) and k not in s.targets})
     s.shared_key_targets = sorted(
         k for k in {*s.targets, *s.guest_key_overrides}
         if s.guest_key_overrides.get(k, s.guest_key_default))

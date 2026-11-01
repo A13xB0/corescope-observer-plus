@@ -45,7 +45,10 @@ def write_openhop_config(tmp_path, port):
 def make_app(tmp_path, fake, **cfg):
     data = tmp_path / "data"
     data.mkdir()
-    conf = {"openhop_config_path": str(write_openhop_config(tmp_path, fake.port)), "shared_key_targets": [], **cfg}
+    conf = {"openhop_config_path": str(write_openhop_config(tmp_path, fake.port)), **cfg}
+    # Tests name the repeaters on the guest key; everything else stays off it.
+    conf.setdefault("guest_key_default", False)
+    conf["guest_key_overrides"] = {k: True for k in conf.pop("shared_key_targets", [])}
     (data / "config.json").write_text(json.dumps(conf))
     a = App(data)
     a.load_settings()
@@ -472,16 +475,29 @@ def test_guest_key_default_covers_new_repeaters_unless_overridden():
     assert parse({"targets": [NODE]}).shared_key_targets == [NODE]  # on by default
 
 
-def test_settings_from_before_the_default_keep_what_they_did(tmp_path):
+def test_an_old_opt_in_list_moves_everything_to_the_default(tmp_path):
     fake = FakeCompanion()
     try:
-        a, data = make_app(tmp_path, fake, targets=[NODE, GK_OTHER], shared_key_targets=[NODE])
-        assert a.settings.shared_key_targets == [NODE]
-        saved = json.loads((data / "config.json").read_text())
-        assert "shared_key_targets" not in saved and saved["guest_key_default"] is True
-        assert saved["guest_key_overrides"] == {GK_OTHER: False}
+        a, data = make_app(tmp_path, fake, targets=[NODE, GK_OTHER])
+        saved = {k: v for k, v in json.loads((data / "config.json").read_text()).items()
+                 if not k.startswith("guest_key")}
+        (data / "config.json").write_text(json.dumps({**saved, "shared_key_targets": [NODE]}))
         a.load_settings()
-        assert a.settings.shared_key_targets == [NODE]
+        assert a.settings.shared_key_targets == sorted([NODE, GK_OTHER])
+        now = json.loads((data / "config.json").read_text())
+        assert "shared_key_targets" not in now and now["guest_key_default"] is True
+        assert now["guest_key_overrides"] == {}
+    finally:
+        fake.close()
+
+
+def test_the_default_never_restarts_a_repeater_that_answered_as_admin(tmp_path):
+    fake = FakeCompanion()
+    try:
+        a, _ = make_app(tmp_path, fake, targets=[NODE], guest_key_default=True)
+        a.state.node(NODE)["shared_admin_seen"] = True
+        a.load_settings()
+        assert a.state.node(NODE)["shared_admin_seen"] and a.uses_shared_key(NODE) is False
     finally:
         fake.close()
 

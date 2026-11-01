@@ -136,17 +136,18 @@ class App:
             self.state.save()
         self.settings = parse(raw)
         if "guest_key_default" not in raw and "shared_key_targets" in raw:
+            # The guest key used to be opt-in. It is opt-out now: every repeater
+            # follows the default, and the old opt-in list goes.
             raw.pop("shared_key_targets")
-            raw.update(guest_key_default=self.settings.guest_key_default,
-                       guest_key_overrides=self.settings.guest_key_overrides)
+            raw.update(guest_key_default=True, guest_key_overrides={})
             write_raw(self.data_dir, raw)
         self.community.reset_for_url(self.settings.corescope_url)
-        # Re-opting a repeater into the shared key (adding it back to the list
-        # after an admin answer disabled it) clears the admin stop, so it can
-        # be tried again deliberately.
-        for node_id in self.settings.shared_key_targets:
+        # Turning the guest key back on for a repeater by hand, after an admin
+        # answer stopped it, clears the stop so it can be tried again. Only by
+        # hand: the default never restarts it.
+        for node_id, on in self.settings.guest_key_overrides.items():
             st = self.state.value.get("nodes", {}).get(node_id)
-            if st and st.get("shared_admin_seen"):
+            if on and st and st.get("shared_admin_seen"):
                 for k in ("shared_admin_seen", "shared_admin_removed", "shared_admin_at"):
                     st.pop(k, None)
                 self.state.save()
