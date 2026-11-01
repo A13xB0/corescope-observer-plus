@@ -1,7 +1,6 @@
 """What the plugin page asks for: connect, Test, Check now, lookups.
 
-The plugin is single-threaded, so a long request writes runtime.json itself as
-it goes; that is the only way the page sees progress.
+Single-threaded, so a long request writes runtime.json itself to show progress.
 """
 
 from __future__ import annotations

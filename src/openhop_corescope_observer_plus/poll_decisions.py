@@ -84,13 +84,13 @@ class PollDecisions:
             return _skip(st, "standby", text, now, waiting)
         latest = self._newest_reading(n.node_id, snap)
         hold_from = self.coordinator.standby_hold_from()
+        text = f"{by_text}; you're standby"
         if latest is None and standby:
             # No reading anywhere yet: give the poller one window plus grace from
             # when this observer went on standby before stepping in.
             until = max(float(st["standby_since"]), hold_from) + wait
             if now < until:
                 st["next_due_at"] = until
-                text = f"{by_text}; you're standby"
                 return _skip(st, "standby", text, now, {**waiting, "until": until})
         if latest is not None and standby:
             # Every timer runs out during a pause or an outage of this plugin:
@@ -101,7 +101,6 @@ class PollDecisions:
             st["next_due_at"] = latest + wait
             st["fresh_at"], st["fresh_by"] = latest, by
             if standby:
-                text = f"{by_text}; you're standby"
                 return _skip(st, "standby", text, now, {**waiting, "until": latest + wait})
             mins = max(0, round((now - latest) / 60))
             text = f"{by or 'another observer'} sent a reading {mins} min ago"

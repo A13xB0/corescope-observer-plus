@@ -203,6 +203,38 @@ class PollCycle:
             return outbox.reading(n, result, time.time())
         return None
 
+    def _send_polls(
+        self,
+        chosen: list[Neighbour],
+        port: int,
+        on_step: StepFn | None,
+        on_node: NodeFn | None,
+    ) -> list[JsonDict]:
+        station = self.station
+        out = []
+        with CompanionClient(station.companion_host, port) as client:
+            for i, n in enumerate(chosen):
+                routes = station.routes_for(n)
+                if i:
+                    # A poll through a relay costs the relay two transmissions.
+                    time.sleep(station.settings.spacing_seconds * (2 if routes[0].hops else 1))
+                st = station.state.node(n.node_id)
+                # Every request counts toward the per-window cap (quick retries too).
+                recent = [x for x in st.get("sends") or [] if time.time() - x < SENDS_MAX_AGE]
+                st["sends"] = (recent + [time.time()])[-SENDS_KEPT:]
+                for k in ("skip", "next_due_at"):
+                    st.pop(k, None)
+                result, guest_key = self._poll_node(client, n, routes, st, on_step)
+                reading = self._finish_node(n, st, result, guest_key)
+                if reading is not None:
+                    out.append(reading)
+                station.state.save()
+                # A cycle can take many minutes: keep the page current.
+                self.on_progress()
+                if on_node:
+                    on_node(n, st)
+        return out
+
     def poll(
         self,
         node_ids: list[str],
@@ -238,29 +270,7 @@ class PollCycle:
         if not chosen:
             return []
         assert port is not None  # the companion check passed
-        out = []
-        with CompanionClient(station.companion_host, port) as client:
-            for i, n in enumerate(chosen):
-                routes = station.routes_for(n)
-                if i:
-                    # A poll through a relay costs the relay two transmissions.
-                    gap = station.settings.spacing_seconds * (2 if routes[0].hops else 1)
-                    time.sleep(gap)
-                st = station.state.node(n.node_id)
-                # Every request counts toward the per-window cap (quick retries too).
-                recent = [x for x in st.get("sends") or [] if time.time() - x < SENDS_MAX_AGE]
-                st["sends"] = (recent + [time.time()])[-SENDS_KEPT:]
-                for k in ("skip", "next_due_at"):
-                    st.pop(k, None)
-                result, guest_key = self._poll_node(client, n, routes, st, on_step)
-                reading = self._finish_node(n, st, result, guest_key)
-                if reading is not None:
-                    out.append(reading)
-                station.state.save()
-                # A cycle can take many minutes: keep the page current.
-                self.on_progress()
-                if on_node:
-                    on_node(n, st)
+        out = self._send_polls(chosen, port, on_step, on_node)
         if scheduled:
             self.last_scheduled = time.time()
         return out

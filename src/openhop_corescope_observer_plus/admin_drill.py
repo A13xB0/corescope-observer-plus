@@ -5,11 +5,32 @@ from __future__ import annotations
 from . import packet_log
 from . import shared_key as sk
 from .companion import CompanionClient, CompanionError
+from .models import JsonDict
 from .poll_common import RETRY_GAP_SECONDS, SleepFn, describe_login
 
 SETTLE_SECONDS = 10.0  # let the setperm take before the verifying login
 VERIFY_TRIES = 3
 REPLY_WINDOW = 20.0
+
+
+def _key_is_demoted(
+    client: CompanionClient,
+    shared: sk.SharedKey,
+    key: bytes,
+    log: packet_log.NodeLog,
+    entry: JsonDict,
+) -> bool:
+    """Listen for the verifying login's answer: non-admin confirms the removal."""
+    for frame in client.collect_rx(REPLY_WINDOW):
+        reply = sk.decode_rx(frame, shared, [key])
+        if reply is None:
+            continue
+        result = sk.login_result(reply)
+        if result is not None:
+            log.answered(entry, "radio", flooded=reply.flooded, what=describe_login(result))
+        if result is not None and not result.is_admin:
+            return True
+    return False
 
 
 def remove_admin(
@@ -53,14 +74,7 @@ def remove_admin(
             )
         except (CompanionError, OSError, sk.SharedKeyError, sk.UnsafeSharedPassword):
             continue
-        for frame in client.collect_rx(REPLY_WINDOW):
-            reply = sk.decode_rx(frame, shared, [key])
-            if reply is None:
-                continue
-            result = sk.login_result(reply)
-            if result is not None:
-                log.answered(e, "radio", flooded=reply.flooded, what=describe_login(result))
-            if result is not None and not result.is_admin:
-                return True
+        if _key_is_demoted(client, shared, key, log, e):
+            return True
         log.unanswered(e)
     return False

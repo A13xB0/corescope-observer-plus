@@ -1,9 +1,6 @@
 """A minimal MeshCore companion client for openHop's companion TCP server.
 
-Every request is checked after sending: RESP_CODE_SENT says whether it went out
-as a flood, which is treated as a failure never to repeat. Status goes as a
-binary request because openHop sends one once, but resends a slow
-CMD_SEND_STATUS_REQ itself as a flood. Replies are matched on the tag.
+Requests that go out as a flood are treated as failures never to repeat.
 """
 
 from __future__ import annotations

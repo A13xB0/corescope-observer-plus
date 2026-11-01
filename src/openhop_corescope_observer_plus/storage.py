@@ -1,8 +1,6 @@
 """Files in the data directory.
 
-secrets.json (0600) is never part of config.json, so openHop's settings API
-never returns it. state.json lets a restart neither forget a rejected password
-nor burst out a round of polls.
+secrets.json (0600) stays out of config.json, so openHop's settings API never returns it.
 """
 
 from __future__ import annotations

@@ -179,20 +179,9 @@ class _RouteTally:
     hash_size: int = 1
 
 
-def attach_routes(neighbours: list[Neighbour], packets: list[JsonDict]) -> None:
-    """Fill each neighbour's routes from recorded advert packets, best first.
-
-    A relay route is kept only when the relay's hash matches exactly one
-    repeater heard direct, so a request can be addressed to it. The hash width
-    is the one the relay forwarded the advert with, so it is known to understand it.
-    """
-    by_id = {n.node_id: n for n in neighbours}
-    heard_direct = {n.node_id for n in neighbours if n.zero_hop}
-    for row in packets:
-        key = _advertised_key(row)
-        if key in by_id and _path_hashes(row) == []:
-            heard_direct.add(key)
-    direct = [by_id[k] for k in heard_direct]
+def _tally_routes(
+    by_id: dict[str, Neighbour], direct: list[Neighbour], packets: list[JsonDict]
+) -> dict[tuple[str, str], _RouteTally]:
     tallies: dict[tuple[str, str], _RouteTally] = defaultdict(_RouteTally)
     for row in packets:
         key = _advertised_key(row)
@@ -215,6 +204,23 @@ def attach_routes(neighbours: list[Neighbour], packets: list[JsonDict]) -> None:
             tally.snr_sum += float(row["snr"])
             tally.snr_count += 1
         tally.hash_size = max(tally.hash_size, size)
+    return tallies
+
+
+def attach_routes(neighbours: list[Neighbour], packets: list[JsonDict]) -> None:
+    """Fill each neighbour's routes from recorded advert packets, best first.
+
+    A relay route is kept only when the relay's hash matches exactly one
+    repeater heard direct, so a request can be addressed to it. The hash width
+    is the one the relay forwarded the advert with, so it is known to understand it.
+    """
+    by_id = {n.node_id: n for n in neighbours}
+    heard_direct = {n.node_id for n in neighbours if n.zero_hop}
+    for row in packets:
+        key = _advertised_key(row)
+        if key in by_id and _path_hashes(row) == []:
+            heard_direct.add(key)
+    tallies = _tally_routes(by_id, [by_id[k] for k in heard_direct], packets)
     for n in neighbours:
         routes = [
             Route(

@@ -1,16 +1,6 @@
-"""One poll under a guest key, as raw packets.
+"""One poll under a guest key, as raw packets. The route is in the packet, so nothing floods.
 
-Requests are built and encrypted here and replies read straight off the air, so
-the route is in the packet and nothing we send is ever flooded. A repeater with
-no stored route back to the key floods its answer, so the flow keeps that route
-fresh and sends as little as possible:
-
-  1. Still in the repeater's guest ACL and the admin re-check isn't due: the
-     route when it may be lost, then the request. No login.
-  2. Otherwise, or if that went unanswered: log in, then route and request.
-
-Replies we miss are looked for in what CoreScope's observers heard. A login
-answered as admin stops the poll and runs the removal drill.
+A repeater with no route back to the key floods its answer, so routes are kept fresh.
 """
 
 from __future__ import annotations
@@ -392,7 +382,12 @@ def poll_one_shared(
     guest_password: str | None = None,
     alternative_routes: bool = False,
 ) -> PollResult:
-    """Poll one repeater under a guest key. See the module docstring for the flow."""
+    """Poll one repeater under a guest key.
+
+    Still in its ACL and no admin re-check due: the route if it may be lost, then
+    the request, no login. Otherwise, or if that went unanswered: log in, then
+    route and request. A login answered as admin stops the poll for the drill.
+    """
     now = now or time.time()
     step = on_step or no_step
     _forget_other_key(node_state, shared)

@@ -1,7 +1,6 @@
-"""One poll under the companion's own key, through openHop's companion commands.
+"""One poll under the companion's own key. Every request goes direct along a pinned path.
 
-Every request goes direct along a pinned path. If the path can't be pinned,
-nothing is sent; nothing is ever flooded.
+If the path can't be pinned, nothing is sent; nothing is ever flooded.
 """
 
 from __future__ import annotations

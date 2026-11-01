@@ -1,8 +1,6 @@
 """CoreScope's HTTP API.
 
-Where a helper returns (status, body), status 0 means CoreScope couldn't be
-reached: callers tell that from 404 (no such feature) because they fail safe
-differently.
+For a (status, body) result, status 0 means unreachable, which fails safe differently from 404.
 """
 
 from __future__ import annotations

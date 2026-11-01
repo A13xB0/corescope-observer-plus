@@ -1,8 +1,4 @@
-"""The last packets the plugin sent, each with what came back, for the plugin page.
-
-Newest last, in state.json. A reply found late, in CoreScope's packets, moves a
-packet from no answer to answered.
-"""
+"""The last packets the plugin sent and what came back, for the plugin page."""
 
 from __future__ import annotations
 

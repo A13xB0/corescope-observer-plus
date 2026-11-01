@@ -1,8 +1,6 @@
-"""CoreScope's polling policy: the limits it sets and the switches it can throw.
+"""CoreScope's polling policy: its limits, clamped to what the plugin accepts, and its switches.
 
-The switches are read from the copy in state.json, so they hold through a
-CoreScope outage until a fetched policy clears them. Every value is clamped to
-what this plugin accepts. With no policy ever fetched the defaults apply.
+The switches are read from the saved copy, so they hold through a CoreScope outage.
 """
 
 from __future__ import annotations

@@ -1,10 +1,4 @@
-"""This observer's own polling key, registered with CoreScope.
-
-A repeater keeps one ACL entry per key, with one reply route and one replay
-counter. On a single shared key observers overwrote each other's route and raced
-each other's timestamps, so each polls under its own key and gives CoreScope the
-private half to decrypt overheard replies. The key is used for nothing else.
-"""
+"""This observer's own polling key, registered with CoreScope. Used for nothing else."""
 
 from __future__ import annotations
 
@@ -19,6 +13,10 @@ from openhop_core.protocol.identity import Identity
 from . import shared_key as sk
 from .models import JsonDict
 
+# A repeater keeps one ACL entry per key, with one reply route and one replay
+# counter. On a single shared key observers overwrote each other's route and raced
+# each other's timestamps, so each polls under its own and gives CoreScope the
+# private half to decrypt overheard replies.
 KEY_FILE = "guest_key.json"
 REREGISTER_EVERY = 6 * 3600
 KEY_LIFETIME = 24 * 3600  # how long CoreScope keeps a key after its last registration

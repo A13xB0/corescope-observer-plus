@@ -1,8 +1,6 @@
 """Publishing as the repeater's own observer, over a connection of the plugin's own.
 
-Connects only to publish, with a JWT signed by the repeater's key. It never
-sends status or retains, and sets no last will, so this connection coming and
-going can't make the observer look offline.
+No status, no retain and no last will, so this connection can't make the observer look offline.
 """
 
 from __future__ import annotations

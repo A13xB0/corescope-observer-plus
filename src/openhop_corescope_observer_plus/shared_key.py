@@ -1,11 +1,6 @@
-"""The guest key: polling a repeater as a guest identity whose replies others can read.
+"""Guest key packets: polling as an identity whose replies any observer holding it can read.
 
-Any observer holding the key can decode a reply off the air and feed CoreScope.
-Its private half may be public, so it must never get near admin. Both rules are
-enforced here, where packets are built: a login only ever carries a password in
-SHARED_PASSWORDS, and a repeater that answers as admin gets the removal drill
-(build_admin_removal). Everything goes as a finished raw packet: no contact
-lookup, no flood, no retries by openHop.
+The key may be public, so its safety rules are enforced here, where packets are built.
 """
 
 from __future__ import annotations
