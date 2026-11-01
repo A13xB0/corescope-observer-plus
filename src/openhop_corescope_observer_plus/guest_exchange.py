@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 from . import packet_log
 from . import shared_key as sk
-from .companion import CompanionClient, path_len_byte
+from .companion import PUSH_CODE_LOG_RX_DATA, CompanionClient, path_len_byte
 from .models import JsonDict, NodeState, Route
 from .poll_common import (
     LOGIN_SETTLE_SECONDS,
@@ -17,8 +17,8 @@ from .poll_common import (
     describe_reply,
 )
 
-Antenna = Callable[[float], "list[bytes] | None"]
-Answer = tuple["sk.Reply | None", "sk.LoginResult | None"]
+Antenna = Callable[[float], list[bytes] | None]
+Answer = tuple[sk.Reply | None, sk.LoginResult | None]
 
 # After a login, listen this long before transmitting again. The radio is half
 # duplex and the repeater answers 300 ms after hearing it, so a route sent
@@ -142,7 +142,7 @@ class GuestExchange:
                 continue
             reached = True
             for raw in frames:
-                frame = bytes([sk.PUSH_CODE_LOG_RX_DATA, 0, 0]) + raw
+                frame = bytes([PUSH_CODE_LOG_RX_DATA, 0, 0]) + raw
                 reply = sk.decode_rx(frame, self.shared, [self.key])
                 if reply is None:
                     continue

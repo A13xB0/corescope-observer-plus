@@ -27,8 +27,9 @@ class Skip(TypedDict, total=False):
     until: float
 
 
-def _skip(st: NodeState, reason: str, text: str, now: float, **extra: object) -> Skip:
-    skip: Skip = {"reason": reason, "text": text, "at": now, **extra}  # type: ignore[typeddict-item]
+def _skip(st: NodeState, reason: str, text: str, now: float, extra: Skip | None = None) -> Skip:
+    skip: Skip = {"reason": reason, "text": text, "at": now}
+    skip.update(extra or {})
     st["skip"] = skip
     return skip
 
@@ -51,7 +52,7 @@ class PollDecisions:
             return None
         st["next_due_at"] = min(sends) + window
         text = f"{len(sends)} requests already sent within the window (CoreScope allows {limit})"
-        return _skip(st, "cap", text, now, until=st["next_due_at"])
+        return _skip(st, "cap", text, now, {"until": st["next_due_at"]})
 
     def _newest_reading(self, node_id: str, snap: BatteryCheck) -> float | None:
         latest = iso_ts(snap.get("latest_ts"))
@@ -68,7 +69,7 @@ class PollDecisions:
         station = self.station
         standby = role["role"] == "standby"
         by_text = _by_text(role)
-        hops = role.get("owner_hops")
+        waiting: Skip = {"by": role.get("by"), "owner_hops": role.get("owner_hops")}
         # Standbys queue, each a grace period behind the last, so one steps in
         # for a silent poller and its reading stands the others down.
         wait = window + (station.community.grace_s() * role["rank"] if standby else 0)
@@ -80,7 +81,7 @@ class PollDecisions:
             # once CoreScope's owners lapse this observer polls again.
             st["next_due_at"] = now + timings().hold_recheck_s
             text = f"{by_text}; you're standby (CoreScope unreachable, holding)"
-            return _skip(st, "standby", text, now, by=role.get("by"), owner_hops=hops)
+            return _skip(st, "standby", text, now, waiting)
         latest = self._newest_reading(n.node_id, snap)
         hold_from = self.coordinator.standby_hold_from()
         if latest is None and standby:
@@ -90,9 +91,7 @@ class PollDecisions:
             if now < until:
                 st["next_due_at"] = until
                 text = f"{by_text}; you're standby"
-                return _skip(
-                    st, "standby", text, now, by=role.get("by"), owner_hops=hops, until=until
-                )
+                return _skip(st, "standby", text, now, {**waiting, "until": until})
         if latest is not None and standby:
             # Every timer runs out during a pause or an outage of this plugin:
             # the wait restarts, or poller and standbys would all ask at once.
@@ -103,18 +102,10 @@ class PollDecisions:
             st["fresh_at"], st["fresh_by"] = latest, by
             if standby:
                 text = f"{by_text}; you're standby"
-                return _skip(
-                    st,
-                    "standby",
-                    text,
-                    now,
-                    by=role.get("by"),
-                    owner_hops=hops,
-                    until=latest + wait,
-                )
+                return _skip(st, "standby", text, now, {**waiting, "until": latest + wait})
             mins = max(0, round((now - latest) / 60))
             text = f"{by or 'another observer'} sent a reading {mins} min ago"
-            return _skip(st, "fresh", text, now, by=by, until=latest + wait)
+            return _skip(st, "fresh", text, now, {"by": by, "until": latest + wait})
         if standby:
             LOG.info(
                 "standby for %s (%s): newest reading is older than the window plus grace; "

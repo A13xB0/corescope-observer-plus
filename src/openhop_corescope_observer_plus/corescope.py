@@ -145,7 +145,7 @@ def battery_check(base_url: str, node_id: str) -> tuple[bool, BatteryCheck]:
         return False, {}
     # latest_ts is the newest of the source CoreScope shows (the best heard),
     # not the newest overall: that is the newest of all the sources.
-    sel = body.get("selected") if isinstance(body.get("selected"), dict) else {}
+    sel: JsonDict = body["selected"] if isinstance(body.get("selected"), dict) else {}
     newest = (body.get("latest_ts"), sel.get("observer_name"))
     for src in body.get("sources") or []:
         ts = src.get("latest_ts") if isinstance(src, dict) else None
@@ -169,7 +169,7 @@ def battery_snapshot(base_url: str, node_id: str) -> JsonDict | None:
         return None
     if not isinstance(body, dict):
         return None
-    sel = body.get("selected") if isinstance(body.get("selected"), dict) else {}
+    sel: JsonDict = body["selected"] if isinstance(body.get("selected"), dict) else {}
     return {
         "latest_ts": body.get("latest_ts") or None,
         "latest_mv": body.get("latest_mv"),
@@ -196,7 +196,7 @@ def responses(base_url: str, since: str, *, limit: int = 2000) -> list[bytes] | 
         return None
     out = []
     for row in rows:
-        raw = row.get("raw_hex") if isinstance(row, dict) else None
+        raw: Any = row.get("raw_hex") if isinstance(row, dict) else None
         try:
             out.append(bytes.fromhex(raw))
         except (TypeError, ValueError):

@@ -936,7 +936,9 @@ def test_no_sensor_temperature_is_no_reading():
 
     from openhop_corescope_observer_plus.companion import lpp_temperature
 
-    lpp = lambda c: bytes([1, 103]) + struct.pack(">h", int(c * 10))
+    def lpp(c):
+        return bytes([1, 103]) + struct.pack(">h", int(c * 10))
+
     assert lpp_temperature(lpp(-128.0)) is None
     assert lpp_temperature(lpp(16.5)) == 16.5
 

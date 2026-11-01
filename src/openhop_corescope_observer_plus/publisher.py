@@ -1,10 +1,8 @@
-"""Publish battery readings as the repeater's own observer.
+"""Publishing as the repeater's own observer, over a connection of the plugin's own.
 
-The plugin can't borrow openHop's MQTT connections, so it opens its own, with
-openHop's settings for the broker and a JWT signed by the repeater's key. It
-connects only to publish: it never sends status, never retains, and sets no
-last-will message, so this connection coming and going can't make the
-observer look offline.
+Connects only to publish, with a JWT signed by the repeater's key. It never
+sends status or retains, and sets no last will, so this connection coming and
+going can't make the observer look offline.
 """
 
 from __future__ import annotations
@@ -15,12 +13,16 @@ import json
 import ssl
 import threading
 from datetime import datetime, timedelta, timezone
+from typing import Any, Literal, cast
 
 import paho.mqtt.client as mqtt
 from openhop_core import LocalIdentity
+from paho.mqtt.enums import CallbackAPIVersion
 
 from . import __version__
+from .models import Claim, JsonDict
 from .openhop_config import MC2MQTT_FORMATS, Broker, OpenHopConfig
+from .timeutil import utc_iso
 
 PLUGIN_TAG = f"openhop.corescope_observer_plus/{__version__}"
 JWT_MINUTES = 10
@@ -63,12 +65,12 @@ def topic_for(broker: Broker, cfg: OpenHopConfig, public_key_hex: str) -> str:
     return _topic(broker, cfg, public_key_hex, "battery")
 
 
-def build_payload(cfg: OpenHopConfig, public_key_hex: str, readings: list[dict]) -> dict:
+def build_payload(cfg: OpenHopConfig, public_key_hex: str, readings: list[JsonDict]) -> JsonDict:
     return {
         "v": 1,
         "origin": cfg.node_name,
         "origin_id": public_key_hex,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timestamp": utc_iso(),
         "plugin": PLUGIN_TAG,
         "readings": readings,
     }
@@ -77,17 +79,17 @@ def build_payload(cfg: OpenHopConfig, public_key_hex: str, readings: list[dict])
 def build_claim(
     cfg: OpenHopConfig,
     public_key_hex: str,
-    claims: list[dict],
+    claims: list[Claim],
     *,
     policy_version: str = "",
     community: bool = True,
-) -> dict:
+) -> JsonDict:
     """The claim v2 payload (topic meshcore/<region>/<observer>/polling)."""
     return {
         "v": 2,
         "origin": cfg.node_name,
         "origin_id": public_key_hex,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timestamp": utc_iso(),
         "plugin": PLUGIN_TAG,
         "policy_version": policy_version,
         "community": bool(community),
@@ -112,13 +114,11 @@ class Publisher:
         self.timeout = timeout
 
     def client_id(self, broker: Broker, role: str = "battery") -> str:
-        # openHop's own is meshcore_{KEY}_{host}_{format}; a different ID keeps
-        # either connection from kicking the other off. Battery and claim use
-        # different roles so a claim and a battery publish in the same tick don't
-        # evict each other (same id => the broker drops the first session).
+        # Differs from openHop's own, and by role: a broker drops the older
+        # session of a client ID, so a shared one would kick the other off.
         return f"meshcore_{self.public_key_hex}_{broker.host}_{role}"
 
-    def publish(self, broker: Broker, readings: list[dict]) -> None:
+    def publish(self, broker: Broker, readings: list[JsonDict]) -> None:
         """Connect, publish one battery batch at QoS 1, wait for the ack, disconnect."""
         payload = json.dumps(build_payload(self.cfg, self.public_key_hex, readings))
         self._send(broker, topic_for(broker, self.cfg, self.public_key_hex), payload)
@@ -126,16 +126,13 @@ class Publisher:
     def publish_claim(
         self,
         broker: Broker,
-        claims: list[dict],
+        claims: list[Claim],
         *,
         policy_version: str = "",
         community: bool = True,
     ) -> None:
-        """Tell CoreScope which repeaters this observer polls, by what route and
-        key (claim v2), so it can pick one poller per repeater and credit a
-        decoded reply ("requested by …") with the right hops — CoreScope can't
-        see the route from the overheard reply. ``claims`` is a list of
-        {node_id, reply_hops, via, key, snr}."""
+        """Claim v2: lets CoreScope pick one poller per repeater and credit a decoded
+        reply with the right hops, which it can't see from the overheard reply."""
         self._send(
             broker,
             _topic(broker, self.cfg, self.public_key_hex, "polling"),
@@ -157,9 +154,9 @@ class Publisher:
             raise RuntimeError(f"unsupported broker format {broker.format!r}")
 
         client = mqtt.Client(
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            callback_api_version=CallbackAPIVersion.VERSION2,
             client_id=self.client_id(broker, role),
-            transport=broker.transport,
+            transport=cast(Literal["tcp", "websockets", "unix"], broker.transport),
         )
         if broker.transport == "websockets":
             client.ws_set_options(path=broker.ws_path)
@@ -174,9 +171,11 @@ class Publisher:
             client.username_pw_set(broker.username, broker.password)
 
         connected = threading.Event()
-        result: dict = {}
+        result: JsonDict = {}
 
-        def on_connect(c, userdata, flags, reason_code, properties=None):
+        def on_connect(
+            _client: Any, _userdata: Any, _flags: Any, reason_code: Any, _properties: Any = None
+        ) -> None:
             result["rc"] = reason_code
             connected.set()
 

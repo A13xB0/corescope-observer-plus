@@ -1,10 +1,8 @@
-"""Files the plugin keeps in its data directory.
+"""Files in the data directory.
 
-secrets.json (mode 0600): the openHop API token and login passwords. Never
-part of config.json, so openHop's plugin settings API never returns them.
-
-state.json: per-neighbour poll state and the publish queue, so a restart
-neither forgets a rejected password nor bursts out a round of polls.
+secrets.json (0600) is never part of config.json, so openHop's settings API
+never returns it. state.json lets a restart neither forget a rejected password
+nor burst out a round of polls.
 """
 
 from __future__ import annotations
@@ -13,8 +11,10 @@ import json
 import os
 from pathlib import Path
 
+from .models import JsonDict, NodeState
 
-def _read(path: Path) -> dict:
+
+def _read(path: Path) -> JsonDict:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -22,7 +22,7 @@ def _read(path: Path) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _write(path: Path, value: dict, mode: int = 0o644) -> None:
+def _write(path: Path, value: JsonDict, mode: int = 0o644) -> None:
     tmp = path.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -72,11 +72,13 @@ class State:
         self.value.setdefault("queue", [])
         self.value.setdefault("brokers", {})
 
-    def node(self, node_id: str) -> dict:
-        return self.value["nodes"].setdefault(node_id, {})
+    def node(self, node_id: str) -> NodeState:
+        node: NodeState = self.value["nodes"].setdefault(node_id, {})
+        return node
 
-    def broker(self, name: str) -> dict:
-        return self.value["brokers"].setdefault(name, {})
+    def broker(self, name: str) -> JsonDict:
+        broker: JsonDict = self.value["brokers"].setdefault(name, {})
+        return broker
 
     def save(self) -> None:
         _write(self.path, self.value)

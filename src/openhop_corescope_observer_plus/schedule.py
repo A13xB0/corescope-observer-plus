@@ -68,8 +68,8 @@ def is_due(
         return False
     unheard = node_state.get("unheard_since")
     if unheard is not None and now - float(unheard) >= UNHEARD_BACKOFF_AFTER:
-        every = UNHEARD_BACKOFF_INTERVAL
-        return _slot_due(last, now, every, _scaled(phase, interval_s, every))
+        daily = UNHEARD_BACKOFF_INTERVAL
+        return _slot_due(last, now, daily, _scaled(phase, interval_s, daily))
     if int(node_state.get("flood_replies") or 0) >= FLOOD_REPLIES_BEFORE_DAILY:
         every = max(interval_s, FLOOD_DAILY)
         return _slot_due(last, now, every, _scaled(phase, interval_s, every))

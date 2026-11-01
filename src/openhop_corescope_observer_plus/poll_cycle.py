@@ -11,6 +11,7 @@ from . import shared_key as sk
 from .community import timings
 from .companion import CompanionClient
 from .coordination import Coordinator
+from .guest_exchange import Antenna
 from .models import JsonDict, Neighbour, NodeState, Route
 from .openhop_config import companion_port
 from .poll_common import StepFn
@@ -116,7 +117,7 @@ class PollCycle:
                 break  # one scheduled poll per tick
         return chosen
 
-    def _antenna(self) -> guest_poll.Antenna | None:
+    def _antenna(self) -> Antenna | None:
         """Replies we don't hear ourselves are looked for in CoreScope's observers' packets."""
         settings = self.station.settings
         if not (settings.check_corescope and settings.corescope_url):

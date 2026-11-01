@@ -1,18 +1,14 @@
-"""The last packets the plugin sent, each with what came back, for debugging.
+"""The last packets the plugin sent, each with what came back, for the plugin page.
 
-One entry per packet put on the air (a login, a route, a status or telemetry
-request, an admin removal), newest last, kept to SIZE. Each says which
-repeater, by which route, under which key, and what answered it: heard on
-this node's radio or found in CoreScope's observers' packets, flooded or
-direct, how long after, and what it said. A route packet expects no answer.
-
-Entries live in state.json (so they survive a restart) and are shown on the
-plugin page.
+Newest last, in state.json. A reply found late, in CoreScope's packets, moves a
+packet from no answer to answered.
 """
 
 from __future__ import annotations
 
 import time
+
+from .models import JsonDict
 
 SIZE = 20
 STATS_DAYS = 8  # a week back from today
@@ -30,16 +26,15 @@ def _day(at: float) -> str:
 
 
 class PacketLog:
-    def __init__(self, entries: list, size: int = SIZE, stats: dict | None = None):
+    def __init__(self, entries: list[JsonDict], size: int = SIZE, stats: JsonDict | None = None):
         self.entries = entries
         self.size = size
         del self.entries[:-size]
         # Counts per day, in state.json. The log itself only keeps 20 packets.
         self.stats = stats if stats is not None else {}
 
-    def count(self, entry: dict, outcome: str) -> None:
-        """Count a packet's outcome once. A reply found late (in CoreScope's
-        packets) moves it from no answer to answered, on the day it was sent."""
+    def count(self, entry: JsonDict, outcome: str) -> None:
+        """Count a packet's outcome once, on the day it was sent."""
         day = self.stats.setdefault(_day(entry["at"]), {})
         was = entry.get("counted")
         if was == outcome:
@@ -58,38 +53,33 @@ class PacketLog:
         for old in sorted(self.stats)[:-STATS_DAYS]:
             del self.stats[old]
 
-    def summary(self, now: float | None = None) -> dict:
+    def _day_summary(self, at: float) -> JsonDict:
+        d = self.stats.get(_day(at)) or {}
+        return {
+            "day": _day(at),
+            "answered": int(d.get(ANSWERED) or 0),
+            "no_answer": int(d.get(NO_ANSWER) or 0),
+            "refused": int(d.get(REFUSED) or 0),
+            "flooded": int(d.get("flooded") or 0),
+            "flooded_by": sorted(((d.get("flooded_by") or {}).values()), key=lambda n: -n["count"]),
+        }
+
+    def summary(self, now: float | None = None) -> JsonDict:
         """Today, yesterday and the last week, for the Activity page."""
         now = time.time() if now is None else now
-
-        def day(at: float) -> dict:
-            d = self.stats.get(_day(at)) or {}
-            answered, none, refused = (int(d.get(k) or 0) for k in (ANSWERED, NO_ANSWER, REFUSED))
-            return {
-                "day": _day(at),
-                "answered": answered,
-                "no_answer": none,
-                "refused": refused,
-                "flooded": int(d.get("flooded") or 0),
-                "flooded_by": sorted(
-                    ((d.get("flooded_by") or {}).values()), key=lambda n: -n["count"]
-                ),
-            }
-
-        week = [day(now - i * 86400) for i in range(7)]
+        week = [self._day_summary(now - i * 86400) for i in range(7)]
+        totals = ("answered", "no_answer", "refused", "flooded")
         return {
             "today": week[0],
             "yesterday": week[1],
-            "week": {
-                k: sum(d[k] for d in week) for k in ("answered", "no_answer", "refused", "flooded")
-            },
+            "week": {k: sum(d[k] for d in week) for k in totals},
         }
 
     def for_node(
-        self, node_id: str, name: str, key: str, node_entries: list | None = None
+        self, node_id: str, name: str, key: str, node_entries: list[JsonDict] | None = None
     ) -> NodeLog:
-        """``node_entries``: the repeater's own list (in its state), which
-        keeps its last SIZE packets however busy the others are."""
+        """``node_entries`` is the repeater's own list, which keeps its last SIZE
+        packets however busy the others are."""
         return NodeLog(self, node_id, name, key, node_entries)
 
 
@@ -102,13 +92,13 @@ class NodeLog:
         node_id: str = "",
         name: str = "",
         key: str = "",
-        node_entries: list | None = None,
+        node_entries: list[JsonDict] | None = None,
     ):
         self._log = log
         self._mine = node_entries
         self._node = {"node_id": node_id, "name": name, "key": key}
 
-    def sent(self, kind: str, route: str, detail: str = "") -> dict:
+    def sent(self, kind: str, route: str, detail: str = "") -> JsonDict:
         entry = {
             "at": time.time(),
             **self._node,
@@ -127,17 +117,17 @@ class NodeLog:
         return entry
 
     @staticmethod
-    def unconfirmed(entry: dict) -> None:
+    def unconfirmed(entry: JsonDict) -> None:
         # openHop didn't confirm the send in time (busy); it usually still went.
         entry["unconfirmed"] = True
 
-    def _count(self, entry: dict, outcome: str) -> None:
+    def _count(self, entry: JsonDict, outcome: str) -> None:
         if self._log is not None:
             self._log.count(entry, outcome)
 
     def answered(
         self,
-        entry: dict,
+        entry: JsonDict,
         via: str,
         *,
         flooded: bool | None = None,
@@ -153,17 +143,17 @@ class NodeLog:
         )
         self._count(entry, ANSWERED)
 
-    def unanswered(self, entry: dict, what: str = "") -> None:
+    def unanswered(self, entry: JsonDict, what: str = "") -> None:
         if entry.get("reply") == WAITING:
             entry.update(reply=NO_ANSWER, what=what)
             self._count(entry, NO_ANSWER)
 
-    def refused(self, entry: dict, what: str = "") -> None:
+    def refused(self, entry: JsonDict, what: str = "") -> None:
         entry.update(reply=REFUSED, what=what)
         self._count(entry, REFUSED)
 
     @staticmethod
-    def none_expected(entry: dict) -> None:
+    def none_expected(entry: JsonDict) -> None:
         entry["reply"] = NONE_EXPECTED
 
 

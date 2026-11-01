@@ -1,15 +1,9 @@
 """A minimal MeshCore companion client for openHop's companion TCP server.
 
-Only the commands this plugin needs: pin a contact's path to direct, read it
-back, log in and ask for status. Every request is checked after sending: the
-server's RESP_CODE_SENT says whether the packet went out as a flood, and the
-plugin treats that as a failure it must never repeat.
-
-Status goes as a binary request (CMD_SEND_BINARY_REQ), not CMD_SEND_STATUS_REQ:
-openHop sends a binary request once and leaves retries to the client, but it
-resends a slow CMD_SEND_STATUS_REQ itself as a flood. The reply is matched on
-the tag from RESP_CODE_SENT, so a late answer to an earlier request can't be
-taken for this one.
+Every request is checked after sending: RESP_CODE_SENT says whether it went out
+as a flood, which is treated as a failure never to repeat. Status goes as a
+binary request because openHop sends one once, but resends a slow
+CMD_SEND_STATUS_REQ itself as a flood. Replies are matched on the tag.
 """
 
 from __future__ import annotations
@@ -18,7 +12,11 @@ import collections
 import socket
 import struct
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from types import TracebackType
+
+from .models import JsonDict
 
 CMD_APP_START = 1
 CMD_ADD_UPDATE_CONTACT = 9
@@ -86,12 +84,7 @@ def path_len_byte(path: bytes, hash_size: int) -> int:
 
 
 def encode_contact(pubkey: bytes, name: str, *, path: bytes = b"", hash_size: int = 1) -> bytes:
-    """CMD_ADD_UPDATE_CONTACT body for a repeater reached along path.
-
-    An empty path is "direct, zero hops": the packet has no next hop, so only
-    a node in radio range can receive it. A one-hash path sends it direct to
-    that relay, which passes it on; nothing is ever flooded.
-    """
+    """CMD_ADD_UPDATE_CONTACT body. An empty path is direct, zero hops; nothing floods."""
     if len(pubkey) != 32:
         raise ValueError("pubkey must be 32 bytes")
     name_b = name.encode("utf-8", errors="replace")[:NAME_SIZE].ljust(NAME_SIZE, b"\x00")
@@ -140,11 +133,11 @@ STATS_FIELDS = (
 )
 
 
-def parse_stats(data: bytes) -> dict:
+def parse_stats(data: bytes) -> JsonDict:
     """The RepeaterStats fields present in a status reply."""
     if len(data) < 2:
         raise CompanionError("status reply too short")
-    out: dict = {}
+    out: JsonDict = {}
     off = 0
     for name, fmt in STATS_FIELDS:
         size = struct.calcsize("<" + fmt)
@@ -212,18 +205,19 @@ def lpp_voltage_mv(data: bytes) -> int | None:
     """The repeater's own voltage (channel 1) in mV, or None if it sent none."""
     for channel, kind, raw in parse_lpp(data):
         if channel == TELEM_CHANNEL_SELF and kind == LPP_VOLTAGE:
-            return struct.unpack(">H", raw)[0] * 10
+            return int(struct.unpack(">H", raw)[0]) * 10
     return None
 
 
 def lpp_temperature(data: bytes) -> float | None:
     """The repeater's own temperature (channel 1) in °C, or None if it sent none.
 
-    A board without a sensor can still send the field: -128 °C is MeshCore's
-    "no reading", so anything outside what a chip could report is no reading."""
+    A board without a sensor still sends the field: -128 °C is MeshCore's "no
+    reading", so anything outside what a chip could report is no reading.
+    """
     for channel, kind, raw in parse_lpp(data):
         if channel == TELEM_CHANNEL_SELF and kind == LPP_TEMPERATURE:
-            c = struct.unpack(">h", raw)[0] / 10
+            c = float(struct.unpack(">h", raw)[0]) / 10
             return c if -60.0 <= c <= 125.0 else None
     return None
 
@@ -235,9 +229,8 @@ class CompanionClient:
         self.host = host
         self.port = port
         self.timeout = timeout
-        # Raw RX frames that arrive while we wait for some other answer (e.g.
-        # openHop's OK to a raw send, which comes only after it transmits).
-        # collect_rx hands them out first, so a fast reply isn't lost.
+        # RX frames that arrive while waiting for another answer (openHop's OK to
+        # a raw send comes only after it transmits), so a fast reply isn't lost.
         self._rx_backlog: collections.deque[bytes] = collections.deque(maxlen=256)
         self._sock: socket.socket | None = None
         self._buf = b""
@@ -247,7 +240,12 @@ class CompanionClient:
         self.connect()
         return self
 
-    def __exit__(self, *exc) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.close()
 
     def connect(self) -> None:
@@ -301,11 +299,10 @@ class CompanionClient:
                 raise CompanionError("companion closed the connection")
             self._buf += chunk
 
-    def _wait(self, codes: set[int], timeout: float, match=None) -> bytes | None:
-        """Next frame whose code is in codes (and that match accepts).
-
-        Unrelated pushes (adverts, message notices, raw RX log) are skipped.
-        """
+    def _wait(
+        self, codes: set[int], timeout: float, match: Callable[[bytes], bool] | None = None
+    ) -> bytes | None:
+        """Next frame whose code is in codes (and that match accepts)."""
         deadline = time.monotonic() + timeout
         while True:
             frame = self._read_frame(deadline)
@@ -375,7 +372,7 @@ class CompanionClient:
             return None
         return frame[6:]
 
-    def status(self, pubkey: bytes) -> dict | None:
+    def status(self, pubkey: bytes) -> JsonDict | None:
         """Ask for status; the RepeaterStats fields, or None if no answer came."""
         data = self.binary_request(pubkey, bytes([REQ_TYPE_GET_STATUS]))
         return None if data is None else parse_stats(data)
@@ -387,18 +384,12 @@ class CompanionClient:
     # -- shared guest key (raw packets) -------------------------------------
 
     def send_raw_packet(self, body: bytes, *, wait: float = RAW_SEND_WAIT) -> bool:
-        """Transmit a finished packet built elsewhere (CMD_SEND_RAW_PACKET).
+        """Transmit a finished packet: [priority][wire packet], sent verbatim.
 
-        ``body`` is [priority][wire packet], exactly as the shared-key builder
-        produces it. openHop sends it verbatim: no contact lookup, no flood, no
-        retries — the packet's own route was fixed when it was built.
-
-        openHop answers only once the packet has actually gone out, which can
-        take a while when it is busy forwarding (listen-before-talk, its TX
-        delay, a long flood ahead in the queue). So this waits up to ``wait``
-        and returns False when no answer came: the packet was most likely
-        sent, just unconfirmed, and the caller keeps listening for the reply.
-        An explicit error from openHop still raises.
+        openHop answers only once it has gone out, which can take a while when
+        busy (listen-before-talk, a flood ahead in the queue). False means no
+        answer came: most likely sent, just unconfirmed, so the caller keeps
+        listening. An explicit error raises.
         """
         self._send(bytes([CMD_SEND_RAW_PACKET]) + body)
         frame = self._wait({RESP_CODE_OK, RESP_CODE_ERR}, wait)
@@ -413,27 +404,16 @@ class CompanionClient:
         """Forget RX frames kept from earlier waits (call at the start of a poll)."""
         self._rx_backlog.clear()
 
-    def collect_rx(self, window: float, until=None):
-        """Yield raw RX log frames (PUSH 0x88) heard within ``window`` seconds.
-
-        Replies to a shared-key request arrive as ordinary received packets, so
-        the plugin reads them straight off the air here rather than through a
-        request/response pairing. The caller decodes and matches each by tag.
-        Frames kept while waiting on an earlier command come first. ``until``,
-        if given, is re-read before each wait and may bring the end forward
-        (a monotonic time), so the caller can stop once it has what it needs.
-        """
+    def collect_rx(self, window: float) -> Iterator[bytes]:
+        """Raw RX log frames heard within ``window`` seconds, kept ones first."""
         while self._rx_backlog:
             yield self._rx_backlog.popleft()
         deadline = time.monotonic() + window
         while True:
-            end = deadline if until is None else min(deadline, until())
-            remaining = end - time.monotonic()
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
             frame = self._wait({PUSH_CODE_LOG_RX_DATA}, remaining)
             if frame is None:
-                if until is not None and until() < deadline and time.monotonic() < deadline:
-                    continue  # the end moved; re-check
                 return
             yield frame
