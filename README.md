@@ -1,8 +1,9 @@
-# Neighbour Battery
+# CoreScope Observer Plus
 
-An openHop plugin that reads the battery of the repeaters your node hears
-directly, or through one relay it hears directly, and publishes it to MQTT as
-your repeater's observer, for CoreScope to show.
+An openHop plugin that reads the battery and status of the repeaters your node
+hears directly, or through one relay it hears directly, for CoreScope to show.
+Observers running it share the work: CoreScope picks the closest one to poll each
+repeater, and the others stand by.
 
 - Requests and retries always go direct: with an empty path to a repeater heard
   at zero hops, or along a one-relay path. Never flooded.
@@ -101,7 +102,7 @@ observer to poll each one; the rest stand by. The plugin:
   Every skip is listed with its reason.
 
 Headless runs: `OPENHOP_CONFIG_PATH` overrides `openhop_config_path`.
-`OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST=1` is a bench-only fast mode (minute
+`OPENHOP_OBSERVER_PLUS_TEST_FAST=1` is a bench-only fast mode (minute
 floors, 30 s policy refresh, 60 s claims, 30 s quick retry, interval = window);
 it logs a warning at startup and is never set from the page.
 
@@ -111,7 +112,7 @@ it logs a warning at startup and is never set from the page.
 ./build_wheel.sh
 ```
 
-Install the wheel from openHop's Plugins page, open **Neighbour Battery**, press
+Install the wheel from openHop's Plugins page, open **CoreScope Observer Plus**, press
 **Connect**, tick the repeaters and brokers, enable polling and save.
 
 ## Routes

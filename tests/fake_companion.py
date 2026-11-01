@@ -6,7 +6,7 @@ import socket
 import struct
 import threading
 
-from openhop_neighbour_battery import companion as c
+from openhop_corescope_observer_plus import companion as c
 
 
 class FakeCompanion:

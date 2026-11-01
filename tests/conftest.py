@@ -8,8 +8,8 @@ def offline_corescope(monkeypatch):
     """No test talks to a real CoreScope: by default every community call
     finds it unreachable (tests that need answers patch these again), and test
     fast mode is off unless a test turns it on."""
-    from openhop_neighbour_battery import app as app_mod
-    monkeypatch.delenv("OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST", raising=False)
+    from openhop_corescope_observer_plus import app as app_mod
+    monkeypatch.delenv("OPENHOP_OBSERVER_PLUS_TEST_FAST", raising=False)
     monkeypatch.delenv("OPENHOP_CONFIG_PATH", raising=False)
     monkeypatch.setattr(app_mod, "corescope_policy", lambda url, obs, ver, **k: (0, None))
     monkeypatch.setattr(app_mod, "corescope_battery_check", lambda url, nid, **k: (False, {}))
@@ -23,7 +23,7 @@ def no_startup_hold(request, monkeypatch):
     tests (marked startup_hold)."""
     if request.node.get_closest_marker("startup_hold"):
         return
-    from openhop_neighbour_battery.app import App
+    from openhop_corescope_observer_plus.app import App
     monkeypatch.setattr(App, "_starting", lambda self, now: False)
     monkeypatch.setattr(App, "_standby_hold_from", lambda self: 0.0)
 

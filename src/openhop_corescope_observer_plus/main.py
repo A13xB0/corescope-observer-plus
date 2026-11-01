@@ -11,18 +11,18 @@ from pathlib import Path
 from . import __version__
 from .app import App
 
-LOG = logging.getLogger("openhop.neighbour_battery")
+LOG = logging.getLogger("openhop.corescope_observer_plus")
 TICK_SECONDS = 5
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="openhop-neighbour-battery")
+    parser = argparse.ArgumentParser(prog="openhop-corescope-observer-plus")
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--once", action="store_true", help="Run one tick and exit.")
     args = parser.parse_args()
 
     logging.basicConfig(
-        level=getattr(logging, os.environ.get("OPENHOP_NEIGHBOUR_BATTERY_LOG_LEVEL", "INFO").upper(), logging.INFO),
+        level=getattr(logging, os.environ.get("OPENHOP_OBSERVER_PLUS_LOG_LEVEL", "INFO").upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         stream=sys.stdout,
     )

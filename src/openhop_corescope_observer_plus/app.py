@@ -40,7 +40,7 @@ from .publisher import Publisher
 from .settings import TRANSIENT_KEYS, Settings, parse, read_raw, write_raw
 from .storage import Secrets, State
 
-LOG = logging.getLogger("openhop.neighbour_battery")
+LOG = logging.getLogger("openhop.corescope_observer_plus")
 
 # Scheduled polls go out one at a time, at least community.timings()
 # .scheduled_gap_s (60 s) apart, so a backlog (after a restart, or slots missed
@@ -90,7 +90,7 @@ class App:
         self._policy_tried = 0.0
         self._claims_tried = 0.0
         if fast_mode():
-            LOG.warning("*** TEST FAST MODE IS ON (OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST=1): minute floors, "
+            LOG.warning("*** TEST FAST MODE IS ON (OPENHOP_OBSERVER_PLUS_TEST_FAST=1): minute floors, "
                         "30 s policy refresh, 60 s claims, 30 s retries. For bench runs only, never on a "
                         "real mesh. ***")
 

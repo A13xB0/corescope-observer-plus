@@ -3,10 +3,10 @@ import struct
 import pytest
 
 from fake_companion import FakeCompanion
-from openhop_neighbour_battery import companion as c
-from openhop_neighbour_battery import poller
-from openhop_neighbour_battery.companion import CompanionClient
-from openhop_neighbour_battery.openhop import Neighbour, Route
+from openhop_corescope_observer_plus import companion as c
+from openhop_corescope_observer_plus import poller
+from openhop_corescope_observer_plus.companion import CompanionClient
+from openhop_corescope_observer_plus.openhop import Neighbour, Route
 
 NODE = Neighbour(node_id="02f1" + "ab" * 30, name="West Lomond", snr=-5.0, rssi=-119,
                  last_seen=0, zero_hop=True)

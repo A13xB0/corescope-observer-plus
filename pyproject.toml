@@ -3,9 +3,9 @@ requires = ["setuptools>=70", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openhop-neighbour-battery-plugin"
-version = "0.8.5"
-description = "openHop plugin: battery readings from directly heard repeaters, published as this repeater's observer"
+name = "openhop-corescope-observer-plus-plugin"
+version = "0.9.0"
+description = "openHop plugin: community repeater polling for CoreScope, shared between observers"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -20,17 +20,17 @@ dependencies = [
 dev = ["pytest>=8,<9"]
 
 [project.scripts]
-openhop-neighbour-battery = "openhop_neighbour_battery.main:main"
+openhop-corescope-observer-plus = "openhop_corescope_observer_plus.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.data-files]
-"share/openhop/plugins/openhop.neighbour_battery" = [
+"share/openhop/plugins/openhop.corescope_observer_plus" = [
   "openhop-plugin.json",
   "config.default.json",
 ]
-"share/openhop/plugins/openhop.neighbour_battery/ui" = [
+"share/openhop/plugins/openhop.corescope_observer_plus/ui" = [
   "ui/index.html",
   "ui/app.js",
   "ui/styles.css",

@@ -20,8 +20,8 @@ from openhop_core.protocol.constants import PAYLOAD_TYPE_RESPONSE
 from openhop_core.protocol.identity import Identity, LocalIdentity
 from openhop_core.protocol.packet_builder import PacketBuilder
 
-from openhop_neighbour_battery import companion as c
-from openhop_neighbour_battery import shared_key as sk
+from openhop_corescope_observer_plus import companion as c
+from openhop_corescope_observer_plus import shared_key as sk
 
 
 def _identity() -> LocalIdentity:
@@ -172,7 +172,7 @@ def test_route_update_builds_a_direct_path_packet():
 
 def test_route_update_one_hop_carries_the_relay_return_path():
     from openhop_core.protocol.packet import Packet
-    from openhop_neighbour_battery.companion import path_len_byte
+    from openhop_corescope_observer_plus.companion import path_len_byte
     shared, _ = _shared()
     rpub = _identity().get_public_key()
     relay = bytes([0x41, 0x28, 0xa6])  # one 3-byte relay hash

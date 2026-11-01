@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const PLUGIN_ID = "openhop.neighbour_battery";
+  const PLUGIN_ID = "openhop.corescope_observer_plus";
   const SETTINGS = "/api/plugins/settings";
   const RUNTIME = "/api/plugins/runtime";
   const $ = (id) => document.getElementById(id);
@@ -395,7 +395,7 @@
     const warn = [];
     if (cm.stale) warn.push("CoreScope hasn't answered for over 6 hours: every repeater is polled at twice its window until it does.");
     (cm.clamped || []).filter((c) => !c.node_id).forEach((c) => warn.push(clampText(c) + "."));
-    if (cm.fast_mode) warn.push("Test fast mode is on (OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST): for bench runs only.");
+    if (cm.fast_mode) warn.push("Test fast mode is on (OPENHOP_OBSERVER_PLUS_TEST_FAST): for bench runs only.");
     $("community-warn").textContent = warn.join(" ");
   }
 
@@ -584,7 +584,7 @@
       if (!runtime.token_configured) {
         const t = await call("/api/auth/tokens", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: "Neighbour Battery plugin" }),
+          body: JSON.stringify({ name: "CoreScope Observer Plus plugin" }),
         });
         extra.api_token_input = t.token;
       }

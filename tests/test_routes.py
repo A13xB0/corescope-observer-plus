@@ -1,6 +1,6 @@
 import json
 
-from openhop_neighbour_battery.openhop import Neighbour, attach_routes
+from openhop_corescope_observer_plus.openhop import Neighbour, attach_routes
 
 WL = "02f1fe" + "aa" * 29
 GARVALD = "4128a6" + "bb" * 29
@@ -63,7 +63,7 @@ def test_relay_must_not_be_the_target():
 
 
 def test_manual_repeater_counts_as_direct_and_can_relay():
-    from openhop_neighbour_battery.openhop import OpenHopAPI
+    from openhop_corescope_observer_plus.openhop import OpenHopAPI
     RS = "d8dac32c" + "ab" * 28
     api = OpenHopAPI("http://x", "t")
     api.zero_hop_repeaters = lambda hours: nodes()
@@ -76,7 +76,7 @@ def test_manual_repeater_counts_as_direct_and_can_relay():
 
 
 def test_search_corescope_keeps_repeaters(monkeypatch):
-    from openhop_neighbour_battery import openhop
+    from openhop_corescope_observer_plus import openhop
 
     class R:
         def raise_for_status(self):

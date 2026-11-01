@@ -241,8 +241,8 @@ def start_plugin(st):
     if not (pd / "secrets.json").exists():
         cfg["api_token_input"] = (d / "token").read_text().strip()
     (pd / "config.json").write_text(json.dumps(cfg, indent=1))
-    spawn(f"plugin{st}", [VENV / "bin/python", "-m", "openhop_neighbour_battery.main"], d / "plugin.log",
-          {"OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST": "1", "OPENHOP_PLUGIN_DATA": str(pd), "OPENHOP_CONFIG_PATH": str(d / "config.yaml")})
+    spawn(f"plugin{st}", [VENV / "bin/python", "-m", "openhop_corescope_observer_plus.main"], d / "plugin.log",
+          {"OPENHOP_OBSERVER_PLUS_TEST_FAST": "1", "OPENHOP_PLUGIN_DATA": str(pd), "OPENHOP_CONFIG_PATH": str(d / "config.yaml")})
 
 
 def manager(st="A"):
@@ -251,14 +251,14 @@ def manager(st="A"):
     cfg = json.loads((d / "plugin/config.json").read_text())
     stop(f"plugin{st}")
     spawn(f"manager{st}", [VENV / "bin/openhop-plugin-manager", "--config", d / "config.yaml"], d / "manager.log",
-          {"OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST": "1", "OPENHOP_CONFIG_PATH": str(d / "config.yaml")})
+          {"OPENHOP_OBSERVER_PLUS_TEST_FAST": "1", "OPENHOP_CONFIG_PATH": str(d / "config.yaml")})
     time.sleep(5)
     wheel = max((PLUGIN / "dist").glob("*.whl"), key=lambda p: p.stat().st_mtime)
     tok = (d / "token").read_text().strip()
     py = (f"import requests\nr=requests.post('http://127.0.0.1:{http}/api/plugins/install',headers={{'X-API-Key':{tok!r}}},"
           f"files=dict(wheel=open({str(wheel)!r},'rb')),timeout=280)\nprint(r.status_code,r.text[:400])")
     print(subprocess.check_output([VENV / "bin/python", "-c", py], text=True).strip())
-    data = next((d / "data/plugins").glob("**/openhop.neighbour_battery/**/config.default.json"), None)
+    data = next((d / "data/plugins").glob("**/openhop.corescope_observer_plus/**/config.default.json"), None)
     print("installed", data)
     roots = [p for p in (d / "data/plugins").rglob("*") if p.is_dir() and p.name == "data"]
     print("data dirs", roots)

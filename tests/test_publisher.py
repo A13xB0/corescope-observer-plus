@@ -6,8 +6,8 @@ import pytest
 from nacl.signing import VerifyKey
 from openhop_core import LocalIdentity
 
-from openhop_neighbour_battery import publisher as pub
-from openhop_neighbour_battery.openhop import Broker, OpenHopConfig
+from openhop_corescope_observer_plus import publisher as pub
+from openhop_corescope_observer_plus.openhop import Broker, OpenHopConfig
 
 KEY = os.urandom(32)
 
@@ -150,7 +150,7 @@ def test_publish_claim_sends_v2_nodes(monkeypatch):
     assert payload["nodes"][1] == {"node_id": "cd" * 32, "reply_hops": 1, "via": "ef" * 32, "key": "shared",
                                    "snr": None}
     assert payload["v"] == 2 and payload["origin_id"] == p.public_key_hex and payload["origin"]
-    assert payload["plugin"] == f"openhop.neighbour_battery/{pub.__version__}"
+    assert payload["plugin"] == f"openhop.corescope_observer_plus/{pub.__version__}"
     assert payload["policy_version"] == "a1b2c3d4" and payload["community"] is True
     assert set(payload) == {"v", "origin", "origin_id", "timestamp", "plugin", "policy_version", "community", "nodes"}
     assert captured["role"] == "claim"

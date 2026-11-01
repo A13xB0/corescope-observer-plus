@@ -5,10 +5,10 @@ import stat
 import yaml
 
 from fake_companion import FakeCompanion
-from openhop_neighbour_battery import app as app_mod
-from openhop_neighbour_battery.app import App
-from openhop_neighbour_battery.openhop import Neighbour, load_openhop_config
-from openhop_neighbour_battery.settings import parse
+from openhop_corescope_observer_plus import app as app_mod
+from openhop_corescope_observer_plus.app import App
+from openhop_corescope_observer_plus.openhop import Neighbour, load_openhop_config
+from openhop_corescope_observer_plus.settings import parse
 
 NODE = "02f1" + "ab" * 30
 
@@ -174,7 +174,7 @@ def test_check_now_polls_every_target_and_publishes(tmp_path, monkeypatch):
 
 
 def test_one_hop_targets_need_max_hops(tmp_path, monkeypatch):
-    from openhop_neighbour_battery.openhop import Route
+    from openhop_corescope_observer_plus.openhop import Route
     fake = FakeCompanion()
     try:
         a, _ = make_app(tmp_path, fake, enabled=True, targets=[NODE])
@@ -386,7 +386,7 @@ def _app_with_shared_target(tmp_path, monkeypatch, fake):
 def test_own_key_is_registered_signed_and_used(tmp_path, monkeypatch):
     from openhop_core import LocalIdentity
     from openhop_core.protocol.identity import Identity
-    from openhop_neighbour_battery import guest_key
+    from openhop_corescope_observer_plus import guest_key
     fake = FakeCompanion()
     sent = []
     monkeypatch.setattr(app_mod, "register_guest_key",
@@ -436,7 +436,7 @@ def test_repeater_owned_by_another_observer_is_left_to_them(tmp_path, monkeypatc
 
     def fake_poll(*a, **k):
         calls.append(1)
-        from openhop_neighbour_battery.poller import OK, PollResult
+        from openhop_corescope_observer_plus.poller import OK, PollResult
         return PollResult(OK, battery_mv=4000, key_mode="shared")
     monkeypatch.setattr(app_mod, "poll_one_shared", fake_poll)
     try:
@@ -457,7 +457,7 @@ def test_repeater_owned_by_another_observer_is_left_to_them(tmp_path, monkeypatc
 def test_never_uploads_the_repeaters_own_key():
     import pytest
     from openhop_core import LocalIdentity
-    from openhop_neighbour_battery import guest_key, shared_key as sk
+    from openhop_corescope_observer_plus import guest_key, shared_key as sk
     ident = LocalIdentity()
     same = sk.SharedKey("x", 1, ident.get_public_key(), ident.get_signing_key_bytes())
     with pytest.raises(ValueError):
@@ -503,7 +503,7 @@ def test_the_default_never_restarts_a_repeater_that_answered_as_admin(tmp_path):
 
 
 def test_an_admin_answer_stays_off_with_the_default_on(tmp_path):
-    from openhop_neighbour_battery.poller import PollResult
+    from openhop_corescope_observer_plus.poller import PollResult
     fake = FakeCompanion()
     try:
         a, data = make_app(tmp_path, fake, targets=[NODE], guest_key_default=True)

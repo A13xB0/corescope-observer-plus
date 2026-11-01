@@ -1,6 +1,6 @@
 """Frames heard while waiting on a command are kept for the reply listener."""
 
-from openhop_neighbour_battery import companion as c
+from openhop_corescope_observer_plus import companion as c
 
 
 def test_rx_frame_during_raw_send_is_not_lost():

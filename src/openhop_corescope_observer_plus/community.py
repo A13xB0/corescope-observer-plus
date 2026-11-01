@@ -17,9 +17,9 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-LOG = logging.getLogger("openhop.neighbour_battery")
+LOG = logging.getLogger("openhop.corescope_observer_plus")
 
-FAST_ENV = "OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST"
+FAST_ENV = "OPENHOP_OBSERVER_PLUS_TEST_FAST"
 
 
 def fast_mode() -> bool:

@@ -231,7 +231,7 @@ class CompanionClient:
         self._sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
         self._buf = b""
         # CMD_APP_START: 7 reserved bytes, then an app name.
-        self._send(bytes([CMD_APP_START]) + b"\x01" + b"\x00" * 6 + b"neighbour-battery")
+        self._send(bytes([CMD_APP_START]) + b"\x01" + b"\x00" * 6 + b"corescope-observer-plus")
         frame = self._wait({RESP_CODE_SELF_INFO, RESP_CODE_ERR}, self.timeout)
         if frame is None or frame[0] != RESP_CODE_SELF_INFO:
             raise CompanionError("companion did not answer APP_START")

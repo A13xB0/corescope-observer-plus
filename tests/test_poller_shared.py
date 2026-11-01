@@ -23,10 +23,10 @@ from openhop_core.protocol.identity import Identity, LocalIdentity
 from openhop_core.protocol.packet import Packet
 from openhop_core.protocol.packet_builder import PacketBuilder
 
-from openhop_neighbour_battery import companion as c
-from openhop_neighbour_battery import poller
-from openhop_neighbour_battery import shared_key as sk
-from openhop_neighbour_battery.openhop import Neighbour, Route
+from openhop_corescope_observer_plus import companion as c
+from openhop_corescope_observer_plus import poller
+from openhop_corescope_observer_plus import shared_key as sk
+from openhop_corescope_observer_plus.openhop import Neighbour, Route
 
 
 def _identity() -> LocalIdentity:
@@ -549,7 +549,7 @@ def test_known_password_survives_an_outage():
 
 
 def test_status_interval_is_a_setting(shared):
-    from openhop_neighbour_battery.settings import parse
+    from openhop_corescope_observer_plus.settings import parse
     assert parse({}).status_every_hours == 6
     assert parse({"status_every_hours": 12}).status_every_hours == 12
     assert parse({"status_every_hours": 7}).status_every_hours == 6  # not an offered choice
@@ -562,7 +562,7 @@ def test_status_interval_is_a_setting(shared):
 
 
 def test_packet_log_records_each_send_and_its_answer(shared):
-    from openhop_neighbour_battery import packet_log
+    from openhop_corescope_observer_plus import packet_log
     entries: list = []
     log = packet_log.PacketLog(entries)
     rep = FakeRepeater(shared, battery_mv=4010, deaf=True, require_login=True)
@@ -581,7 +581,7 @@ def test_packet_log_records_each_send_and_its_answer(shared):
 
 
 def test_packet_log_keeps_the_last_twenty():
-    from openhop_neighbour_battery import packet_log
+    from openhop_corescope_observer_plus import packet_log
     log = packet_log.PacketLog([{"kind": "old"}] * 25)
     assert len(log.entries) == 20
     node = log.for_node("ab" * 32, "X", "guest key")
@@ -591,7 +591,7 @@ def test_packet_log_keeps_the_last_twenty():
 
 
 def test_operator_set_guest_password_is_used_alone(shared, monkeypatch):
-    from openhop_neighbour_battery.settings import parse
+    from openhop_corescope_observer_plus.settings import parse
     key = "ab" * 32
     assert parse({"guest_passwords": {key: "hello", "cd" * 32: "secret"}}).guest_passwords == {key: "hello"}
     sent = []
@@ -604,7 +604,7 @@ def test_operator_set_guest_password_is_used_alone(shared, monkeypatch):
 
 
 def test_per_repeater_poll_interval():
-    from openhop_neighbour_battery.settings import parse
+    from openhop_corescope_observer_plus.settings import parse
     k = "ab" * 32
     s = parse({"interval_minutes": 60, "poll_intervals": {k: 360, "cd" * 32: 7}})
     assert s.poll_intervals == {k: 360}
@@ -612,7 +612,7 @@ def test_per_repeater_poll_interval():
 
 
 def test_each_repeater_keeps_its_own_last_twenty():
-    from openhop_neighbour_battery import packet_log
+    from openhop_corescope_observer_plus import packet_log
     log = packet_log.PacketLog([])
     a, b = [], []
     la = log.for_node("aa" * 32, "A", "guest key", a)
@@ -693,7 +693,7 @@ def test_slot_skips_a_poll_just_after_a_test():
 
 
 def test_retry_goes_by_the_alternative_route_and_is_logged(shared):
-    from openhop_neighbour_battery import packet_log
+    from openhop_corescope_observer_plus import packet_log
     rep = FakeRepeater(shared, battery_mv=4010)
     rep._in_acl = True
     rep._handle_orig = rep._handle

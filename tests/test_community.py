@@ -8,11 +8,11 @@ import pytest
 
 from fake_companion import FakeCompanion
 from test_app import NODE, make_app
-from openhop_neighbour_battery import app as app_mod, community as cm
-from openhop_neighbour_battery.app import App
-from openhop_neighbour_battery.openhop import Neighbour, Route, load_openhop_config
-from openhop_neighbour_battery.poller import OK, PollResult, utc_iso
-from openhop_neighbour_battery.settings import parse
+from openhop_corescope_observer_plus import app as app_mod, community as cm
+from openhop_corescope_observer_plus.app import App
+from openhop_corescope_observer_plus.openhop import Neighbour, Route, load_openhop_config
+from openhop_corescope_observer_plus.poller import OK, PollResult, utc_iso
+from openhop_corescope_observer_plus.settings import parse
 
 OTHER = "0aa0" + "cd" * 30
 RELAY = "4128a6" + "11" * 29
@@ -118,7 +118,7 @@ def test_fast_mode_is_off_by_default_and_only_the_env_turns_it_on(monkeypatch, t
     assert cm.NORMAL.scheduled_gap_s == 60 and cm.NORMAL.no_reply_retry_s == 20 * 60
     assert cm.NORMAL.refresh_s == 600 and cm.NORMAL.policy_cache_s == 60 and cm.NORMAL.claims_every_s == 1800
     # No setting turns it on.
-    a, _ = make_app(tmp_path, fake, fast=True, test_fast=True, OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST="1")
+    a, _ = make_app(tmp_path, fake, fast=True, test_fast=True, OPENHOP_OBSERVER_PLUS_TEST_FAST="1")
     assert cm.fast_mode() is False and a.community.view(time.time())["fast_mode"] is False
     assert cm.clamp({"direct_s": 120})[0]["direct_s"] == 1800
     monkeypatch.setenv(cm.FAST_ENV, "1")
@@ -402,7 +402,7 @@ def test_quick_retries_count_toward_the_cap(tmp_path, fake, monkeypatch):
 
 
 def test_fast_mode_quick_retry_is_30_s(tmp_path, fake, monkeypatch):
-    from openhop_neighbour_battery.poller import is_due
+    from openhop_corescope_observer_plus.poller import is_due
     st = {"code": "no_reply", "last_attempt": 1000.0, "last_success": 900.0, "no_reply_count": 1}
     assert is_due(st, 3600, False, 1031) is False  # normal: 20 min
     assert is_due(st, 3600, False, 1031, retry_s=cm.FAST.no_reply_retry_s) is True
@@ -634,7 +634,7 @@ def test_runtime_shows_community_state(tmp_path, fake, monkeypatch):
 
 
 def test_battery_check_helper_tells_down_from_empty(monkeypatch):
-    from openhop_neighbour_battery import openhop
+    from openhop_corescope_observer_plus import openhop
     monkeypatch.setattr(openhop, "corescope_get", lambda *a, **k: (0, None))
     assert openhop.corescope_battery_check("https://cs", NODE) == (False, {})
     monkeypatch.setattr(openhop, "corescope_get", lambda *a, **k: (404, None))
@@ -706,7 +706,7 @@ def test_the_startup_hold_runs_out_if_corescope_never_answers(tmp_path, fake, mo
 
 def test_no_sensor_temperature_is_no_reading():
     import struct
-    from openhop_neighbour_battery.companion import lpp_temperature
+    from openhop_corescope_observer_plus.companion import lpp_temperature
     lpp = lambda c: bytes([1, 103]) + struct.pack(">h", int(c * 10))
     assert lpp_temperature(lpp(-128.0)) is None
     assert lpp_temperature(lpp(16.5)) == 16.5
@@ -715,7 +715,7 @@ def test_no_sensor_temperature_is_no_reading():
 def test_freshness_uses_the_newest_reading_of_any_source(monkeypatch):
     # CoreScope's latest_ts is the shown (best heard) source's; a newer
     # reading from another observer is what counts for the window.
-    from openhop_neighbour_battery import openhop as oh
+    from openhop_corescope_observer_plus import openhop as oh
     body = {"latest_ts": "2026-11-01T15:24:13Z", "selected": {"observer_name": "CP-Station-C"},
             "sources": [{"observer_name": "CP-Station-C", "latest_ts": "2026-11-01T15:24:13Z"},
                         {"observer_name": "CP-Station-A", "latest_ts": "2026-11-01T15:28:03Z"}]}
