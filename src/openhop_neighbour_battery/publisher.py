@@ -74,6 +74,23 @@ def build_payload(cfg: OpenHopConfig, public_key_hex: str, readings: list[dict])
     }
 
 
+def build_claim(cfg: OpenHopConfig, public_key_hex: str, claims: list[dict], *,
+                policy_version: str = "", community: bool = True) -> dict:
+    """The claim v2 payload (topic meshcore/<region>/<observer>/polling)."""
+    return {
+        "v": 2,
+        "origin": cfg.node_name,
+        "origin_id": public_key_hex,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "plugin": PLUGIN_TAG,
+        "policy_version": policy_version,
+        "community": bool(community),
+        "nodes": [{"node_id": c["node_id"], "reply_hops": int(c.get("reply_hops") or 0),
+                   "via": c.get("via") or None, "key": c.get("key") or "shared",
+                   "snr": c.get("snr")} for c in claims],
+    }
+
+
 class Publisher:
     def __init__(self, cfg: OpenHopConfig, *, timeout: float = 20.0):
         self.cfg = cfg
@@ -93,21 +110,16 @@ class Publisher:
         payload = json.dumps(build_payload(self.cfg, self.public_key_hex, readings))
         self._send(broker, topic_for(broker, self.cfg, self.public_key_hex), payload)
 
-    def publish_claim(self, broker: Broker, claims: list[dict]) -> None:
-        """Tell CoreScope which repeaters this observer polls under the shared
-        key, and by what route, so a decoded reply is credited to it
-        ("requested by …") with the right hops — CoreScope can't see the route
-        from the overheard reply. ``claims`` is a list of
-        {node_id, reply_hops, via}."""
-        payload = json.dumps({
-            "v": 1,
-            "origin": self.cfg.node_name,
-            "origin_id": self.public_key_hex,
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "plugin": PLUGIN_TAG,
-            "nodes": claims,
-        })
-        self._send(broker, _topic(broker, self.cfg, self.public_key_hex, "polling"), payload,
+    def publish_claim(self, broker: Broker, claims: list[dict], *, policy_version: str = "",
+                      community: bool = True) -> None:
+        """Tell CoreScope which repeaters this observer polls, by what route and
+        key (claim v2), so it can pick one poller per repeater and credit a
+        decoded reply ("requested by …") with the right hops — CoreScope can't
+        see the route from the overheard reply. ``claims`` is a list of
+        {node_id, reply_hops, via, key, snr}."""
+        self._send(broker, _topic(broker, self.cfg, self.public_key_hex, "polling"),
+                   json.dumps(build_claim(self.cfg, self.public_key_hex, claims,
+                                          policy_version=policy_version, community=community)),
                    role="claim")
 
     def _send(self, broker: Broker, topic: str, payload: str, role: str = "battery") -> None:

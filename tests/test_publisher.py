@@ -135,17 +135,22 @@ def test_unknown_broker_format_refused(monkeypatch):
         pub.Publisher(cfg()).publish(Broker(name="x", host="h", port=1, format="weird"), [])
 
 
-def test_publish_claim_sends_nodes(monkeypatch):
+def test_publish_claim_sends_v2_nodes(monkeypatch):
     p = pub.Publisher(cfg())
     b = Broker(name="ScotMesh", host="h", port=443, format="meshcoretomqtt")
     captured = {}
     monkeypatch.setattr(p, "_send",
                         lambda broker, topic, payload, role="battery": captured.update(topic=topic, role=role, payload=json.loads(payload)))
-    p.publish_claim(b, [{"node_id": "ab" * 32, "reply_hops": 0},
-                        {"node_id": "cd" * 32, "reply_hops": 1, "via": "ef" * 32}])
+    p.publish_claim(b, [{"node_id": "ab" * 32, "reply_hops": 0, "via": None, "key": "own", "snr": 6.5},
+                        {"node_id": "cd" * 32, "reply_hops": 1, "via": "ef" * 32, "key": "shared", "snr": None}],
+                    policy_version="a1b2c3d4", community=True)
     assert captured["topic"] == f"meshcore/EDI/{p.public_key_hex}/polling"
-    nodes = captured["payload"]["nodes"]
-    assert nodes[0] == {"node_id": "ab" * 32, "reply_hops": 0}
-    assert nodes[1]["via"] == "ef" * 32 and nodes[1]["reply_hops"] == 1
-    assert captured["payload"]["origin_id"] == p.public_key_hex and captured["payload"]["v"] == 1
+    payload = captured["payload"]
+    assert payload["nodes"][0] == {"node_id": "ab" * 32, "reply_hops": 0, "via": None, "key": "own", "snr": 6.5}
+    assert payload["nodes"][1] == {"node_id": "cd" * 32, "reply_hops": 1, "via": "ef" * 32, "key": "shared",
+                                   "snr": None}
+    assert payload["v"] == 2 and payload["origin_id"] == p.public_key_hex and payload["origin"]
+    assert payload["plugin"] == f"openhop.neighbour_battery/{pub.__version__}"
+    assert payload["policy_version"] == "a1b2c3d4" and payload["community"] is True
+    assert set(payload) == {"v", "origin", "origin_id", "timestamp", "plugin", "policy_version", "community", "nodes"}
     assert captured["role"] == "claim"

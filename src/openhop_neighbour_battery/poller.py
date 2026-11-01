@@ -971,7 +971,7 @@ def spread_phases(node_ids: list[str], interval_for: Callable[[str], float]) -> 
 
 
 def is_due(node_state: dict, interval_s: float, password_set: bool, now: float,
-           phase: float | None = None) -> bool:
+           phase: float | None = None, retry_s: float = NO_REPLY_RETRY) -> bool:
     code = node_state.get("code")
     last = float(node_state.get("last_attempt") or 0)
     if code in (NEEDS_PASSWORD, PASSWORD_REJECTED):
@@ -996,8 +996,19 @@ def is_due(node_state: dict, interval_s: float, password_set: bool, now: float,
         recent = now - float(node_state.get("last_success") or 0) < 24 * 3600
         fast = recent and int(node_state.get("no_reply_count") or 0) < NO_REPLY_FAST_TRIES
         if fast:
-            return now - last >= min(interval_s, NO_REPLY_RETRY)
+            return now - last >= min(interval_s, retry_s)
     return _slot_due(last, now, interval_s, phase)
+
+
+def next_slot(node_state: dict, interval_s: float, now: float, phase: float | None = None) -> float:
+    """Roughly when the normal schedule next polls (for the page's "next HH:MM")."""
+    last = float(node_state.get("last_attempt") or 0)
+    if phase is None:
+        return max(now, last + interval_s)
+    slot = math.floor((now - phase) / interval_s) * interval_s + phase
+    if last < slot and now - last >= interval_s / 2:
+        return now
+    return slot + interval_s
 
 
 def _scaled(phase: float | None, interval_s: float, every: float) -> float | None:

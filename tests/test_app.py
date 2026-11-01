@@ -291,26 +291,6 @@ def test_shared_key_off_when_not_opted_in(tmp_path, monkeypatch):
         fake.close()
 
 
-def test_corescope_covers_skips_a_fresh_reading(tmp_path, monkeypatch):
-    fake = FakeCompanion()
-    try:
-        import time as _t
-        from openhop_neighbour_battery.poller import utc_iso
-        a, _ = make_app(tmp_path, fake)
-        now = _t.time()
-        # A reading 5 minutes old is within a 60-minute window -> covered.
-        monkeypatch.setattr(app_mod, "corescope_latest_battery_ts", lambda url, nid, **k: utc_iso(now - 300))
-        assert a._corescope_covers(NODE, 3600, now) is True
-        # Two hours old -> not covered.
-        monkeypatch.setattr(app_mod, "corescope_latest_battery_ts", lambda url, nid, **k: utc_iso(now - 7200))
-        assert a._corescope_covers(NODE, 3600, now) is False
-        # Lookup failure fails open (not covered -> plugin retries).
-        monkeypatch.setattr(app_mod, "corescope_latest_battery_ts", lambda url, nid, **k: None)
-        assert a._corescope_covers(NODE, 3600, now) is False
-    finally:
-        fake.close()
-
-
 def test_test_login_reports_live_steps(tmp_path, monkeypatch):
     # The Test action records a step for each stage so the dialog shows a
     # live console of what the poll is doing (login, status…).
@@ -337,7 +317,7 @@ def test_test_login_reports_live_steps(tmp_path, monkeypatch):
 
 
 def test_check_now_stale_scope_skips_fresh(tmp_path, monkeypatch):
-    # scope "stale" polls only targets with no reading in the last hour.
+    # scope "stale" polls only targets with no reading within the window.
     import time as _t
     fake = FakeCompanion()
     monkeypatch.setattr(app_mod, "CORESCOPE_SETTLE_S", 0)
@@ -365,8 +345,12 @@ def test_check_now_stale_scope_skips_fresh(tmp_path, monkeypatch):
         a.run_requests()
         act = a.actions["check_now"]
         assert act["scope"] == "stale"
-        polled = [p["node_id"] for p in act["progress"]]
+        polled = [p["node_id"] for p in act["progress"] if not p.get("skipped")]
         assert other in polled and NODE not in polled, polled
+        # The skipped one is listed too, with why.
+        skipped = [p for p in act["progress"] if p.get("skipped")]
+        assert [p["node_id"] for p in skipped] == [NODE] and skipped[0]["skipped"] == "fresh_own"
+        assert act["message"].endswith("· 1 skipped")
     finally:
         fake.close()
 
@@ -443,7 +427,8 @@ def test_repeater_owned_by_another_observer_is_left_to_them(tmp_path, monkeypatc
     fake = FakeCompanion()
     monkeypatch.setattr(app_mod, "register_guest_key", lambda url, body, **k: (200, {"ok": True}))
     monkeypatch.setattr(app_mod, "corescope_owners",
-                        lambda url, obs, **k: {NODE: {"owner": "cc" * 32, "owner_name": "Cadham Village", "mine": False}})
+                        lambda url, obs, **k: {"nodes": {NODE: {"owner": "cc" * 32, "owner_name": "Cadham Village",
+                                                                "mine": False}}})
     calls = []
 
     def fake_poll(*a, **k):
@@ -456,7 +441,10 @@ def test_repeater_owned_by_another_observer_is_left_to_them(tmp_path, monkeypatc
         a.check = {"companion": {"ok": True}}
         a.candidates = [Neighbour(NODE, "West Lomond", -5.0, -119, 0, True)]
         a.poll([NODE])
-        assert calls == [] and a.state.node(NODE)["polled_by"] == "Cadham Village"
+        # An older CoreScope (no roles): not mine means standby, which holds
+        # while CoreScope can't say whether the owner's reading is fresh.
+        skip = a.state.node(NODE)["skip"]
+        assert calls == [] and skip["reason"] == "standby" and skip["by"] == "Cadham Village"
         a.poll([NODE], force=True)  # Test / Check now still poll
         assert calls == [1]
     finally:

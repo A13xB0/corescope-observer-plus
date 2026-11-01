@@ -19,9 +19,11 @@ from .openhop import (
     OpenHopError,
     Route,
     companion_port,
+    corescope_battery_check,
     corescope_battery_snapshot,
+    corescope_monitors,
+    corescope_policy,
     corescope_responses,
-    corescope_latest_battery_ts,
     corescope_owners,
     fetch_shared_guest_key,
     load_openhop_config,
@@ -29,20 +31,21 @@ from .openhop import (
     search_corescope,
 )
 from . import guest_key
+from .community import Community, fast_mode, iso_ts, timings
 from . import packet_log
 from . import shared_key as sk
-from .poller import (ADMIN_STOP, NO_BATTERY, NO_REPLY, OK, is_due, poll_one, poll_one_shared, reading, record,
-                     spread_phases, utc_iso)
+from .poller import (ADMIN_STOP, NO_BATTERY, OK, is_due, next_slot, poll_one, poll_one_shared, reading,
+                     record, spread_phases, utc_iso)
 from .publisher import Publisher
 from .settings import TRANSIENT_KEYS, Settings, parse, read_raw, write_raw
 from .storage import Secrets, State
 
 LOG = logging.getLogger("openhop.neighbour_battery")
 
-# Scheduled polls go out one at a time, at least this far apart, so a backlog
-# (after a restart, or slots missed while busy) drains gently instead of in a
-# burst. A forced Check now polls every target, spaced by spacing_seconds.
-SCHEDULED_GAP_S = 60
+# Scheduled polls go out one at a time, at least community.timings()
+# .scheduled_gap_s (60 s) apart, so a backlog (after a restart, or slots missed
+# while busy) drains gently instead of in a burst. A forced Check now polls
+# every target, spaced by spacing_seconds.
 # A forced Test of the same repeater within this long is refused: each one can
 # put logins on air, and a burst of them only adds load.
 TEST_COOLDOWN_S = 60
@@ -52,8 +55,8 @@ CORESCOPE_SETTLE_S = 2.0
 # CoreScope stamps a reading with the request time the repeater echoes; allow
 # this much clock difference when asking "is it from after we started?".
 CORESCOPE_CLOCK_SLACK_S = 5
-# Check now's "stale" scope: repeaters with no reading for at least this long.
-STALE_AFTER_S = 3600
+# Request send times kept per repeater, for the per-window request cap.
+SENDS_KEPT = 12
 QUEUE_MAX = 200
 QUEUE_MAX_AGE = 2 * 3600  # CoreScope drops readings older than this
 
@@ -78,7 +81,15 @@ class App:
         self._shared_cache: dict = {}  # the shared key fetched from CoreScope, cached by URL
         self._own_key: sk.SharedKey | None = None  # this observer's polling key (guest_key.py)
         self._owners: dict = {"at": 0.0, "ok_at": 0.0, "nodes": {}}  # who polls which repeater (CoreScope)
-        self._last_scheduled = 0.0  # when the last scheduled poll finished (SCHEDULED_GAP_S)
+        self._last_scheduled = 0.0  # when the last scheduled poll finished (scheduled_gap_s)
+        # CoreScope's polling policy (limits and switches), kept in state.json.
+        self.community = Community(self.state.value.setdefault("community", {}), __version__)
+        self._policy_tried = 0.0
+        self._claims_tried = 0.0
+        if fast_mode():
+            LOG.warning("*** TEST FAST MODE IS ON (OPENHOP_NEIGHBOUR_BATTERY_TEST_FAST=1): minute floors, "
+                        "30 s policy refresh, 60 s claims, 30 s retries. For bench runs only, never on a "
+                        "real mesh. ***")
 
     # -- settings ---------------------------------------------------------
 
@@ -122,6 +133,7 @@ class App:
             write_raw(self.data_dir, raw)
             self.state.save()
         self.settings = parse(raw)
+        self.community.reset_for_url(self.settings.corescope_url)
         # Re-opting a repeater into the shared key (adding it back to the list
         # after an admin answer disabled it) clears the admin stop, so it can
         # be tried again deliberately.
@@ -207,15 +219,6 @@ class App:
     def routes_for(self, n: Neighbour) -> list[Route]:
         """The routes polling may use for n under the current reach setting."""
         return [r for r in n.routes if r.hops <= self.settings.max_hops]
-
-    def _corescope_covers(self, node_id: str, within_s: float, now: float) -> bool:
-        """True if CoreScope already has a battery reading for the node newer
-        than within_s — from any observer. A failed lookup is False, so the
-        plugin falls back to retrying rather than skipping."""
-        ts = corescope_latest_battery_ts(self.settings.corescope_url, node_id)
-        if not ts:
-            return False
-        return now - _ts(ts) < within_s
 
     def _corescope_confirm(self, node_id: str, since: float) -> dict:
         """CoreScope's view of a node's battery for the live "did it land?"
@@ -304,16 +307,156 @@ class App:
 
     def owners(self, now: float) -> dict:
         """CoreScope's choice of poller per repeater, refreshed every 10 min.
-        Empty (poll everything ourselves) if it hasn't answered for 30 min."""
+        Empty (poll everything ourselves) if it hasn't answered for 30 min, or
+        when community polling is off. The answer carries the policy too."""
+        if not self.settings.community:
+            return {}
         c = self._owners
-        if self.ohcfg and self.settings.corescope_url and now - c["at"] >= 600:
+        t = timings()
+        if self.ohcfg and self.settings.corescope_url and now - c["at"] >= t.refresh_s:
             c["at"] = now
-            nodes = corescope_owners(self.settings.corescope_url, self.observer_id)
-            if nodes is not None:
-                c["nodes"], c["ok_at"] = nodes, now
-            elif now - c["ok_at"] > 1800:
+            body = corescope_owners(self.settings.corescope_url, self.observer_id, plugin_version=__version__)
+            if body is not None:
+                c["nodes"], c["ok_at"] = body.get("nodes") or {}, now
+                if isinstance(body.get("policy"), dict):
+                    self.community.apply(body["policy"], now)
+                    self.state.save()
+            elif now - c["ok_at"] > t.owners_stale_s:
                 c["nodes"] = {}
         return c["nodes"]
+
+    def refresh_policy(self, now: float, max_age: float | None = None) -> None:
+        """Pull CoreScope's polling policy if the saved copy is older than
+        max_age (default: the 10-minute refresh). A failure keeps the saved
+        copy and its switches; it is retried no sooner than max_age."""
+        if not self.settings.corescope_url:
+            return
+        max_age = timings().refresh_s if max_age is None else max_age
+        if now - max(self._policy_tried, self.community.fetched_at) < max_age:
+            return
+        self._policy_tried = now
+        status, body = corescope_policy(self.settings.corescope_url, self.observer_id, __version__)
+        if status == 200 and isinstance(body, dict):
+            self.community.apply(body, now)
+        else:
+            self.community.note_failure(status, now)
+            if status != 404:
+                LOG.warning("CoreScope policy: %s; keeping the %s", self.community.s.get("last_error"),
+                            "saved policy" if self.community.has_policy else "built-in defaults")
+        self.state.save()
+
+    # -- community polling: windows, roles, skips ----------------------------
+
+    def best_hops(self, node_id: str) -> int:
+        n = self._neighbour(node_id)
+        routes = self.routes_for(n) if n else []
+        return routes[0].hops if routes else 0
+
+    def window_s(self, node_id: str, now: float) -> int:
+        return self.community.window_s(node_id, self.best_hops(node_id), now)
+
+    def interval_s(self, node_id: str, now: float) -> float:
+        """Seconds between scheduled polls: the operator's interval, never
+        faster than CoreScope's window for the repeater. (Test fast mode uses
+        the window as it is, so a bench run isn't held back by the setting.)"""
+        window = self.window_s(node_id, now)
+        if fast_mode():
+            return float(window)
+        return float(max(self.settings.interval_for(node_id) * 60, window))
+
+    def role_for(self, node_id: str, now: float, *, fetch: bool = True) -> dict:
+        """This observer's part for a repeater, from CoreScope's /owners:
+        poller, standby (another observer polls it), or a role that means no
+        sending (excluded, paused, disabled). Community off, or nothing from
+        CoreScope about it: poller."""
+        if not self.settings.community:
+            return {"role": "poller", "independent": True}
+        nodes = self.owners(now) if fetch else (self._owners.get("nodes") or {})
+        o = nodes.get(node_id)
+        if not isinstance(o, dict):
+            return {"role": "poller"}
+        role = o.get("role")
+        if role == "excluded" or o.get("excluded"):
+            return {"role": "excluded"}
+        if role in ("paused", "disabled"):
+            return {"role": role}
+        if role in ("polling", "independent") or (role is None and o.get("mine")):
+            return {"role": "poller", "independent": role == "independent"}
+        if not o.get("mine"):
+            return {"role": "standby",
+                    "by": str(o.get("owner_name") or str(o.get("owner") or "")[:8]),
+                    "owner_hops": o.get("owner_hops")}
+        return {"role": "poller"}
+
+    def _skip(self, st: dict, reason: str, text: str, now: float, **extra) -> dict:
+        skip = {"reason": reason, "text": text, "at": now, **extra}
+        st["skip"] = skip
+        return skip
+
+    def skip_reason(self, n: Neighbour, now: float, mode: str) -> dict | None:
+        """Why this repeater is not polled now, or None to poll it.
+
+        mode: "scheduled" (the normal schedule), "stale" (Check now, only
+        stale), "all" (Check now, all of them) or "test". Every mode stops for
+        CoreScope's switches and exclusions; all but Test keep to the request
+        cap; scheduled and stale also stand by and ask CoreScope whether a
+        reading inside the window is already there.
+        """
+        node_id = n.node_id
+        st = self.state.node(node_id)
+        gate = self.community.gate(now)
+        if gate:
+            return self._skip(st, gate["reason"], gate["text"], now)
+        if self.community.excluded(node_id):
+            return self._skip(st, "excluded", "CoreScope excludes it (owner's request)", now)
+        window = self.window_s(node_id, now)
+        if mode != "test":
+            sends = [x for x in st.get("sends") or [] if now - x < window]
+            if len(sends) >= self.community.max_requests():
+                st["next_due_at"] = min(sends) + window
+                return self._skip(st, "cap", f"{len(sends)} requests already sent within the window "
+                                  f"(CoreScope allows {self.community.max_requests()})", now,
+                                  until=st["next_due_at"])
+        if mode in ("test", "all"):
+            return None
+        role = self.role_for(node_id, now)
+        if role["role"] == "excluded":
+            return self._skip(st, "excluded", "CoreScope excludes it (owner's request)", now)
+        if role["role"] in ("paused", "disabled"):
+            return self._skip(st, role["role"], "CoreScope has paused polling" if role["role"] == "paused"
+                              else "CoreScope has disabled this observer", now)
+        standby = role["role"] == "standby"
+        hops = role.get("owner_hops")
+        by_text = (f"{role.get('by') or 'another observer'} polls it"
+                   + (" (direct)" if hops == 0 else " (1 hop)" if hops == 1 else ""))
+        if mode == "stale" and now - float(st.get("last_success") or 0) < window:
+            return self._skip(st, "fresh_own", "this observer read it within the window", now)
+        if not self.settings.corescope_url:
+            return None  # nothing to ask: poll
+        wait = window + (self.community.grace_s() if standby else 0)
+        reachable, snap = corescope_battery_check(self.settings.corescope_url, node_id)
+        if not reachable:
+            if standby:
+                # Standby holds through an outage (the poller is probably fine);
+                # once CoreScope's owners lapse this observer polls again.
+                st["next_due_at"] = now + timings().hold_recheck_s
+                return self._skip(st, "standby", f"{by_text}; you're standby (CoreScope unreachable, holding)",
+                                  now, by=role.get("by"), owner_hops=hops)
+            return None  # the poller fails open
+        latest = iso_ts(snap.get("latest_ts"))
+        if latest is not None and now - latest < wait:
+            st["next_due_at"] = latest + wait
+            st["fresh_at"], st["fresh_by"] = latest, snap.get("by") or ""
+            if standby:
+                return self._skip(st, "standby", f"{by_text}; you're standby", now, by=role.get("by"),
+                                  owner_hops=hops, until=st["next_due_at"])
+            mins = max(0, round((now - latest) / 60))
+            return self._skip(st, "fresh", f"{snap.get('by') or 'another observer'} sent a reading {mins} min ago",
+                              now, by=snap.get("by") or "", until=st["next_due_at"])
+        if standby:
+            LOG.info("standby for %s (%s): newest reading is older than the window plus grace; stepping in",
+                     n.name, node_id[:8])
+        return None
 
     def uses_shared_key(self, node_id: str) -> bool:
         """Whether this repeater is polled under the shared key.
@@ -332,69 +475,77 @@ class App:
             return False
         return self.polling_key() is not None
 
-    def poll(self, node_ids: list[str], *, force: bool = False, on_node=None, on_step=None) -> list[dict]:
-        """Poll the given targets that are zero-hop now; return payload readings.
+    def poll(self, node_ids: list[str], *, force: bool = False, mode: str | None = None,
+             on_node=None, on_step=None, on_skip=None) -> list[dict]:
+        """Poll the given targets that are reachable now; return payload readings.
 
-        on_node(neighbour, state) is called after each repeater is polled, so a
-        caller (Check now, Test) can stream live progress to the page.
-        on_step(label) is called at each step of a single poll (login, status,
-        telemetry), for the live step view in Test."""
+        mode is "scheduled" (default), "stale", "all" or "test" (see
+        skip_reason); force=True without a mode is "all". on_node(neighbour,
+        state) is called after each repeater is polled, so a caller (Check
+        now, Test) can stream live progress to the page; on_skip(neighbour,
+        skip) for each one left alone, with the reason. on_step(label) is
+        called at each step of a single poll (login, status, telemetry), for
+        the live step view in Test."""
+        mode = mode or ("all" if force else "scheduled")
+        scheduled = mode == "scheduled"
         if not self.check.get("companion", {}).get("ok") or not self.ohcfg:
             return []
         port = companion_port(self.ohcfg, self.settings.companion_name)
         now = time.time()
+        t = timings()
         due = []
         # Each target polls in a slot of its own within its interval, so the
         # scheduled polls are spread out rather than sent in bursts.
-        phases = spread_phases(self.settings.targets, lambda k: self.settings.interval_for(k) * 60)
+        phases = spread_phases(self.settings.targets, lambda k: self.interval_s(k, now))
         for node_id in node_ids:
-            interval = self.settings.interval_for(node_id) * 60
+            interval = self.interval_s(node_id, now)
             n = self._neighbour(node_id)
             st = self.state.node(node_id)
             if n is None or not self.routes_for(n):
                 st["code"] = "not_direct" if n else "not_heard"
                 continue
-            if not (force or is_due(st, interval, self.secrets.has_password(node_id), now,
-                                    phases.get(node_id))):
-                continue
-            # One poller per repeater: if CoreScope has another observer polling
-            # this one, leave it to them (its reading still reaches CoreScope).
-            # A forced Test or Check always polls.
-            if not force and self.uses_shared_key(node_id):
-                owner = self.owners(now).get(node_id)
-                if owner and not owner.get("mine"):
-                    st["polled_by"] = owner.get("owner_name") or str(owner.get("owner") or "")[:8]
-                    st["last_attempt"] = now
-                    LOG.info("skip %s (%s): polled by %s", n.name, node_id[:8], st["polled_by"])
+            if scheduled:
+                if now < float(st.get("next_due_at") or 0):
+                    continue  # rescheduled: someone's reading is fresh, the cap is reached, or standing by
+                if not is_due(st, interval, self.secrets.has_password(node_id), now, phases.get(node_id),
+                              retry_s=t.no_reply_retry_s):
                     continue
-                st.pop("polled_by", None)
-            # Before sending anything: a shared-key repeater whose last poll
-            # went unanswered is skipped this time if CoreScope already has a
-            # reading from within the interval — another observer has it. (The
-            # poll itself also asks CoreScope, but only about the answer to its
-            # own request, after sending.) Never on a forced poll; the lookup
-            # fails open, so an unreachable CoreScope still polls.
-            if (not force and self.settings.check_corescope and st.get("code") == NO_REPLY
-                    and self.uses_shared_key(node_id)
-                    and self._corescope_covers(node_id, interval, now)):
-                st["covered_at"] = now
-                st["last_attempt"] = now  # reschedule; another observer has it for now
-                LOG.info("skip %s (%s): CoreScope already has a fresh reading from another observer",
-                         n.name, node_id[:8])
-                continue
             due.append(n)
         due.sort(key=lambda n: float(self.state.node(n.node_id).get("last_attempt") or 0))
         out = []
-        if not due or (not force and time.time() - self._last_scheduled < SCHEDULED_GAP_S):
+        if not due or (scheduled and time.time() - self._last_scheduled < t.scheduled_gap_s):
+            return out
+        # Before any send: a policy older than a minute is pulled again, so a
+        # pause or block reaches the radio within a minute.
+        self.refresh_policy(now, t.policy_cache_s)
+        chosen = []
+        for n in due:
+            skip = self.skip_reason(n, time.time(), mode)
+            if skip:
+                if skip["reason"] not in ("paused", "blocked", "version_disabled"):
+                    LOG.info("skip %s (%s): %s", n.name, n.node_id[:8], skip["text"])
+                if on_skip:
+                    on_skip(n, skip)
+                continue
+            chosen.append(n)
+            if scheduled:
+                break  # one scheduled poll per tick
+        self.state.save()
+        if not chosen:
             return out
         s = self.settings
         with CompanionClient(self.companion_host, port) as client:
-            for i, n in enumerate(due if force else due[:1]):
+            for i, n in enumerate(chosen):
                 routes = self.routes_for(n)
                 if i:
                     # A poll through a relay costs the relay two transmissions.
                     time.sleep(s.spacing_seconds * (2 if routes[0].hops else 1))
                 st = self.state.node(n.node_id)
+                # Every request counts toward the per-window cap (quick retries too).
+                st["sends"] = ([x for x in st.get("sends") or [] if time.time() - x < 2 * 86400]
+                               + [time.time()])[-SENDS_KEPT:]
+                for k in ("skip", "next_due_at"):
+                    st.pop(k, None)
                 pw = self.secrets.password(n.node_id)
                 shared = self.polling_key() if self.uses_shared_key(n.node_id) else None
                 plog = self.packets.for_node(
@@ -456,7 +607,7 @@ class App:
                 self.write_runtime()
                 if on_node:
                     on_node(n, st)
-        if not force:
+        if scheduled:
             self._last_scheduled = time.time()
         return out
 
@@ -504,30 +655,47 @@ class App:
             q = self.state.broker(name).setdefault("queue", [])
             q.extend(readings)
 
-    def publish_claims(self, now: float) -> None:
-        """Tell CoreScope which repeaters this observer polls under the shared
-        key, so decoded replies are credited to it. Refreshed at most twice an
-        hour; the claim lasts 3 h on CoreScope."""
-        if not self.ohcfg or not self.check.get("publish", {}).get("ok"):
-            return
-        claims = []
-        for node_id in self.settings.shared_key_targets:
+    def claim_entries(self) -> list[dict]:
+        """One claim per repeater this observer polls: selected, reachable,
+        not excluded by CoreScope. Every key mode, so CoreScope can choose
+        one poller per repeater whatever key each observer uses."""
+        out = []
+        for node_id in self.settings.targets:
             n = self._neighbour(node_id)
-            # Claim only repeaters still selected for polling, reachable, and
-            # actually using the shared key — not ones left in the list but
-            # unticked or out of range.
-            if n is None or node_id not in self.settings.targets or not self.uses_shared_key(node_id):
-                continue
-            routes = self.routes_for(n)
-            if not routes:
+            routes = self.routes_for(n) if n else []
+            if not routes or self.community.excluded(node_id):
                 continue
             r = routes[0]
-            entry = {"node_id": node_id, "reply_hops": r.hops}
-            if r.relay_id:
-                entry["via"] = r.relay_id
-            claims.append(entry)
-        if not claims or now - float(self.state.value.get("claims_at") or 0) < 1800:
+            key = ("shared" if self.uses_shared_key(node_id)
+                   else "password" if self.secrets.has_password(node_id) else "own")
+            snr = r.snr if r.snr is not None else n.snr
+            out.append({"node_id": node_id, "reply_hops": r.hops, "via": r.relay_id or None,
+                        "key": key, "snr": None if snr is None else round(float(snr), 1)})
+        return out
+
+    def publish_claims(self, now: float) -> None:
+        """Tell CoreScope which repeaters this observer polls, by what route and
+        key (claim v2), so it can pick one poller per repeater and credit
+        decoded replies. Sent every 30 min and at once when a route's hops or
+        relay change (or a repeater is added). Off: one last claim saying
+        community is off, then none."""
+        if not self.ohcfg or not self.check.get("publish", {}).get("ok"):
             return
+        t = timings()
+        sv = self.state.value
+        community = self.settings.community
+        if not community and not sv.get("claims_community"):
+            return  # off, and CoreScope already knows (or never heard from us)
+        claims = self.claim_entries()
+        if not claims:
+            return
+        sig = sorted([c["node_id"], c["reply_hops"], c["via"] or ""] for c in claims)
+        changed = sig != sv.get("claims_sig") or community != sv.get("claims_community")
+        if not changed and now - float(sv.get("claims_at") or 0) < t.claims_every_s:
+            return
+        if now - self._claims_tried < min(60.0, t.claims_every_s):
+            return  # a failed attempt is retried a minute later, not every tick
+        self._claims_tried = now
         publisher = Publisher(self.ohcfg)
         brokers = {b.name: b for b in self.ohcfg.brokers}
         sent = False
@@ -536,12 +704,13 @@ class App:
             if b is None:
                 continue
             try:
-                publisher.publish_claim(b, claims)
+                publisher.publish_claim(b, claims, policy_version=self.community.policy()[0]["version"],
+                                        community=community)
                 sent = True
-            except Exception as exc:  # noqa: BLE001 - retried next tick
-                LOG.warning("shared-key claim to %s failed: %s", name, exc)
+            except Exception as exc:  # noqa: BLE001 - retried a minute later
+                LOG.warning("polling claim to %s failed: %s", name, exc)
         if sent:
-            self.state.value["claims_at"] = now
+            sv.update(claims_at=now, claims_sig=sig, claims_community=community, claims_count=len(claims))
             self.state.save()
 
     def flush(self) -> None:
@@ -597,6 +766,8 @@ class App:
                         raise RuntimeError("type at least 3 characters")
                     result["results"] = search_corescope(self.settings.corescope_url, query)
                     result["message"] = f"{len(result['results'])} found in CoreScope"
+                elif kind == "monitors":
+                    self._run_monitors(req, result)
                 elif kind == "refresh":
                     self.refresh()
                 else:
@@ -648,6 +819,15 @@ class App:
             result.update(self._node_view(node_id), running=False, ok=False,
                           message=f"Polled {int(started - last)} s ago. Wait {wait} s before testing it again.")
             return
+        # CoreScope's switches and exclusions stop a Test too (its limits don't).
+        self.refresh_policy(started, timings().policy_cache_s)
+        stop = self.community.gate(started) or (
+            {"reason": "excluded", "text": "CoreScope excludes this repeater (owner's request)"}
+            if self.community.excluded(node_id) else None)
+        if stop:
+            result.update(self._node_view(node_id), running=False, ok=False, skipped=stop["reason"],
+                          message=stop["text"])
+            return
         self.refresh()
         # Announce "running" before the poll (it can take up to a minute) so
         # the page shows it working, not stalled.
@@ -659,7 +839,7 @@ class App:
             result["steps"].append({"label": label, "at": utc_iso()})
             self._publish_action(kind, result)
 
-        readings = self.poll([node_id], force=True, on_step=on_step)
+        readings = self.poll([node_id], mode="test", on_step=on_step)
         result.update(self._node_view(node_id))
         if kind == "poll_now" and readings:
             self.queue(readings)
@@ -672,17 +852,22 @@ class App:
             result["corescope"] = self._corescope_confirm(node_id, started)
 
     def _run_check(self, req: dict, result: dict) -> None:
-        """Poll every selected repeater now ("stale": only those without a
-        reading for STALE_AFTER_S), streaming each result to the page."""
+        """Poll the selected repeaters now, streaming each result to the page.
+
+        "stale": like the schedule, standing by and skipping a repeater whose
+        newest reading (anyone's) is inside its window. "all": ignores fresh
+        readings and standby, but not CoreScope's pause, block, version
+        minimum, exclusions or request cap. Every skip is listed with why."""
         started = time.time()
         self.refresh()
         scope = "stale" if req.get("scope") == "stale" else "all"
         targets = list(self.settings.targets)
-        if scope == "stale":
-            def last_heard(t: str) -> float:
-                st = self.state.node(t)
-                return max(float(st.get("last_success") or 0), float(st.get("covered_at") or 0))
-            targets = [t for t in targets if started - last_heard(t) >= STALE_AFTER_S]
+        self.refresh_policy(started, timings().policy_cache_s)
+        gate = self.community.gate(started)
+        if gate:
+            result.update(scope=scope, total=len(targets), progress=[], running=False, ok=False,
+                          skipped=gate["reason"], message=gate["text"])
+            return
         result.update(scope=scope, total=len(targets), progress=[], running=True)
         self._publish_action("check_now", result)
 
@@ -690,37 +875,70 @@ class App:
             result["progress"].append(self._node_view(n.node_id, n.name))
             self._publish_action("check_now", result)
 
-        readings = self.poll(targets, force=True, on_node=on_node)
+        def on_skip(n, skip) -> None:
+            row = self._node_view(n.node_id, n.name)
+            row.update(skipped=skip["reason"], message=skip["text"])
+            result["progress"].append(row)
+            self._publish_action("check_now", result)
+
+        readings = self.poll(targets, mode=scope, on_node=on_node, on_skip=on_skip)
         if readings:
             self.queue(readings)
             self.flush()
+        asked = [row for row in result["progress"] if not row.get("skipped")]
+        skipped = len(result["progress"]) - len(asked)
         # Confirm each polled repeater against CoreScope, streaming as it goes.
         # Stop at the first unreachable answer: the rest would fail the same way.
-        if self._confirm_wanted() and result["progress"]:
+        if self._confirm_wanted() and asked:
             time.sleep(CORESCOPE_SETTLE_S)
-            for row in result["progress"]:
+            for row in asked:
                 row["corescope"] = self._corescope_confirm(row["node_id"], started)
                 self._publish_action("check_now", result)
                 if not row["corescope"].get("reachable"):
                     break
         # Count answers from state, not published readings: shared-key readings
         # are never published (CoreScope decodes them), but they were read.
-        codes = [self.state.node(t).get("code") or "?" for t in targets]
+        codes = [self.state.node(row["node_id"]).get("code") or "?" for row in asked]
         answered = sum(c in (OK, NO_BATTERY) for c in codes)
         result["readings"] = answered
+        result["asked"], result["skipped_count"] = len(asked), skipped
         if not targets:
-            result["message"] = ("every repeater had a reading within the hour"
-                                 if scope == "stale" else "no repeaters selected")
+            result["message"] = "no repeaters selected"
+            return
+        if not asked:
+            result["message"] = (f"nothing to ask: {skipped} skipped" if skipped
+                                 else "no selected repeater is reachable")
             return
         rest = sorted({c for c in codes if c not in (OK, NO_BATTERY)})
-        result["message"] = f"{answered} of {len(targets)} read" + (f" ({', '.join(rest)} for the rest)" if rest else "")
+        result["message"] = (f"{answered} of {len(asked)} read" + (f" ({', '.join(rest)} for the rest)" if rest else "")
+                             + (f" · {skipped} skipped" if skipped else ""))
+
+    def _run_monitors(self, req: dict, result: dict) -> None:
+        """Who else monitors a repeater (CoreScope's /api/nodes/{pk}/monitors),
+        for the Details dialog's Community block."""
+        node_id = str(req.get("node_id") or "").lower()
+        result["node_id"] = node_id
+        if not self.settings.corescope_url:
+            result.update(ok=False, message="No CoreScope address set")
+            return
+        status, body = corescope_monitors(self.settings.corescope_url, node_id, __version__)
+        if status == 200 and isinstance(body, dict):
+            result["monitors"] = body
+            return
+        result["ok"] = False
+        result["status"] = status
+        result["message"] = ("This CoreScope doesn't list monitors yet" if status == 404
+                             else f"CoreScope answered HTTP {status}" if status else "CoreScope unreachable")
 
     def tick(self) -> None:
         self.load_settings()
         if time.time() - self._last_refresh > 300 or not self.check:
             self.refresh()
         self.run_requests()
+        now = time.time()
+        self.refresh_policy(now)
         if self.settings.enabled and self.settings.targets:
+            self.owners(now)
             readings = self.poll(self.settings.targets)
             if readings:
                 self.queue(readings)
@@ -729,8 +947,54 @@ class App:
         self.flush()
         self.write_runtime()
 
+    def _community_node(self, n: Neighbour, now: float, phases: dict) -> dict:
+        """The "Who polls" cell: this observer's part for a repeater, and when
+        it next asks. Cached data only (no CoreScope calls)."""
+        st = self.state.value["nodes"].get(n.node_id, {})
+        window = self.window_s(n.node_id, now)
+        interval = self.interval_s(n.node_id, now)
+        role = self.role_for(n.node_id, now, fetch=False)
+        skip = st.get("skip") or {}
+        next_due = float(st.get("next_due_at") or 0)
+        if self.community.excluded(n.node_id) or role["role"] == "excluded":
+            who = "excluded"
+        elif role["role"] == "standby":
+            who = "standby"
+        elif next_due > now and skip.get("reason") == "fresh":
+            who = "covered"
+        elif next_due > now and skip.get("reason") == "cap":
+            who = "capped"
+        else:
+            who = "you"
+        return {
+            "who": who,
+            "by": role.get("by") or skip.get("by") or "",
+            "owner_hops": role.get("owner_hops"),
+            "independent": bool(role.get("independent")),
+            "next_at": max(next_due, next_slot(st, interval, now, phases.get(n.node_id))),
+            "fresh_at": st.get("fresh_at"),
+            "fresh_by": st.get("fresh_by") or "",
+            "window_s": window,
+            "interval_s": interval,
+            "hops": self.best_hops(n.node_id),
+            "skip": skip,
+        }
+
+    def _community_runtime(self, now: float) -> dict:
+        view = self.community.view(now)
+        view.update(
+            enabled=self.settings.community,
+            corescope_url=self.settings.corescope_url,
+            claimed=int(self.state.value.get("claims_count") or 0) if self.state.value.get("claims_community") else 0,
+            claims_at=self.state.value.get("claims_at"),
+            owners_ok_at=self._owners.get("ok_at") or None,
+        )
+        return view
+
     def write_runtime(self) -> None:
         selected = set(self.settings.targets)
+        now = time.time()
+        phases = spread_phases(self.settings.targets, lambda k: self.interval_s(k, now))
         nodes = []
         for n in self.candidates:
             st = self.state.value["nodes"].get(n.node_id, {})
@@ -765,7 +1029,7 @@ class App:
                 "covered": bool(st.get("last_covered")),
                 "via_corescope": bool(st.get("via_corescope")),
                 "flood_replies": int(st.get("flood_replies") or 0),
-                "polled_by": st.get("polled_by") or "",
+                "community": self._community_node(n, now, phases) if n.node_id in selected else None,
             })
         brokers = []
         for b in (self.ohcfg.brokers if self.ohcfg else []):
@@ -782,6 +1046,8 @@ class App:
             "schema": 1,
             "plugin_version": __version__,
             "generated_at": utc_iso(),
+            "observer_id": self.observer_id,
+            "community": self._community_runtime(now),
             "self_check": self.check,
             "token_configured": bool(self.secrets.api_token),
             "companion": {"name": self.settings.companion_name, "public_key": self.companion_key},

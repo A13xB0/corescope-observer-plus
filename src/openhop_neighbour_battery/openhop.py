@@ -517,18 +517,85 @@ def register_guest_key(base_url: str, body: dict, *, timeout: float = 10.0) -> t
     return r.status_code, payload if isinstance(payload, dict) else {}
 
 
-def corescope_owners(base_url: str, observer_id: str, *, timeout: float = 5.0) -> dict | None:
+def corescope_owners(base_url: str, observer_id: str, plugin_version: str = "", *,
+                     timeout: float = 5.0) -> dict | None:
     """Which observer CoreScope has chosen to poll each repeater this one
-    claims: {node_id: {"owner", "owner_name", "mine"}}. None on any error, so
-    the caller polls everything itself (fails open)."""
+    claims: {"nodes": {node_id: {"owner", "owner_name", "mine", and on a
+    CoreScope with community polling "role", "owner_hops", "latest_ts",
+    "window_s", "next_due", "standby_due", "excluded"}}, "policy": {...}}.
+    None on any error, so the caller polls everything itself (fails open)."""
     if not base_url:
         return None
+    params = {"observer": observer_id}
+    if plugin_version:
+        params["plugin_version"] = plugin_version
     try:
-        r = requests.get(f"{base_url}/api/guest-polling/owners", params={"observer": observer_id}, timeout=timeout)
+        r = requests.get(f"{base_url}/api/guest-polling/owners", params=params, timeout=timeout)
         if r.status_code != 200:
             return None
         body = r.json()
     except (requests.RequestException, ValueError):
         return None
-    nodes = body.get("nodes") if isinstance(body, dict) else None
-    return nodes if isinstance(nodes, dict) else None
+    if not isinstance(body, dict) or not isinstance(body.get("nodes"), dict):
+        return None
+    return body
+
+
+# -- community polling (CoreScope policy, owners with roles, monitors) --------
+#
+# Each helper returns (status, body): status is the HTTP status, or 0 when
+# CoreScope couldn't be reached (or answered something that isn't JSON). The
+# caller tells "this CoreScope doesn't have it" (404) from "CoreScope is down"
+# (0) because they fail safe differently.
+
+def corescope_get(base_url: str, path: str, params: dict | None = None, *,
+                  timeout: float = 5.0) -> tuple[int, Any]:
+    if not base_url:
+        return 0, None
+    try:
+        r = requests.get(f"{base_url}{path}", params=params or {}, timeout=timeout)
+    except requests.RequestException:
+        return 0, None
+    if r.status_code != 200:
+        return r.status_code, None
+    try:
+        return 200, r.json()
+    except ValueError:
+        return 0, None
+
+
+def corescope_policy(base_url: str, observer_id: str, plugin_version: str, *,
+                     timeout: float = 5.0) -> tuple[int, dict | None]:
+    """GET /api/guest-polling/policy for this observer and plugin version."""
+    params = {"plugin_version": plugin_version}
+    if observer_id:
+        params["observer"] = observer_id
+    status, body = corescope_get(base_url, "/api/guest-polling/policy", params, timeout=timeout)
+    if status == 200 and not isinstance(body, dict):
+        return 0, None
+    return status, body
+
+
+def corescope_monitors(base_url: str, node_id: str, plugin_version: str, *,
+                       timeout: float = 5.0) -> tuple[int, dict | None]:
+    """GET /api/nodes/{pk}/monitors: every observer that claims the repeater."""
+    status, body = corescope_get(base_url, f"/api/nodes/{node_id}/monitors",
+                                 {"plugin_version": plugin_version}, timeout=timeout)
+    if status == 200 and not isinstance(body, dict):
+        return 0, None
+    return status, body
+
+
+def corescope_battery_check(base_url: str, node_id: str, *, timeout: float = 5.0) -> tuple[bool, dict]:
+    """The freshness check: (reachable, {latest_ts, by}). Unlike
+    corescope_latest_battery_ts this tells "no reading yet" (reachable, no
+    latest_ts) from "CoreScope is down" (not reachable)."""
+    status, body = corescope_get(base_url, f"/api/nodes/{node_id}/battery", {"days": 1}, timeout=timeout)
+    if status == 404:
+        return True, {"latest_ts": None, "by": ""}  # CoreScope has no such node: nothing fresh
+    if status != 200 or not isinstance(body, dict):
+        return False, {}
+    sel = body.get("selected") if isinstance(body.get("selected"), dict) else {}
+    ts = body.get("latest_ts")
+    return True, {"latest_ts": ts if isinstance(ts, str) and ts else None,
+                  "by": str(sel.get("observer_name") or "")}
