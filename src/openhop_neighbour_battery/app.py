@@ -82,6 +82,8 @@ class App:
         self._own_key: sk.SharedKey | None = None  # this observer's polling key (guest_key.py)
         self._owners: dict = {"at": 0.0, "ok_at": 0.0, "nodes": {}}  # who polls which repeater (CoreScope)
         self._last_scheduled = 0.0  # when the last scheduled poll finished (scheduled_gap_s)
+        self._started_at = time.time()  # scheduled polls wait for CoreScope's word first (_starting)
+        self._claims_sent_at = 0.0  # when this run last published a claim
         # CoreScope's polling policy (limits and switches), kept in state.json.
         self.community = Community(self.state.value.setdefault("community", {}), __version__)
         self._policy_tried = 0.0
@@ -388,6 +390,22 @@ class App:
                     "owner_hops": o.get("owner_hops")}
         return {"role": "poller"}
 
+    def _startup_hold_s(self) -> float:
+        return 2 * timings().refresh_s + 60
+
+    def _starting(self, now: float) -> bool:
+        """Whether scheduled polls still wait after a start: until CoreScope
+        holds this observer's claim and has said who polls what since, or the
+        hold runs out (CoreScope unreachable). Only with community polling."""
+        if not self.settings.community or not self.settings.corescope_url:
+            return False
+        if now - self._started_at >= self._startup_hold_s():
+            return False
+        claimed = self._claims_sent_at > 0 or (
+            now - float(self.state.value.get("claims_at") or 0) < timings().claims_every_s)
+        heard = float(self._owners.get("ok_at") or 0) > max(self._started_at, self._claims_sent_at)
+        return not (claimed and heard)
+
     def _skip(self, st: dict, reason: str, text: str, now: float, **extra) -> dict:
         skip = {"reason": reason, "text": text, "at": now, **extra}
         st["skip"] = skip
@@ -426,7 +444,16 @@ class App:
             return self._skip(st, role["role"], "CoreScope has paused polling" if role["role"] == "paused"
                               else "CoreScope has disabled this observer", now)
         standby = role["role"] == "standby"
+        if standby:
+            st.setdefault("standby_since", now)
+        else:
+            st.pop("standby_since", None)
         hops = role.get("owner_hops")
+        if mode == "scheduled" and self._starting(now):
+            # Just started: claim and hear who polls what before asking
+            # anything, so stations restarting together don't all ask at once.
+            # No next_due_at: polls start on the first tick after CoreScope answers.
+            return self._skip(st, "starting", "waiting to hear from CoreScope who polls it", now)
         by_text = (f"{role.get('by') or 'another observer'} polls it"
                    + (" (direct)" if hops == 0 else " (1 hop)" if hops == 1 else ""))
         if mode == "stale" and now - float(st.get("last_success") or 0) < window:
@@ -444,6 +471,17 @@ class App:
                                   now, by=role.get("by"), owner_hops=hops)
             return None  # the poller fails open
         latest = iso_ts(snap.get("latest_ts"))
+        owner_latest = iso_ts(((self._owners.get("nodes") or {}).get(node_id) or {}).get("latest_ts"))
+        if owner_latest is not None and (latest is None or owner_latest > latest):
+            latest = owner_latest
+        if latest is None and standby:
+            # No reading anywhere yet: give the poller one window plus grace
+            # from when this observer went on standby before stepping in.
+            until = float(st["standby_since"]) + wait
+            if now < until:
+                st["next_due_at"] = until
+                return self._skip(st, "standby", f"{by_text}; you're standby", now, by=role.get("by"),
+                                  owner_hops=hops, until=until)
         if latest is not None and now - latest < wait:
             st["next_due_at"] = latest + wait
             st["fresh_at"], st["fresh_by"] = latest, snap.get("by") or ""
@@ -711,6 +749,8 @@ class App:
                 LOG.warning("polling claim to %s failed: %s", name, exc)
         if sent:
             sv.update(claims_at=now, claims_sig=sig, claims_community=community, claims_count=len(claims))
+            self._claims_sent_at = now
+            self._owners["at"] = 0.0  # ask who polls what again now CoreScope has the claim
             self.state.save()
 
     def flush(self) -> None:

@@ -194,10 +194,14 @@ def lpp_voltage_mv(data: bytes) -> int | None:
 
 
 def lpp_temperature(data: bytes) -> float | None:
-    """The repeater's own temperature (channel 1) in °C, or None if it sent none."""
+    """The repeater's own temperature (channel 1) in °C, or None if it sent none.
+
+    A board without a sensor can still send the field: -128 °C is MeshCore's
+    "no reading", so anything outside what a chip could report is no reading."""
     for channel, kind, raw in parse_lpp(data):
         if channel == TELEM_CHANNEL_SELF and kind == LPP_TEMPERATURE:
-            return struct.unpack(">h", raw)[0] / 10
+            c = struct.unpack(">h", raw)[0] / 10
+            return c if -60.0 <= c <= 125.0 else None
     return None
 
 

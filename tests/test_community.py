@@ -644,3 +644,69 @@ def test_battery_check_helper_tells_down_from_empty(monkeypatch):
                                                "selected": {"observer_name": "Montrave"}}))
     assert openhop.corescope_battery_check("https://cs", NODE) == \
         (True, {"latest_ts": "2026-11-01T10:00:00Z", "by": "Montrave"})
+
+
+# -- found on the MeshBench bench ----------------------------------------------
+
+def test_standby_with_no_reading_anywhere_gives_the_poller_a_window_first(tmp_path, fake, monkeypatch, sent):
+    # CoreScope has no reading yet (a new repeater): a standby must not step
+    # in at once, or every standby polls alongside the poller.
+    serve_owners(monkeypatch, {NODE: {"owner": "ee" * 32, "owner_name": "Montrave", "mine": False,
+                                      "role": "standby", "owner_hops": 0}})
+    serve_latest(monkeypatch, None)
+    a, _ = ready(tmp_path, fake, monkeypatch)
+    assert a.poll([NODE]) == [] and sent == []
+    st = a.state.node(NODE)
+    assert st["skip"]["reason"] == "standby"
+    assert abs(st["next_due_at"] - (st["standby_since"] + 3600 + 1800)) < 1
+    # Window plus grace on standby and still nothing: step in.
+    st["standby_since"] -= 3600 + 1800 + 1
+    st.pop("next_due_at")
+    a._last_scheduled = 0
+    a.poll([NODE])
+    assert sent == [NODE]
+
+
+def test_owners_latest_reading_counts_when_the_battery_lookup_has_none(tmp_path, fake, monkeypatch, sent):
+    now = time.time()
+    serve_owners(monkeypatch, {NODE: {"owner": "ee" * 32, "owner_name": "Montrave", "mine": False,
+                                      "role": "standby", "owner_hops": 0, "latest_ts": utc_iso(now - 600)}})
+    serve_latest(monkeypatch, None)
+    a, _ = ready(tmp_path, fake, monkeypatch)
+    a.state.node(NODE)["standby_since"] = now - 10 * 3600
+    assert a.poll([NODE]) == [] and sent == []
+    assert abs(a.state.node(NODE)["next_due_at"] - (now - 600 + 3600 + 1800)) < 5
+
+
+@pytest.mark.startup_hold
+def test_after_a_start_scheduled_polls_wait_for_the_claim_and_owners(tmp_path, fake, monkeypatch, sent):
+    owners_calls = []
+    serve_owners(monkeypatch, {}, calls=owners_calls)
+    serve_latest(monkeypatch, None)
+    a, _ = ready(tmp_path, fake, monkeypatch)
+    assert a.poll([NODE]) == [] and sent == []
+    assert a.state.node(NODE)["skip"]["reason"] == "starting"
+    # The claim goes out and CoreScope answers after it: polling starts.
+    a._claims_sent_at = time.time()
+    a._owners["at"] = 0.0
+    a.owners(time.time() + 1)
+    a._last_scheduled = 0
+    a.poll([NODE])
+    assert sent == [NODE]
+
+
+@pytest.mark.startup_hold
+def test_the_startup_hold_runs_out_if_corescope_never_answers(tmp_path, fake, monkeypatch, sent):
+    serve_latest(monkeypatch, None, reachable=False)
+    a, _ = ready(tmp_path, fake, monkeypatch)
+    a._started_at -= a._startup_hold_s() + 1
+    a.poll([NODE])
+    assert sent == [NODE]
+
+
+def test_no_sensor_temperature_is_no_reading():
+    import struct
+    from openhop_neighbour_battery.companion import lpp_temperature
+    lpp = lambda c: bytes([1, 103]) + struct.pack(">h", int(c * 10))
+    assert lpp_temperature(lpp(-128.0)) is None
+    assert lpp_temperature(lpp(16.5)) == 16.5

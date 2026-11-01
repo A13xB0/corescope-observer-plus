@@ -15,3 +15,17 @@ def offline_corescope(monkeypatch):
     monkeypatch.setattr(app_mod, "corescope_battery_check", lambda url, nid, **k: (False, {}))
     monkeypatch.setattr(app_mod, "corescope_owners", lambda url, obs, **k: None)
     monkeypatch.setattr(app_mod, "corescope_monitors", lambda url, nid, ver, **k: (0, None))
+
+
+@pytest.fixture(autouse=True)
+def no_startup_hold(request, monkeypatch):
+    """Scheduled polls in tests start at once; the startup hold has its own
+    tests (marked startup_hold)."""
+    if request.node.get_closest_marker("startup_hold"):
+        return
+    from openhop_neighbour_battery.app import App
+    monkeypatch.setattr(App, "_starting", lambda self, now: False)
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "startup_hold: keep the plugin's startup hold on")
