@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openhop-corescope-observer-plus-plugin"
-version = "0.11.0"
+version = "0.11.1"
 description = "openHop plugin: community repeater polling for CoreScope, shared between observers"
 readme = "README.md"
 requires-python = ">=3.10"

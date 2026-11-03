@@ -19,6 +19,16 @@
     </header>
 
     <div id="notice" class="notice" role="status" aria-live="polite"></div>
+    <form id="login-card" class="notice warn login" hidden>
+      <b>Sign in to openHop</b>
+      <span class="small">This page can't use the dashboard's sign-in here, which happens on an iPad home-screen app or in private browsing. Sign in with your dashboard login.</span>
+      <div class="login-row">
+        <input id="login-user" type="text" autocomplete="username" placeholder="Username" value="admin" aria-label="Username">
+        <input id="login-pass" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password">
+        <button class="btn primary sm" type="submit">Sign in</button>
+      </div>
+      <span id="login-error" class="small bad" role="alert"></span>
+    </form>
     <div id="community-notice" class="notice" role="status" aria-live="polite" hidden></div>
     <div id="setup-notice" class="notice warn" hidden>
       <b>Connect to openHop to start polling.</b>

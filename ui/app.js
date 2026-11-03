@@ -32,9 +32,28 @@
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+  // The dashboard keeps its sign-in in localStorage under these names. A tab
+  // that can't see them (an iPad home-screen app opens this page in Safari;
+  // private tabs don't share storage) signs in itself with the login card.
+  const TOKEN_KEY = "pymc_jwt_token";
+  const CLIENT_KEY = "pymc_client_id";
+  let sessionToken = "";  // when localStorage can't be written
+
   function jwt() {
-    try { return window.localStorage.getItem("pymc_jwt_token") || ""; } catch (_) { return ""; }
+    try { return window.localStorage.getItem(TOKEN_KEY) || sessionToken; } catch (_) { return sessionToken; }
   }
+
+  function clientId() {
+    try {
+      let id = window.localStorage.getItem(CLIENT_KEY);
+      if (!id) { id = `${Date.now()}-${Math.random().toString(36).slice(2, 15)}`; window.localStorage.setItem(CLIENT_KEY, id); }
+      return id;
+    } catch (_) {
+      return `plugin-${Date.now()}`;
+    }
+  }
+
+  class AuthError extends Error {}
 
   async function call(url, options = {}) {
     const headers = new Headers(options.headers || {});
@@ -42,7 +61,7 @@
     const token = jwt();
     if (token) headers.set("Authorization", `Bearer ${token}`);
     const r = await fetch(url, { ...options, headers });
-    if (r.status === 401) throw new Error("Log in to the openHop dashboard again, then reopen this page.");
+    if (r.status === 401) throw new AuthError("Sign in to openHop above, then try again.");
     const body = await r.json().catch(() => ({}));
     if (!r.ok || body.success === false) throw new Error(body.error || `HTTP ${r.status}`);
     return body;
@@ -1385,6 +1404,33 @@
     try { await saveAll(); } catch (e) { saveStatus(`Not saved: ${e.message}`, "bad"); }
   });
 
+  function showLogin(show) {
+    const opening = show && $("login-card").hidden;
+    $("login-card").hidden = !show;
+    if (opening) $("login-pass").focus();
+  }
+
+  $("login-card").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    $("login-error").textContent = "";
+    try {
+      const r = await fetch("/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ username: $("login-user").value.trim(), password: $("login-pass").value, client_id: clientId() }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || !body.token) throw new Error(body.error || "Wrong username or password.");
+      try { window.localStorage.setItem(TOKEN_KEY, body.token); } catch (_) { sessionToken = body.token; }
+      $("login-pass").value = "";
+      showLogin(false);
+      notice("");
+      refresh();
+    } catch (e) {
+      $("login-error").textContent = e.message;
+    }
+  });
+
   async function refresh() {
     try {
       await loadRuntime();
@@ -1400,7 +1446,9 @@
         const open = (runtime.nodes || []).find((x) => x.node_id === detailsTarget);
         if (open) fillFacts(open); else closeDetails();
       }
+      showLogin(false);
     } catch (e) {
+      if (e instanceof AuthError) { showLogin(true); return; }
       notice(e.message, "bad");
     }
   }
